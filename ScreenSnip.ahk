@@ -2,9 +2,9 @@
 ; Based on Snipper by Fanatic Guru 
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ; Adapted and simplified by kunkel321 / Claude
-;
-; Github 
-; AHK Forum 
+; Version date: 6-14-2026
+; Github https://github.com/kunkel321/ScreenSnip
+; AHK Forum https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140802
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ;
