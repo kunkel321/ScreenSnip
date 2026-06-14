@@ -59,10 +59,20 @@ BorderColorInactive := '0x2d2d55'   ; soft blue
 ; Border thickness in pixels (applied as Gui margin on each side).
 BorderThickness := 1
 
-; Position of the W x H label during selection, measured from the
-; bottom-right corner of the selection rectangle (in pixels).
-InfoWHOffsetRight  := 133
-InfoWHOffsetBottom := 45
+; Position of the W and H labels during selection.
+; InfoWHOffsetRight  — inset from the right edge for the H (height) label.
+; InfoWHOffsetBottom — inset from the bottom edge for the W (width) label.
+InfoWHOffsetRight  := 55
+InfoWHOffsetBottom := 40
+
+; Font size (points) for the W and H dimension labels during selection.
+InfoFontSize := 10
+
+; Minimum selection size (pixels) before each label appears.
+; InfoWMinWidth  — selection must be at least this wide to show the W label.
+; InfoHMinHeight — selection must be at least this tall to show the H label.
+InfoWMinWidth  := 60
+InfoHMinHeight := 25
 
 ; Transparent color key used to hide the corners of rotated snips.
 ; '' = auto-detect from center pixel brightness (recommended).
@@ -665,8 +675,11 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
             WinSetTransparent(Transparent, guiSSR)
         else
             WinSetTransparent(Transparent, guiSSR.Background)
-        guiSSR.InfoWH := guiSSR.Add('Text', 'Background0xDDDDDD w110 h22 Center', '')
-        guiSSR.InfoWH.SetFont('s14 bold c101010', 'Arial')
+        global InfoFontSize
+        guiSSR.InfoW := guiSSR.Add('Text', 'Background0xDDDDDD w55 h22 Center', '')
+        guiSSR.InfoW.SetFont('s' InfoFontSize ' bold c101010', 'Courier New')
+        guiSSR.InfoH := guiSSR.Add('Text', 'Background0xDDDDDD w55 h22 Right', '')
+        guiSSR.InfoH.SetFont('s' InfoFontSize ' bold c101010', 'Courier New')
     }
 
     CoordMode('Mouse', 'Screen')
@@ -680,24 +693,40 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
         X := Min(sX, eX),  Y := Min(sY, eY)
         guiSSR.Move(X, Y, W, H)
         guiSSR.Background.Redraw()   ; keep the overlay painted consistently
-        ; Show dimensions near bottom-right, inset enough to stay fully inside
-        if (W > 120 && H > 35) && (W != Wprev || H != Hprev) {
-            global InfoWHOffsetRight, InfoWHOffsetBottom
-            guiSSR.InfoWH.Text := W 'x' H
-            ; 40px up from bottom, 118px from right — fully inside the rectangle
-            guiSSR.InfoWH.Move(W - InfoWHOffsetRight, H - InfoWHOffsetBottom, 110, 22)
-            guiSSR.InfoWH.Visible := true
+        ; Show width on bottom edge (centered) and height on right edge (centered).
+        ; Each control is shown/hidden independently based on its own threshold.
+        if (W != Wprev || H != Hprev) {
+            global InfoWHOffsetRight, InfoWHOffsetBottom, InfoFontSize, InfoWMinWidth, InfoHMinHeight
+            ; Dynamic control width: font-scaled px per digit + 12px padding.
+            ; Courier New bold: ~0.72px per pt per digit is a reliable approximation.
+            pxPerDigit := Round(InfoFontSize * 0.72)
+            wDigits  := StrLen(String(W))
+            hDigits  := StrLen(String(H))
+            ctrlWofW := Max(30, wDigits * pxPerDigit + 12)   ; width of the InfoW control
+            ctrlWofH := Max(30, hDigits * pxPerDigit + 12)   ; width of the InfoH control
+            if (W > InfoWMinWidth) {
+                guiSSR.InfoW.Text := W
+                guiSSR.InfoW.Move(W // 2 - ctrlWofW // 2, H - InfoWHOffsetBottom, ctrlWofW, 22)
+                guiSSR.InfoW.Visible := true
+            } else {
+                guiSSR.InfoW.Visible := false
+            }
+            if (H > InfoHMinHeight) {
+                guiSSR.InfoH.Text := H
+                guiSSR.InfoH.Move(W - InfoWHOffsetRight, H // 2 - 11, ctrlWofH, 22)
+                guiSSR.InfoH.Visible := true
+            } else {
+                guiSSR.InfoH.Visible := false
+            }
             Wprev := W, Hprev := H
-        } else if (W <= 120 || H <= 35) {
-            guiSSR.InfoWH.Visible := false
-            Wprev := Hprev := 0
         }
         Sleep 10
     } Until !GetKeyState(Key, 'p')
 
     guiSSR.GetPos(&X, &Y, &W, &H)
     guiSSR.Hide()
-    guiSSR.InfoWH.Visible := false
+    guiSSR.InfoW.Visible := false
+    guiSSR.InfoH.Visible := false
     return { X: X, Y: Y, W: W, H: H, X2: X+W, Y2: Y+H }
 }
 
