@@ -1,10 +1,13 @@
-; ScreenSnip.ahk
-; Based on Snipper by Fanatic Guru 
-; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
-; Adapted and simplified by kunkel321 / Claude
-; Version date: 6-14-2026
+;               ScreenSnip.ahk
+;
 ; Github https://github.com/kunkel321/ScreenSnip
 ; AHK Forum https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140802
+;
+; Based on Snipper by FanaticGuru 
+; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
+;
+; Adapted and simplified by kunkel321 / Claude
+; Version date: 6-19-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ;
@@ -62,8 +65,8 @@ BorderThickness := 1
 ; Position of the W and H labels during selection.
 ; InfoWHOffsetRight  — inset from the right edge for the H (height) label.
 ; InfoWHOffsetBottom — inset from the bottom edge for the W (width) label.
-InfoWHOffsetRight  := 55
-InfoWHOffsetBottom := 40
+InfoWHOffsetRight  := 38
+InfoWHOffsetBottom := 25
 
 ; Font size (points) for the W and H dimension labels during selection.
 InfoFontSize := 10
@@ -75,9 +78,10 @@ InfoWMinWidth  := 60
 InfoHMinHeight := 25
 
 ; Transparent color key used to hide the corners of rotated snips.
-; '' = auto-detect from center pixel brightness (recommended).
-; '0x000000' = always use black.   '0xFFFFFF' = always use white.
-TransColor := ''
+; Always magenta — chosen because it almost never appears naturally in
+; screen captures, avoiding accidental transparency within the image.
+TransColor := 0xFF00FF
+; Known issue:  This causes an annoyging one-pixel magenta halo when rotating -- yuck. 
 
 ; Hotkey cheat sheet — shown via F1 or right-click menu > Help.
 HelpText := "
@@ -243,11 +247,8 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     if SetClipboard
         GDIp.SetBitmapToClipboard(pBitmap)
 
-    ; Choose the transparent color key — auto-detect from center pixel if not overridden.
-    ; Black blends invisibly with dark image edges; white with bright edges.
-    snipTransColor := (TransColor != '')
-        ? Integer(TransColor)
-        : GDIp.PickTransColor(pBitmap)
+    ; Transparent color key for the corners — always the fixed TransColor.
+    snipTransColor := Integer(TransColor)
 
     g := Gui('-Caption +AlwaysOnTop +OwnDialogs +E0x80000', 'SnipperWindow')
 
@@ -666,7 +667,7 @@ ToggleSnipBorder(Hwnd) {
 SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
     static guiSSR
     if !IsSet(guiSSR) {
-        guiSSR := Gui('+AlwaysOnTop -Caption +Border +ToolWindow +LastFound -DPIScale +Resize', 'SnipperSelect')
+        guiSSR := Gui('+AlwaysOnTop -Caption +ToolWindow +LastFound -DPIScale', 'SnipperSelect')
         guiSSR.MarginX := 0, guiSSR.MarginY := 0
         guiSSR.BackColor := 1
         WinSetTransColor(1, guiSSR)
@@ -684,7 +685,7 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
 
     CoordMode('Mouse', 'Screen')
     MouseGetPos(&sX, &sY)
-    guiSSR.Show('x' sX ' y' sY ' w10 h10')
+    guiSSR.Show('NA x' sX ' y' sY ' w10 h10')
 
     Wprev := Hprev := 0
     Loop {
@@ -866,12 +867,12 @@ Class GDIp {
     }
 
     ; Rotate pBitmap by angleDeg degrees, returning a new bounding-box sized
-    ; bitmap with magenta (0xFFFF00FF) fill in the corners so they disappear
-    ; via the WinSetTransColor key on the snip window.
+    ; bitmap with the transparent color key filled into the corners so they
+    ; disappear via SetLayeredWinAttribs on the snip window.
     ; The canvas is padded by 1px on each side so antialiased edge pixels
-    ; blend inward into the image rather than outward into the magenta,
-    ; preventing the 1px pink fringe that would otherwise appear.
-    Static RotateBitmap(pBitmap, angleDeg, transColor := 0x000000) {
+    ; blend inward into the image rather than outward into the trans color,
+    ; preventing a 1px color fringe that would otherwise appear.
+    Static RotateBitmap(pBitmap, angleDeg, transColor := 0xFF00FF) {
         ; Get original dimensions
         DllCall('gdiplus\GdipGetImageWidth',  'UPtr', pBitmap, 'UInt*', &origW := 0)
         DllCall('gdiplus\GdipGetImageHeight', 'UPtr', pBitmap, 'UInt*', &origH := 0)
@@ -890,9 +891,8 @@ Class GDIp {
         ; Get graphics context for the new bitmap
         DllCall('gdiplus\GdipGetImageGraphicsContext', 'UPtr', pNew, 'UPtr*', &pGfx := 0)
 
-        ; Fill background with the trans color — antialiased edge pixels blend
-        ; toward this color rather than magenta, minimising fringe visibility.
-        ; Black blends with dark edges, white with bright edges.
+        ; Fill background with the trans color so antialiased edge pixels
+        ; blend toward it rather than leaving a hard, mismatched edge.
         fillColor := 0xFF000000 | transColor   ; GDI+ ARGB: full opacity + RGB
         DllCall('gdiplus\GdipCreateSolidFill', 'UInt', fillColor, 'UPtr*', &pBrush := 0)
         DllCall('gdiplus\GdipFillRectangleI', 'UPtr', pGfx, 'UPtr', pBrush,
@@ -920,21 +920,6 @@ Class GDIp {
 
         DllCall('gdiplus\GdipDeleteGraphics', 'UPtr', pGfx)
         return pNew
-    }
-
-    ; Sample the center pixel of pBitmap and return 0x000000 (black) if bright,
-    ; 0xFFFFFF (white) if dark — for use as the transparent color key so that
-    ; antialiased rotation edges blend toward a matching neutral tone.
-    Static PickTransColor(pBitmap) {
-        DllCall('gdiplus\GdipGetImageWidth',  'UPtr', pBitmap, 'UInt*', &w := 0)
-        DllCall('gdiplus\GdipGetImageHeight', 'UPtr', pBitmap, 'UInt*', &h := 0)
-        DllCall('gdiplus\GdipBitmapGetPixel', 'UPtr', pBitmap,
-                'Int', w // 2, 'Int', h // 2, 'UInt*', &argb := 0)
-        r := (argb >> 16) & 0xFF
-        g := (argb >>  8) & 0xFF
-        b :=  argb        & 0xFF
-        brightness := (r * 299 + g * 587 + b * 114) / 1000
-        return (brightness >= 128) ? 0x000000 : 0xFFFFFF
     }
 
     ; Apply a rotate/flip transform and return a new pBitmap.
