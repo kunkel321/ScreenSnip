@@ -50,17 +50,33 @@ SelectionColor := 'b58500'
 ; Show a colored border around each floating snip?
 ; true = show border,  false = no border (image only, fully borderless)
 ShowSnipBorder := true
+; Note: Border is not shown during rotations other than 90, 180, or 90 CCW. 
 
-; Border color when the snip is active/focused.
-; Automatically matches SelectionColor so the UI feels cohesive.
-; Change to any color string to override (e.g. '0x00AA00', 'Teal').
-BorderColorActive := SelectionColor
-
-; Border color when the snip is inactive (not focused).
-BorderColorInactive := '0x2d2d55'   ; soft blue
+; Border color for floating snips. Any AHK color name or hex value
+; (e.g. 'Lime', '0x2d2d55'). Automatically matches SelectionColor by
+; default so the UI feels cohesive — override to any color you like.
+BorderColor := SelectionColor
 
 ; Border thickness in pixels (applied as Gui margin on each side).
-BorderThickness := 1
+BorderThickness := 2
+
+; Give the snip border a 3D "floating" bevel look — top/left edges lighter,
+; bottom/right edges darker, both derived from the same border color.
+; Looks best with thin borders (1-2px); automatically disabled above
+; Bevel3DMaxThickness since thick beveled frames tend to look chunky/odd.
+Bevel3D           := true
+Bevel3DMaxThickness := 2
+; How much lighter/darker the bevel edges are, 0.0-1.0 (fraction blended
+; toward white for the light edges, toward black for the dark edges).
+; Active and inactive snips use the same bevel strength/contrast — the
+; difference between them comes from Bevel3DInactiveDarknessFactor below.
+Bevel3DStrength         := 0.55
+Bevel3DInactiveStrength := 0.55
+; How much darker BOTH bevel edges (light and dark) get on an inactive
+; (unfocused) snip, 0.0-1.0. E.g. 0.2 = both edges are 20% darker than
+; they'd be on the active snip — same contrast/shape, just dimmed overall,
+; which gives a focus cue without needing a second border color.
+Bevel3DInactiveDarknessFactor := 0.2
 
 ; Position of the W and H labels during selection.
 ; InfoWHOffsetRight  — inset from the right edge for the H (height) label.
@@ -74,14 +90,15 @@ InfoFontSize := 10
 ; Minimum selection size (pixels) before each label appears.
 ; InfoWMinWidth  — selection must be at least this wide to show the W label.
 ; InfoHMinHeight — selection must be at least this tall to show the H label.
-InfoWMinWidth  := 60
-InfoHMinHeight := 25
+InfoWMinWidth  := 75
+InfoHMinHeight := 55
 
 ; Transparent color key used to hide the corners of rotated snips.
 ; Always magenta — chosen because it almost never appears naturally in
 ; screen captures, avoiding accidental transparency within the image.
 TransColor := 0xFF00FF
-; Known issue:  This causes an annoyging one-pixel magenta halo when rotating -- yuck. 
+; Known issue: During rotation, at points other than 90, 180, or 90 CCW, 
+; an annoying magenta halo of pixels will appear around the edge of the snip.  
 
 ; Hotkey cheat sheet — shown via F1 or right-click menu > Help.
 HelpText := "
@@ -186,7 +203,8 @@ if ShowSnipBorder
 ; ── WM handlers (must be registered before hotkeys fire) ──────────────────────
 OnMessage(0x200, WM_MOUSEMOVE)    ; keep selection overlay from stealing focus
 OnMessage(0x201, WM_LBUTTONDOWN)  ; allow dragging snip windows
-OnMessage(0x6,   WM_ACTIVATE)     ; border colour on focus change
+OnMessage(0x000F, WM_PAINT_BEVEL) ; re-paint the 3D bevel after any repaint
+OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 
 ; ==============================================================================
 ; HOTKEYS
@@ -238,7 +256,7 @@ F1::            ShowHelp()
 ; Create a floating snip from a screen area.
 ; SetClipboard=true also puts the image on the clipboard.
 SnipArea(Area, SetClipboard, &ObjMap) {
-    global ShowSnipBorder, BorderThickness, BorderColorInactive, TransColor
+    global ShowSnipBorder, BorderThickness, BorderColor, TransColor
     pBitmap := GDIp.BitmapFromScreen(Area)
     ; Pin the bitmap's DPI to the screen DPI so it displays 1:1 pixel-perfect.
     dpi := A_ScreenDPI + 0.0
@@ -254,7 +272,7 @@ SnipArea(Area, SetClipboard, &ObjMap) {
 
     if ShowSnipBorder {
         g.MarginX := BorderThickness, g.MarginY := BorderThickness
-        g.BackColor := BorderColorInactive
+        g.BackColor := BorderColor
     } else {
         g.MarginX := 0, g.MarginY := 0
         g.BackColor := Format('0x{:06X}', snipTransColor)
@@ -266,6 +284,9 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     g.Pic := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
 
     g.Show('x' Area.X - picOffset ' y' Area.Y - picOffset)
+    global Bevel3D, Bevel3DMaxThickness
+    if (ShowSnipBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(g.Hwnd), BevelDarknessFor(g.Hwnd))
     ObjMap[g.Hwnd] := { GuiObj: g, Area: Area, Alpha: 255, pBitmap: pBitmap
                       , Angle: 0, HasBorder: ShowSnipBorder, TransColor: snipTransColor }
 
@@ -279,20 +300,22 @@ CloseSnip(Hwnd?) {
     if !IsSet(Hwnd)
         Hwnd := WinGetID('A')
     if guiSnips.Has(Hwnd) {
-        GDIp.DisposeImage(guiSnips[Hwnd].pBitmap)
-        guiSnips[Hwnd].GuiObj.Destroy()
-        guiSnips.Delete(Hwnd)
+        snip := guiSnips[Hwnd]
+        guiSnips.Delete(Hwnd)   ; remove first so in-flight handlers/timers bail out
+        GDIp.DisposeImage(snip.pBitmap)
+        snip.GuiObj.Destroy()
     }
 }
 
 ; Close every open snip.
 CloseAllSnips() {
     global guiSnips
-    for Hwnd, snip in guiSnips {
+    snipsToClose := guiSnips
+    guiSnips := Map()   ; clear first so in-flight handlers/timers bail out
+    for Hwnd, snip in snipsToClose {
         GDIp.DisposeImage(snip.pBitmap)
         snip.GuiObj.Destroy()
     }
-    guiSnips := Map()
 }
 
 ; Copy the image from a snip to the clipboard (no border).
@@ -329,7 +352,7 @@ AdjustSnipAlpha(delta) {
 ; Rotate the active snip by delta degrees (cumulative).
 ; Redraws from pBitmap each time to avoid quality loss from repeated transforms.
 AdjustSnipAngle(delta) {
-    global guiSnips, BorderThickness, BorderColorInactive
+    global guiSnips, BorderThickness, BorderColor
     hwnd := WinGetID('A')
     if !guiSnips.Has(hwnd)
         return
@@ -344,7 +367,7 @@ AdjustSnipAngle(delta) {
                 || snip.Angle = 180 || snip.Angle = 270)
     showBorder := snip.HasBorder && isCardinal
     if showBorder {
-        g.BackColor := BorderColorInactive
+        g.BackColor := BorderColor
         g.MarginX   := BorderThickness
         g.MarginY   := BorderThickness
     } else {
@@ -399,6 +422,10 @@ AdjustSnipAngle(delta) {
     DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)
     DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0,
             'UInt', 0x0085)   ; RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN
+
+    global Bevel3D, Bevel3DMaxThickness
+    if (showBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
 
     if snip.Alpha < 255
         SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
@@ -509,7 +536,7 @@ TransformSnip(Hwnd, Transform) {
     DllCall('gdiplus\GdipGetImageHeight', 'UPtr', newBitmap, 'UInt*', &newH := 0)
 
     ; Account for border in physical pixels
-    global ShowSnipBorder, BorderThickness, BorderColorActive
+    global ShowSnipBorder, BorderThickness, BorderColor
     scale      := A_ScreenDPI / 96
     physBorder := ShowSnipBorder ? Round(BorderThickness * scale) : 0
     totalW     := newW + physBorder * 2
@@ -536,9 +563,9 @@ TransformSnip(Hwnd, Transform) {
             'Int', newX, 'Int', newY, 'Int', totalW, 'Int', totalH,
             'UInt', 0x0014)   ; SWP_NOZORDER | SWP_NOACTIVATE
 
-    ; Flash active border color to confirm the transform
+    ; Restore the border (and bevel, if enabled) after the bitmap swap
     if ShowSnipBorder
-        SnipWinBorderColor(g, BorderColorActive)
+        SnipWinBorderColor(g, BorderColor)
 
     ; Re-apply transparency if it was set
     if snip.Alpha < 255
@@ -570,27 +597,185 @@ WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
     }
 }
 
-WM_ACTIVATE(wParam, lParam, msg, hwnd) {
-    global guiSnips, ShowSnipBorder, BorderColorActive, BorderColorInactive
-    if !ShowSnipBorder
+; Whenever a snip window repaints (focus change, drag, restore-from-minimize,
+; another window overlapping it, etc.) Windows redraws BackColor as a flat
+; fill, which would erase the 3D bevel. OnMessage callbacks run BEFORE the
+; default paint handling, not after — so drawing the bevel directly in this
+; callback gets immediately overwritten by the paint that follows. Instead,
+; queue the bevel redraw on a one-shot timer so it runs once the current
+; paint cycle has actually finished.
+WM_PAINT_BEVEL(wParam, lParam, msg, hwnd) {
+    global guiSnips, Bevel3D, Bevel3DMaxThickness, BorderThickness, BorderColor
+    static lastFire := Map()
+    if !Bevel3D || BorderThickness > Bevel3DMaxThickness
         return
-    if WinGetTitle('ahk_id ' hwnd) = 'SnipperWindow' && guiSnips.Has(hwnd) {
-        activated := (wParam & 0xFFFF) != 0
-        SnipWinBorderColor(guiSnips[hwnd].GuiObj
-            , activated ? BorderColorActive : BorderColorInactive)
-    }
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+    if !snip.HasBorder
+        return
+    ; Only at cardinal angles — non-cardinal suppresses the border entirely.
+    isCardinal := (snip.Angle = 0 || snip.Angle = 90 || snip.Angle = 180 || snip.Angle = 270)
+    if !isCardinal
+        return
+    ; Throttle: skip if we already queued a redraw for this window very recently
+    ; (rapid repaints during drags would otherwise stack up redundant timers).
+    now := A_TickCount
+    if (lastFire.Has(hwnd) && now - lastFire[hwnd] < 50)
+        return
+    lastFire[hwnd] := now
+    SetTimer(() => DrawSnipBevel(snip.GuiObj, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd)), -1)
 }
 
-; Set the border color of a snip (its Gui BackColor, visible around the Picture).
+; WM_ACTIVATE fires on both the window gaining focus AND the one losing it.
+; WM_PAINT isn't reliably sent to the window that just lost focus, so without
+; this hook a snip could keep its "active" bevel strength after focus moves
+; away. wParam low word: 0 = deactivated, nonzero = activated — either way
+; we just need to repaint with whatever strength is now correct for hwnd.
+WM_ACTIVATE_BEVEL(wParam, lParam, msg, hwnd) {
+    global guiSnips, Bevel3D, Bevel3DMaxThickness, BorderThickness, BorderColor
+    if !Bevel3D || BorderThickness > Bevel3DMaxThickness
+        return
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+    if !snip.HasBorder
+        return
+    isCardinal := (snip.Angle = 0 || snip.Angle = 90 || snip.Angle = 180 || snip.Angle = 270)
+    if !isCardinal
+        return
+    SetTimer(() => DrawSnipBevel(snip.GuiObj, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd)), -1)
+}
+
+; Pick the bevel strength to use for a given window — full strength when
+; it's the foreground (active/focused) window, weaker otherwise. This is
+; how we visually distinguish the focused snip without a second color.
+BevelStrengthFor(hwnd) {
+    global Bevel3DStrength, Bevel3DInactiveStrength
+    return (DllCall('GetForegroundWindow', 'Ptr') = hwnd)
+        ? Bevel3DStrength : Bevel3DInactiveStrength
+}
+
+; Pick the darkness factor to use for a given window — 0 (no dimming) when
+; active/focused, Bevel3DInactiveDarknessFactor otherwise.
+BevelDarknessFor(hwnd) {
+    global Bevel3DInactiveDarknessFactor
+    return (DllCall('GetForegroundWindow', 'Ptr') = hwnd)
+        ? 0 : Bevel3DInactiveDarknessFactor
+}
+
+; Set the border color of a snip (its Gui BackColor, visible around the
+; Picture). If Bevel3D is on and the border is thin enough, also paints a
+; light top/left + dark bottom/right bevel directly onto the window for a
+; pseudo-3D "floating" look. No extra gui/window is created — this draws
+; straight onto the snip's own client area using GDI.
 SnipWinBorderColor(g, Color) {
+    global Bevel3D, Bevel3DMaxThickness, BorderThickness
     g.BackColor := Color
+    if (Bevel3D && BorderThickness <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, Color, BorderThickness, BevelStrengthFor(g.Hwnd), BevelDarknessFor(g.Hwnd))
     WinRedraw(g.Hwnd)
+}
+
+; Resolve an AHK color value (named color, bare hex, or 0x-prefixed hex)
+; to a plain 0xRRGGBB integer. Covers the standard AHK GUI color names;
+; falls back to treating the string as hex either way.
+ColorToHex(colorVal) {
+    static names := Map(
+        'black', 0x000000, 'silver', 0xC0C0C0, 'gray', 0x808080, 'white', 0xFFFFFF,
+        'maroon', 0x800000, 'red', 0xFF0000, 'purple', 0x800080, 'fuchsia', 0xFF00FF,
+        'green', 0x008000, 'lime', 0x00FF00, 'olive', 0x808000, 'yellow', 0xFFFF00,
+        'navy', 0x000080, 'blue', 0x0000FF, 'teal', 0x008080, 'aqua', 0x00FFFF)
+    if (Type(colorVal) = 'Integer')
+        return colorVal
+    key := StrLower(Trim(colorVal))
+    if names.Has(key)
+        return names[key]
+    ; Bare hex (no 0x prefix) or already-prefixed — Integer() handles '0x..',
+    ; so prepend the prefix only when it's missing.
+    return Integer(InStr(key, '0x') = 1 ? key : '0x' key)
+}
+
+; Blend a color (named, bare hex, or 0x-hex) toward white (factor > 0) or
+; black (factor < 0). factor is -1.0..1.0 — e.g. 0.35 lightens 35% toward white.
+BlendColor(colorVal, factor) {
+    c := ColorToHex(colorVal)
+    r := (c >> 16) & 0xFF,  g := (c >> 8) & 0xFF,  b := c & 0xFF
+    target := (factor >= 0) ? 255 : 0
+    f := Abs(factor)
+    r := Round(r + (target - r) * f)
+    g := Round(g + (target - g) * f)
+    b := Round(b + (target - b) * f)
+    return (r << 16) | (g << 8) | b
+}
+
+; Draw a light top/left + dark bottom/right bevel frame directly onto the
+; snip window's client area, on top of the flat BackColor fill that's
+; already there. thickness is in logical px (BorderThickness); this scales
+; to physical px the same way the rest of the snip geometry does.
+; darknessFactor (0.0-1.0, default 0) additionally darkens BOTH the light
+; and dark edge colors by that fraction — used to dim an inactive snip's
+; bevel without changing its contrast/shape (see Bevel3DInactiveDarknessFactor).
+DrawSnipBevel(g, baseColorVal, thickness, strength, darknessFactor := 0) {
+    ; Defensive guard: the gui may have been destroyed between when this
+    ; call was queued (e.g. via SetTimer) and when it actually runs — most
+    ; commonly during "Close All Snips". g.Hwnd throws if the window is gone.
+    try
+        hwnd := g.Hwnd
+    catch
+        return
+    if !DllCall('IsWindow', 'Ptr', hwnd, 'Int')
+        return
+    scale := A_ScreenDPI / 96
+    t := Max(1, Round(thickness * scale))
+
+    rect := Buffer(16, 0)
+    DllCall('GetClientRect', 'Ptr', hwnd, 'Ptr', rect)
+    w := NumGet(rect, 8, 'Int'),  h := NumGet(rect, 12, 'Int')
+
+    lightColor := BlendColor(baseColorVal,  strength)
+    darkColor  := BlendColor(baseColorVal, -strength)
+    if (darknessFactor > 0) {
+        lightColor := BlendColor(lightColor, -darknessFactor)
+        darkColor  := BlendColor(darkColor,  -darknessFactor)
+    }
+
+    hdc := DllCall('GetDC', 'Ptr', hwnd, 'Ptr')
+
+    ; Top + left edges, lightened
+    hBrushLight := DllCall('CreateSolidBrush', 'UInt', _RGBSwap(lightColor), 'Ptr')
+    rcTop  := Buffer(16, 0)
+    NumPut('Int', 0, 'Int', 0, 'Int', w, 'Int', t, rcTop)
+    DllCall('FillRect', 'Ptr', hdc, 'Ptr', rcTop, 'Ptr', hBrushLight)
+    rcLeft := Buffer(16, 0)
+    NumPut('Int', 0, 'Int', 0, 'Int', t, 'Int', h, rcLeft)
+    DllCall('FillRect', 'Ptr', hdc, 'Ptr', rcLeft, 'Ptr', hBrushLight)
+    DllCall('DeleteObject', 'Ptr', hBrushLight)
+
+    ; Bottom + right edges, darkened
+    hBrushDark := DllCall('CreateSolidBrush', 'UInt', _RGBSwap(darkColor), 'Ptr')
+    rcBottom := Buffer(16, 0)
+    NumPut('Int', 0, 'Int', h - t, 'Int', w, 'Int', h, rcBottom)
+    DllCall('FillRect', 'Ptr', hdc, 'Ptr', rcBottom, 'Ptr', hBrushDark)
+    rcRight := Buffer(16, 0)
+    NumPut('Int', w - t, 'Int', 0, 'Int', w, 'Int', h, rcRight)
+    DllCall('FillRect', 'Ptr', hdc, 'Ptr', rcRight, 'Ptr', hBrushDark)
+    DllCall('DeleteObject', 'Ptr', hBrushDark)
+
+    DllCall('ReleaseDC', 'Ptr', hwnd, 'Ptr', hdc)
+}
+
+; Win32 GDI color refs are 0xBBGGRR, not 0xRRGGBB — swap byte order.
+_RGBSwap(colorHex) {
+    c := Integer(colorHex)
+    r := (c >> 16) & 0xFF,  g := (c >> 8) & 0xFF,  b := c & 0xFF
+    return (b << 16) | (g << 8) | r
 }
 
 ; Toggle border on/off for a single snip at runtime.
 ; Resizes the window in physical pixels to add/remove the border margin.
 ToggleSnipBorder(Hwnd) {
-    global guiSnips, SnipMenu, BorderThickness, BorderColorActive, BorderColorInactive
+    global guiSnips, SnipMenu, BorderThickness, BorderColor
     if !guiSnips.Has(Hwnd)
         return
     snip := guiSnips[Hwnd]
@@ -619,7 +804,7 @@ ToggleSnipBorder(Hwnd) {
         ; Turn border ON — expand window, inset picture, set border color
         snip.HasBorder := true
         SnipMenu.Check('Border')
-        g.BackColor := BorderColorInactive
+        g.BackColor := BorderColor
         g.Pic.Move(BorderThickness, BorderThickness)
         newW := curW + physBorder * 2
         newH := curH + physBorder * 2
@@ -631,6 +816,9 @@ ToggleSnipBorder(Hwnd) {
             'Int', newX, 'Int', newY, 'Int', newW, 'Int', newH,
             'UInt', 0x0014)   ; SWP_NOZORDER | SWP_NOACTIVATE
     SetLayeredWinAttribs(Hwnd, snip.TransColor, snip.Alpha)
+    global Bevel3D, Bevel3DMaxThickness
+    if (snip.HasBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(Hwnd), BevelDarknessFor(Hwnd))
     WinRedraw(Hwnd)
 }
 
@@ -672,10 +860,6 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
         guiSSR.BackColor := 1
         WinSetTransColor(1, guiSSR)
         guiSSR.Background := guiSSR.Add('Text', 'w' A_ScreenWidth ' h' A_ScreenHeight ' Background' Color)
-        if InStr(A_OSVersion, '6.1')   ; Windows 7
-            WinSetTransparent(Transparent, guiSSR)
-        else
-            WinSetTransparent(Transparent, guiSSR.Background)
         global InfoFontSize
         guiSSR.InfoW := guiSSR.Add('Text', 'Background0xDDDDDD w55 h22 Center', '')
         guiSSR.InfoW.SetFont('s' InfoFontSize ' bold c101010', 'Courier New')
@@ -687,13 +871,50 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
     MouseGetPos(&sX, &sY)
     guiSSR.Show('NA x' sX ' y' sY ' w10 h10')
 
+    ; Re-apply the overlay's alpha transparency every time, AFTER Show().
+    ; Showing/hiding a layered parent window (guiSSR itself is layered via
+    ; WinSetTransColor) can reset a layered CHILD control's own alpha
+    ; attributes — so setting this before Show() risks having it cleared
+    ; by the Show() call itself. Setting it after is cheap and harmless if
+    ; it was already correct, and self-heals the rare case where the
+    ; child's layered state didn't survive the show/hide cycle.
+    if InStr(A_OSVersion, '6.1')   ; Windows 7
+        WinSetTransparent(Transparent, guiSSR)
+    else
+        WinSetTransparent(Transparent, guiSSR.Background)
+
     Wprev := Hprev := 0
     Loop {
         MouseGetPos(&eX, &eY)
         W := Abs(sX - eX), H := Abs(sY - eY)
         X := Min(sX, eX),  Y := Min(sY, eY)
         guiSSR.Move(X, Y, W, H)
-        guiSSR.Background.Redraw()   ; keep the overlay painted consistently
+        ; NOTE: previously called guiSSR.Background.Redraw() here every
+        ; iteration "to keep the overlay painted consistently". Removed —
+        ; Move() already triggers the necessary repaint, and forcing an
+        ; extra redraw ~100x/sec on a layered/alpha-blended control is a
+        ; likely cause of the rare "rectangle turns invisible" glitch
+        ; (repeatedly hammering a layered window's compositing can
+        ; occasionally desync its alpha state). If the overlay ever stops
+        ; visually tracking the drag correctly, this is the first thing
+        ; to revisit.
+
+        ; Self-healing check: read back the Background control's actual
+        ; current layered alpha and re-apply WinSetTransparent only if it
+        ; has drifted from what it should be. WinSetTransparent's value
+        ; parameter IS the raw 0-255 alpha already (not a percentage), so
+        ; the expected value is just Transparent itself. This is a read
+        ; (cheap) rather than a forced re-set every frame, so it shouldn't
+        ; reintroduce the high-frequency-call problem the Redraw() removal
+        ; was meant to fix, while still catching a mid-drag desync if one
+        ; occurs.
+        if DllCall('GetLayeredWindowAttributes', 'Ptr', guiSSR.Background.Hwnd
+                   , 'Ptr', 0, 'UChar*', &curAlpha := 0, 'UInt*', 0)
+        {
+            if (curAlpha != Transparent)
+                WinSetTransparent(Transparent, guiSSR.Background)
+        }
+
         ; Show width on bottom edge (centered) and height on right edge (centered).
         ; Each control is shown/hidden independently based on its own threshold.
         if (W != Wprev || H != Hprev) {
