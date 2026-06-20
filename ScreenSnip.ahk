@@ -1,3 +1,9 @@
+#Requires AutoHotkey v2
+#Warn All, Off
+#SingleInstance Force
+DetectHiddenWindows true
+SetWinDelay(0)
+
 ;               ScreenSnip.ahk
 ;
 ; Github https://github.com/kunkel321/ScreenSnip
@@ -7,33 +13,39 @@
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted and simplified by kunkel321 / Claude
-; Version date: 6-19-2026
+; Version date: 6-20-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ;
-; Hotkeys:
-;   Ctrl + RButton drag             Capture region, create floating snip
-;   Ctrl + Shift + RButton drag     Also copy to clipboard
-;   Shift + PrintScreen           Toggle show / hide all snips
-;
-; Floating snip controls (snip window must be active/focused):
-;   Left-click drag               Move the snip
-;   Right-click                   Context menu (Copy / Rotate / Flip / Border / Close)
-;   Esc                           Close the snip
-;   Alt + Up/Down                 Adjust transparency (coarse ±25)
-;   Alt + Wheel                   Adjust transparency (fine ±10)
-;   Alt + Left/Right              Rotate ±1°
-;   Alt + Shift + Left/Right      Snap to next 30° increment (CW/CCW)
-;   Shift + Left/Right            Flip horizontal
-;   Shift + Up/Down               Flip vertical
-;   Ctrl + Arrow                  Nudge position ±1 px
-;   Ctrl + Shift + Arrow          Nudge position ±10 px
-;
-#Requires AutoHotkey v2
-#Warn All, Off
-#SingleInstance Force
-DetectHiddenWindows true
-SetWinDelay(0)
+; Hotkey cheat sheet — shown via F1 or right-click menu > Help.
+HelpText := "
+(
+  CAPTURING
+  Ctrl + RButton drag          Capture region
+  Ctrl + Shift + RButton drag  Capture + copy to clipboard
+  Shift + PrintScreen          Toggle show / hide all snips
+
+  SNIP CONTROLS  (snip window must be focused)
+  Left-click drag              Move
+  Right-click                  Context menu
+  Esc                          Close this snip
+
+  TRANSPARENCY
+  Alt + Up / Down              Adjust ±25
+  Alt + Wheel                  Adjust ±10
+
+  ROTATION
+  Alt + Left / Right           Rotate ±1°
+  Shift + Alt + Left / Right   Snap to next 30° (CW / CCW)
+
+  FLIP
+  Shift + Left / Right         Flip horizontal
+  Shift + Up / Down            Flip vertical
+
+  NUDGE POSITION
+  Ctrl + Arrow                 Move ±1 px
+  Ctrl + Shift + Arrow         Move ±10 px
+)"
 
 ; ── Globals ────────────────────────────────────────────────────────────────────
 global guiSnips    := Map()   ; hwnd → { GuiObj, Area }
@@ -65,7 +77,7 @@ BorderThickness := 2
 ; Looks best with thin borders (1-2px); automatically disabled above
 ; Bevel3DMaxThickness since thick beveled frames tend to look chunky/odd.
 Bevel3D           := true
-Bevel3DMaxThickness := 2
+Bevel3DMaxThickness := 3
 ; How much lighter/darker the bevel edges are, 0.0-1.0 (fraction blended
 ; toward white for the light edges, toward black for the dark edges).
 ; Active and inactive snips use the same bevel strength/contrast — the
@@ -76,7 +88,7 @@ Bevel3DInactiveStrength := 0.55
 ; (unfocused) snip, 0.0-1.0. E.g. 0.2 = both edges are 20% darker than
 ; they'd be on the active snip — same contrast/shape, just dimmed overall,
 ; which gives a focus cue without needing a second border color.
-Bevel3DInactiveDarknessFactor := 0.2
+Bevel3DInactiveDarknessFactor := 0.5
 
 ; Position of the W and H labels during selection.
 ; InfoWHOffsetRight  — inset from the right edge for the H (height) label.
@@ -99,36 +111,6 @@ InfoHMinHeight := 55
 TransColor := 0xFF00FF
 ; Known issue: During rotation, at points other than 90, 180, or 90 CCW, 
 ; an annoying magenta halo of pixels will appear around the edge of the snip.  
-
-; Hotkey cheat sheet — shown via F1 or right-click menu > Help.
-HelpText := "
-(
-  CAPTURING
-  Ctrl + RButton drag          Capture region
-  Ctrl + Shift + RButton drag  Capture + copy to clipboard
-  Shift + PrintScreen          Toggle show / hide all snips
-
-  SNIP CONTROLS  (snip window must be focused)
-  Left-click drag              Move
-  Right-click                  Context menu
-  Esc                          Close this snip
-
-  TRANSPARENCY
-  Alt + Up / Down              Adjust ±25
-  Alt + Wheel                  Adjust ±10
-
-  ROTATION
-  Alt + Left / Right           Rotate ±1°
-  Shift + Alt + Left / Right   Snap to next 30° (CW / CCW)
-
-  FLIP
-  Shift + Left / Right         Flip horizontal
-  Shift + Up / Down            Flip vertical
-
-  NUDGE POSITION
-  Ctrl + Arrow                 Move ±1 px
-  Ctrl + Shift + Arrow         Move ±10 px
-)"
 
 ; ══════════════════════════════════════════════════════════════════════════════
 
@@ -210,7 +192,7 @@ OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 ; HOTKEYS
 ; ==============================================================================
 
-^RButton:: {                       ; Ctrl + RButton drag — snip (+ clipboard if Shift held)
+*^RButton:: {                       ; Ctrl + RButton drag — snip (+ clipboard if Shift held)
     global guiSnips, SelectionColor
     Area := SelectScreenRegion('RButton', SelectionColor)
     if (Area.W > 8 && Area.H > 8)
@@ -283,7 +265,7 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     picOffset := ShowSnipBorder ? BorderThickness : 0
     g.Pic := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
 
-    g.Show('x' Area.X - picOffset ' y' Area.Y - picOffset)
+    g.Show('NA x' Area.X - picOffset ' y' Area.Y - picOffset)
     global Bevel3D, Bevel3DMaxThickness
     if (ShowSnipBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
         DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(g.Hwnd), BevelDarknessFor(g.Hwnd))
