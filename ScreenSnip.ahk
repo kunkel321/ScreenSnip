@@ -192,7 +192,8 @@ OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 ; HOTKEYS
 ; ==============================================================================
 
-*^RButton:: {                       ; Ctrl + RButton drag — snip (+ clipboard if Shift held)
+^+RButton::
+^RButton:: {                       ; Ctrl + RButton drag — snip (+ clipboard if Shift held)
     global guiSnips, SelectionColor
     Area := SelectScreenRegion('RButton', SelectionColor)
     if (Area.W > 8 && Area.H > 8)
