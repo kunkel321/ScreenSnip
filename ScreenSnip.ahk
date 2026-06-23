@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted and simplified by kunkel321 / Claude
-; Version date: 6-20-2026
+; Version date: 6-23-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ;
@@ -265,6 +265,13 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     hBitmap := GDIp.CreateHBITMAPFromBitmap(pBitmap)
     picOffset := ShowSnipBorder ? BorderThickness : 0
     g.Pic := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
+
+    ; Right-click context menu via the GUI's own ContextMenu event. This fires
+    ; on button-UP (so the menu opens with a normal click instead of needing
+    ; the button held) and runs in the context of the clicked window (so the
+    ; activation below isn't fighting the foreground lock the way the old
+    ; global ~RButton hotkey was). The event covers the Picture child too.
+    g.OnEvent('ContextMenu', ShowSnipMenu)
 
     g.Show('NA x' Area.X - picOffset ' y' Area.Y - picOffset)
     global Bevel3D, Bevel3DMaxThickness
@@ -805,30 +812,24 @@ ToggleSnipBorder(Hwnd) {
     WinRedraw(Hwnd)
 }
 
-~RButton:: {
+; Context-menu handler, wired to each snip's GUI via OnEvent('ContextMenu')
+; in SnipArea. Fires on right-button-UP within the snip window (or any of its
+; child controls), so the menu opens on a normal click without needing the
+; button held, and the WinActivate runs with foreground rights granted by the
+; click itself — both the reasons the old global ~RButton hotkey was flaky.
+; Signature: (GuiObj, Ctrl, Item, IsRightClick, X, Y) — we only need the Gui.
+ShowSnipMenu(GuiObj, *) {
     global guiSnips, SnipMenu
-    ; Ignore when Ctrl is held — that's the snip-drag hotkey, not a context menu request
-    if GetKeyState('Ctrl', 'P')
+    Hwnd := GuiObj.Hwnd
+    if !guiSnips.Has(Hwnd)
         return
-    MouseGetPos(, , &OutputVarWin)
-    title := WinGetTitle('ahk_id ' OutputVarWin)
-    targetHwnd := ''
-    if (title = 'SnipperWindow')
-        targetHwnd := OutputVarWin
-    else {
-        parent := DllCall("GetParent", "Ptr", OutputVarWin, "Ptr")
-        if guiSnips.Has(parent)
-            targetHwnd := parent
-    }
-    if (targetHwnd != '') {
-        SnipMenu._targetHwnd := targetHwnd
-        ; Sync Border checkmark to this snip's individual state
-        guiSnips[targetHwnd].HasBorder
-            ? SnipMenu.Check('Border')
-            : SnipMenu.UnCheck('Border')
-        WinActivate('ahk_id ' targetHwnd)
-        SnipMenu.Show()
-    }
+    SnipMenu._targetHwnd := Hwnd
+    ; Sync Border checkmark to this snip's individual state
+    guiSnips[Hwnd].HasBorder
+        ? SnipMenu.Check('Border')
+        : SnipMenu.UnCheck('Border')
+    WinActivate('ahk_id ' Hwnd)
+    SnipMenu.Show()
 }
 
 ; ==============================================================================
