@@ -13,13 +13,18 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted and simplified by kunkel321 / Claude
-; Version date: 6-23-2026
+; Version date: 7-6-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
+; Known issue:  Can't snip elevated windows unless ScreenSnip is also
+; running in elevated (admin) mode.  Top of SysTray Menu shows
+; "ScreenSnip (admin)" when running in admin mode.  See also help dialog.
 ;
 ; Hotkey cheat sheet — shown via F1 or right-click menu > Help.
-HelpText := "
+HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admin.`n"
+. "
 (
+  ------------------------------------------------
   CAPTURING
   Ctrl + RButton drag          Capture region
   Ctrl + Shift + RButton drag  Capture + copy to clipboard
@@ -119,16 +124,43 @@ Try DllCall("SetThreadDpiAwarenessContext", "ptr", -3, "ptr")
 
 ; ── GDI+ stays alive for the entire session ────────────────────────────────────
 GDIp.Startup()
-OnExit((*) => GDIp.Shutdown())
+OnExit(CleanupOnExit)
+
+; Diagnostic: capture any unhandled error to a log file. Error dialogs raised
+; during exit vanish before they can be read, so this preserves the message.
+; Returns 0 so AHK's normal handling still proceeds. Safe to delete once the
+; exit-time error is resolved.
+OnError(LogUnhandledError) ;  <---- Temporary for debugging.
+LogUnhandledError(err, mode) {
+    try FileAppend(FormatTime(A_Now, 'yyyy-MM-dd HH:mm:ss') '  '
+        (IsObject(err) ? err.Message ' (' err.File ':' err.Line ')' : String(err))
+        '`n', A_ScriptDir '\ScreenSnip_error.log')
+    return 0
+}
+
+; Ordered teardown: unhook the bevel paint/activate handlers FIRST so they
+; can't fire against half-destroyed windows during shutdown, then dispose all
+; snip bitmaps + windows, then shut GDI+ down last (so no image object outlives
+; the GDI+ session). Each step is guarded so one failure can't abort the rest.
+CleanupOnExit(*) {
+    try OnMessage(0x000F, WM_PAINT_BEVEL, 0)     ; deregister (MaxThreads 0)
+    try OnMessage(0x0006, WM_ACTIVATE_BEVEL, 0)
+    try CloseAllSnips()
+    try GDIp.Shutdown()
+}
 
 ; ── Tray icon & menu ──────────────────────────────────────────────────────────
 TraySetIcon(A_WinDir '\system32\shell32.dll', 260)   ; scissors
 
 appName := StrReplace(A_ScriptName, '.ahk')
+; Show elevation state in the (disabled) title item so it's obvious at a glance
+; whether this instance can snip elevated windows. A_IsAdmin is fixed at launch.
+; Kept separate from appName, which the startup-shortcut logic still needs bare.
+trayTitle := appName (A_IsAdmin ? '  (admin)' : '')
 trayMenu := A_TrayMenu
 trayMenu.Delete()
-trayMenu.Add(appName, (*) => False)
-trayMenu.Disable(appName)
+trayMenu.Add(trayTitle, (*) => False)
+trayMenu.Disable(trayTitle)
 trayMenu.Add()
 trayMenu.AddStandard()
 trayMenu.Add()
@@ -137,7 +169,7 @@ if FileExist(A_Startup '\' appName '.lnk')
     trayMenu.Check('Start with Windows')
 trayMenu.Add()
 trayMenu.Add('ScreenSnip Help', (*) => ShowHelp())
-trayMenu.Default := appName
+trayMenu.Default := trayTitle
 
 TrayStartup(*) {
     global appName
@@ -192,15 +224,15 @@ OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 ; HOTKEYS
 ; ==============================================================================
 
-^+RButton::
-^RButton:: {                       ; Ctrl + RButton drag — snip (+ clipboard if Shift held)
+^+RButton::  ; hide
+^RButton:: {  ; Ctrl + RButton drag — snip (+ clipboard if Shift held) ; hide
     global guiSnips, SelectionColor
     Area := SelectScreenRegion('RButton', SelectionColor)
     if (Area.W > 8 && Area.H > 8)
         SnipArea(Area, GetKeyState('Shift'), &guiSnips)
 }
 
-+PrintScreen:: {                   ; Shift + PrintScreen — toggle all snips
++PrintScreen:: {  ; Shift + PrintScreen — toggle all snips ; hide
     global SnipVisible, guiSnips
     SnipVisible := !SnipVisible
     for Hwnd, snip in guiSnips
@@ -208,28 +240,28 @@ OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 }
 
 #HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI')
-Esc::           CloseSnip()
-F1::            ShowHelp()
-!Up::           AdjustSnipAlpha(+25)
-!Down::         AdjustSnipAlpha(-25)
-!WheelUp::      AdjustSnipAlpha(+10)
-!WheelDown::    AdjustSnipAlpha(-10)
-!Left::         AdjustSnipAngle(-1)
-!Right::        AdjustSnipAngle(+1)
-!+Left::        SnapSnipAngle(-1)
-!+Right::       SnapSnipAngle(+1)
-+Left::         FlipSnip('FlipH')
-+Right::        FlipSnip('FlipH')
-+Up::           FlipSnip('FlipV')
-+Down::         FlipSnip('FlipV')
-^Left::         NudgeSnip(-1,  0)
-^Right::        NudgeSnip(+1,  0)
-^Up::           NudgeSnip( 0, -1)
-^Down::         NudgeSnip( 0, +1)
-^+Left::        NudgeSnip(-10,  0)
-^+Right::       NudgeSnip(+10,  0)
-^+Up::          NudgeSnip(  0, -10)
-^+Down::        NudgeSnip(  0, +10)
+Esc::           CloseSnip() ; hide
+F1::            ShowHelp() ; hide
+!Up::           AdjustSnipAlpha(+25) ; hide
+!Down::         AdjustSnipAlpha(-25) ; hide
+!WheelUp::      AdjustSnipAlpha(+10) ; hide
+!WheelDown::    AdjustSnipAlpha(-10) ; hide
+!Left::         AdjustSnipAngle(-1) ; hide
+!Right::        AdjustSnipAngle(+1) ; hide
+!+Left::        SnapSnipAngle(-1) ; hide
+!+Right::       SnapSnipAngle(+1) ; hide
++Left::         FlipSnip('FlipH') ; hide
++Right::        FlipSnip('FlipH') ; hide
++Up::           FlipSnip('FlipV') ; hide
++Down::         FlipSnip('FlipV') ; hide
+^Left::         NudgeSnip(-1,  0) ; hide
+^Right::        NudgeSnip(+1,  0) ; hide
+^Up::           NudgeSnip( 0, -1) ; hide
+^Down::         NudgeSnip( 0, +1) ; hide
+^+Left::        NudgeSnip(-10,  0) ; hide
+^+Right::       NudgeSnip(+10,  0) ; hide
+^+Up::          NudgeSnip(  0, -10) ; hide
+^+Down::        NudgeSnip(  0, +10) ; hide
 #HotIf
 
 ; ==============================================================================
@@ -472,7 +504,7 @@ ShowHelp() {
     }
     g := Gui('+AlwaysOnTop +ToolWindow', 'ScreenSnip — Help')
     g.SetFont('s10', 'Courier New')
-    g.Add('Edit', 'r25 w462 ReadOnly -E0x200 -VScroll', HelpText)
+    g.Add('Edit', 'r27 w462 ReadOnly -E0x200 -VScroll', HelpText)
     g.SetFont('s9', 'Segoe UI')
     btn := g.Add('Button', 'xm w80 Default', 'OK')
     btn.OnEvent('Click', (*) => g.Destroy())
@@ -868,7 +900,14 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
         WinSetTransparent(Transparent, guiSSR.Background)
 
     Wprev := Hprev := 0
+    aborted := false
     Loop {
+        ; Safety valve: Esc cancels the capture cleanly, so a snip can never
+        ; get stuck on screen even if every button-release path fails.
+        if GetKeyState('Escape', 'p') {
+            aborted := true
+            break
+        }
         MouseGetPos(&eX, &eY)
         W := Abs(sX - eX), H := Abs(sY - eY)
         X := Min(sX, eX),  Y := Min(sY, eY)
@@ -927,12 +966,23 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
             Wprev := W, Hprev := H
         }
         Sleep 10
+    ; Exit when the button is released. This reads AHK's hooked physical state.
+    ; If the release happens over an ELEVATED window while ScreenSnip is not
+    ; elevated, Windows UIPI hides that event from the hook and this test can get
+    ; stuck "down" — the Esc check at the top of the loop is the clean escape
+    ; hatch for that case. Running ScreenSnip elevated avoids the stuck state.
+    ; (GetAsyncKeyState is NOT a usable fallback here: this hotkey suppresses the
+    ; RButton-down, so the OS async state reads "up" the whole time.)
     } Until !GetKeyState(Key, 'p')
 
     guiSSR.GetPos(&X, &Y, &W, &H)
     guiSSR.Hide()
     guiSSR.InfoW.Visible := false
     guiSSR.InfoH.Visible := false
+    ; On Esc-abort, return a zero-size area so the caller's (W>8 && H>8) guard
+    ; skips snip creation.
+    if aborted
+        return { X: X, Y: Y, W: 0, H: 0, X2: X, Y2: Y }
     return { X: X, Y: Y, W: W, H: H, X2: X+W, Y2: Y+H }
 }
 
