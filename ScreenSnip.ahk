@@ -13,12 +13,14 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted and simplified by kunkel321 / Claude
-; Version date: 7-6-2026
+; Version date: 7-13-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Known issue:  Can't snip elevated windows unless ScreenSnip is also
 ; running in elevated (admin) mode.  Top of SysTray Menu shows
 ; "ScreenSnip (admin)" when running in admin mode.  See also help dialog.
+; OCR functionality uses Descolada's OCR.ahk and Paddle OCR.  Please see 
+; companion SnipOCR.ahk comments for details.
 ;
 ; Hotkey cheat sheet — shown via F1 or right-click menu > Help.
 HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admin.`n"
@@ -34,6 +36,11 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Left-click drag              Move
   Right-click                  Context menu
   Esc                          Close this snip
+
+  OCR  (right-click menu > OCR)
+  Copy Text (Windows)          Fast text grab, no setup
+  Copy Text (PaddleOCR)        Slower, more accurate
+  Copy Table (PaddleOCR)       Rebuilds a grid; paste into Excel
 
   TRANSPARENCY
   Alt + Up / Down              Adjust ±25
@@ -188,6 +195,14 @@ TrayStartup(*) {
 ; ── Context menu for snip windows ─────────────────────────────────────────────
 SnipMenu := Menu()
 SnipMenu.Add('Copy to Clipboard', SnipMenu_Handler)
+
+; OCR submenu — see SnipOCR.ahk (included at the bottom of this file) for setup.
+OcrMenu := Menu()
+OcrMenu.Add('Copy Text (Windows)',    SnipMenu_Handler)  ; fast, no engine to install
+OcrMenu.Add('Copy Text (PaddleOCR)',  SnipMenu_Handler)  ; slower, more accurate
+OcrMenu.Add('Copy Table (PaddleOCR)', SnipMenu_Handler)  ; rebuilds a grid as TSV
+SnipMenu.Add('OCR', OcrMenu)
+
 SnipMenu.Add('')
 
 RotateMenu := Menu()
@@ -524,6 +539,9 @@ SnipMenu_Handler(ItemName, ItemPos, *) {
     TargetHwnd := SnipMenu._targetHwnd
     switch ItemName {
         case 'Copy to Clipboard':       SnipToClipboard(TargetHwnd)
+        case 'Copy Text (Windows)':     SnipOcrWindowsText(TargetHwnd)
+        case 'Copy Text (PaddleOCR)':   SnipOcrPaddleText(TargetHwnd)
+        case 'Copy Table (PaddleOCR)':  SnipOcrPaddleTable(TargetHwnd)
         case 'Rotate 90° CW':           TransformSnip(TargetHwnd, 'Rotate90CW')
         case 'Rotate 180°':             TransformSnip(TargetHwnd, 'Rotate180')
         case 'Rotate 90° CCW':          TransformSnip(TargetHwnd, 'Rotate90CCW')
@@ -1196,3 +1214,9 @@ Class GDIp {
         return pNew
     }
 }
+
+; ── OCR add-on ────────────────────────────────────────────────────────────────
+; Provides SnipOcrWindowsText / SnipOcrPaddleText / SnipOcrPaddleTable, called
+; from SnipMenu_Handler above.  Contains no top-level executable code, so it is
+; safe to include here at the end of the file.
+#Include SnipOCR.ahk
