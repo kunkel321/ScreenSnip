@@ -13,9 +13,14 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted and simplified by kunkel321 / Claude
-; Version date: 7-13-2026
+; Version date: 7-22-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
+; Each snip also keeps a frozen "master" snapshot of a slightly larger
+; area (see CaptureAdjustMargin), so AFTER capturing you can pan or resize
+; the captured region — and nudge the floating window — via hotkeys or the
+; right-click menu, without re-grabbing (and re-occluding) the screen.
+; The post-capture adjust-region idea was suggested by forum user alnz123.
 ; Known issue:  Can't snip elevated windows unless ScreenSnip is also
 ; running in elevated (admin) mode.  Top of SysTray Menu shows
 ; "ScreenSnip (admin)" when running in admin mode.  See also help dialog.
@@ -54,9 +59,16 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Shift + Left / Right         Flip horizontal
   Shift + Up / Down            Flip vertical
 
-  NUDGE POSITION
+  NUDGE POSITION  (moves the floating window)
   Ctrl + Arrow                 Move ±1 px
   Ctrl + Shift + Arrow         Move ±10 px
+
+  ADJUST CAPTURE REGION  (re-crops the frozen snapshot)
+  Ctrl + Alt + Arrow           Pan region ±1 px
+  Ctrl + Shift + Alt + Arrow   Pan region ±10 px
+  Win + Alt + Arrow            Resize ±1 px  (grow = Right / Down)
+  Win + Shift + Alt + Arrow    Resize ±10 px
+  (Range is limited by CaptureAdjustMargin, set near top of script.)
 )"
 
 ; ── Globals ────────────────────────────────────────────────────────────────────
@@ -70,6 +82,20 @@ global SnipVisible := true
 ; Color of the semi-transparent selection overlay while dragging.
 ; Any AHK color name or hex value (e.g. 'Lime', 'Teal', '0xFF8800').
 SelectionColor := 'b58500'
+
+; Extra pixels captured AROUND your selection into a frozen "master"
+; snapshot, so the capture region can be nudged/resized after the fact
+; (see the ADJUST CAPTURE REGION hotkeys). This is the maximum you can
+; pan or grow in any direction before hitting the edge of the snapshot.
+; Larger = more adjustment headroom, but more memory per snip (a 32-bit
+; bitmap is width * height * 4 bytes).
+;   0      = no headroom; region is fixed at the exact selection.
+;   150    = a comfortable default for fixing small clipped edges.
+;   99999  = effectively snapshots the WHOLE desktop into every snip.
+; The value is always clamped to the virtual desktop bounds, so oversized
+; numbers are safe (they just capture everything and use more RAM — they
+; won't crash or read off-screen).
+CaptureAdjustMargin := 150
 
 ; Show a colored border around each floating snip?
 ; true = show border,  false = no border (image only, fully borderless)
@@ -193,6 +219,12 @@ TrayStartup(*) {
 }
 
 ; ── Context menu for snip windows ─────────────────────────────────────────────
+; Most snip manipulation is meant to be done with hotkeys (see the F1 help),
+; but the actions are mirrored here so they're discoverable, and each item that
+; has a hotkey shows it right-aligned as a reminder.  Directional items act on
+; the snip that was right-clicked (SnipMenu._targetHwnd) and use a 1px step;
+; hold Shift with the equivalent hotkey for a 10px step.
+noop := (*) => 0
 SnipMenu := Menu()
 SnipMenu.Add('Copy to Clipboard', SnipMenu_Handler)
 
@@ -209,21 +241,57 @@ RotateMenu := Menu()
 RotateMenu.Add('Rotate 90° CW',  SnipMenu_Handler)
 RotateMenu.Add('Rotate 180°',    SnipMenu_Handler)
 RotateMenu.Add('Rotate 90° CCW', SnipMenu_Handler)
+RotateMenu.Add('')
+RotateMenu.Add('Alt+←/→ = ±1°  ·  +Shift = snap 30°', noop)   ; hotkey reminder
+RotateMenu.Disable('Alt+←/→ = ±1°  ·  +Shift = snap 30°')
 SnipMenu.Add('Rotate', RotateMenu)
 
 FlipMenu := Menu()
-FlipMenu.Add('Flip Horizontal (L/R)', SnipMenu_Handler)
-FlipMenu.Add('Flip Vertical (U/D)',   SnipMenu_Handler)
+FlipMenu.Add('Flip Horizontal (L/R)`tShift+←/→', SnipMenu_Handler)
+FlipMenu.Add('Flip Vertical (U/D)`tShift+↑/↓',   SnipMenu_Handler)
 SnipMenu.Add('Flip', FlipMenu)
+
+; Move the floating window (does NOT change what was captured).
+NudgeMenu := Menu()
+NudgeMenu.Add('Move Up`tCtrl+↑',    SnipAdjustFromMenu.Bind(NudgeSnip,  0, -1))
+NudgeMenu.Add('Move Down`tCtrl+↓',  SnipAdjustFromMenu.Bind(NudgeSnip,  0, +1))
+NudgeMenu.Add('Move Left`tCtrl+←',  SnipAdjustFromMenu.Bind(NudgeSnip, -1,  0))
+NudgeMenu.Add('Move Right`tCtrl+→', SnipAdjustFromMenu.Bind(NudgeSnip, +1,  0))
+NudgeMenu.Add('')
+NudgeMenu.Add('Hold Shift → ±10 px', noop)
+NudgeMenu.Disable('Hold Shift → ±10 px')
+SnipMenu.Add('Nudge Position', NudgeMenu)
+
+; Pan the capture region over the frozen snapshot (changes which pixels show).
+PanMenu := Menu()
+PanMenu.Add('Pan Up`tCtrl+Alt+↑',    SnipAdjustFromMenu.Bind(PanSnipRegion,  0, -1))
+PanMenu.Add('Pan Down`tCtrl+Alt+↓',  SnipAdjustFromMenu.Bind(PanSnipRegion,  0, +1))
+PanMenu.Add('Pan Left`tCtrl+Alt+←',  SnipAdjustFromMenu.Bind(PanSnipRegion, -1,  0))
+PanMenu.Add('Pan Right`tCtrl+Alt+→', SnipAdjustFromMenu.Bind(PanSnipRegion, +1,  0))
+PanMenu.Add('')
+PanMenu.Add('Hold Shift → ±10 px', noop)
+PanMenu.Disable('Hold Shift → ±10 px')
+SnipMenu.Add('Pan Region', PanMenu)
+
+; Resize the capture region (grow/shrink what was captured).
+ResizeMenu := Menu()
+ResizeMenu.Add('Grow Width`tWin+Alt+→',    SnipAdjustFromMenu.Bind(ResizeSnipRegion, +1,  0))
+ResizeMenu.Add('Shrink Width`tWin+Alt+←',  SnipAdjustFromMenu.Bind(ResizeSnipRegion, -1,  0))
+ResizeMenu.Add('Grow Height`tWin+Alt+↓',   SnipAdjustFromMenu.Bind(ResizeSnipRegion,  0, +1))
+ResizeMenu.Add('Shrink Height`tWin+Alt+↑', SnipAdjustFromMenu.Bind(ResizeSnipRegion,  0, -1))
+ResizeMenu.Add('')
+ResizeMenu.Add('Hold Shift → ±10 px', noop)
+ResizeMenu.Disable('Hold Shift → ±10 px')
+SnipMenu.Add('Resize Region', ResizeMenu)
 
 SnipMenu.Add('')
 SnipMenu.Add('Border',          SnipMenu_Handler)   ; checkable toggle
 
 SnipMenu.Add('')
-SnipMenu.Add('Close This Snip',   SnipMenu_Handler)
-SnipMenu.Add('Close All Snips',   SnipMenu_Handler)
+SnipMenu.Add('Close This Snip`tEsc', SnipMenu_Handler)
+SnipMenu.Add('Close All Snips',      SnipMenu_Handler)
 SnipMenu.Add('')
-SnipMenu.Add('Help (F1)',         SnipMenu_Handler)
+SnipMenu.Add('Help`tF1',        SnipMenu_Handler)
 
 ; Initialise the Border menu item to reflect the default ShowSnipBorder setting
 if ShowSnipBorder
@@ -265,10 +333,10 @@ F1::            ShowHelp() ; hide
 !Right::        AdjustSnipAngle(+1) ; hide
 !+Left::        SnapSnipAngle(-1) ; hide
 !+Right::       SnapSnipAngle(+1) ; hide
-+Left::         FlipSnip('FlipH') ; hide
-+Right::        FlipSnip('FlipH') ; hide
-+Up::           FlipSnip('FlipV') ; hide
-+Down::         FlipSnip('FlipV') ; hide
++Left::         FlipSnip(WinGetID('A'), 'FlipH') ; hide
++Right::        FlipSnip(WinGetID('A'), 'FlipH') ; hide
++Up::           FlipSnip(WinGetID('A'), 'FlipV') ; hide
++Down::         FlipSnip(WinGetID('A'), 'FlipV') ; hide
 ^Left::         NudgeSnip(-1,  0) ; hide
 ^Right::        NudgeSnip(+1,  0) ; hide
 ^Up::           NudgeSnip( 0, -1) ; hide
@@ -277,6 +345,29 @@ F1::            ShowHelp() ; hide
 ^+Right::       NudgeSnip(+10,  0) ; hide
 ^+Up::          NudgeSnip(  0, -10) ; hide
 ^+Down::        NudgeSnip(  0, +10) ; hide
+; ── Adjust the CAPTURE REGION over the frozen master snapshot ──────────────
+; A coherent family, all "Arrow + modifiers, add Shift for a 10px step":
+;   Ctrl        = move the floating window   (NudgeSnip, above)
+;   Ctrl+Alt    = pan the region             (which pixels show)
+;   Win+Alt     = resize the region          (grow: Right/Down, shrink: Left/Up)
+; Plain arrows are deliberately left UNBOUND so a reflexive "arrow to move it"
+; can't silently resize the capture. All are clamped to CaptureAdjustMargin.
+^!Left::        PanSnipRegion(-1,  0) ; hide
+^!Right::       PanSnipRegion(+1,  0) ; hide
+^!Up::          PanSnipRegion( 0, -1) ; hide
+^!Down::        PanSnipRegion( 0, +1) ; hide
+^!+Left::       PanSnipRegion(-10,  0) ; hide
+^!+Right::      PanSnipRegion(+10,  0) ; hide
+^!+Up::         PanSnipRegion( 0, -10) ; hide
+^!+Down::       PanSnipRegion( 0, +10) ; hide
+#!Left::        ResizeSnipRegion(-1,  0) ; hide
+#!Right::       ResizeSnipRegion(+1,  0) ; hide
+#!Up::          ResizeSnipRegion( 0, -1) ; hide
+#!Down::        ResizeSnipRegion( 0, +1) ; hide
+#!+Left::       ResizeSnipRegion(-10,  0) ; hide
+#!+Right::      ResizeSnipRegion(+10,  0) ; hide
+#!+Up::         ResizeSnipRegion( 0, -10) ; hide
+#!+Down::       ResizeSnipRegion( 0, +10) ; hide
 #HotIf
 
 ; ==============================================================================
@@ -286,10 +377,39 @@ F1::            ShowHelp() ; hide
 ; Create a floating snip from a screen area.
 ; SetClipboard=true also puts the image on the clipboard.
 SnipArea(Area, SetClipboard, &ObjMap) {
-    global ShowSnipBorder, BorderThickness, BorderColor, TransColor
-    pBitmap := GDIp.BitmapFromScreen(Area)
-    ; Pin the bitmap's DPI to the screen DPI so it displays 1:1 pixel-perfect.
+    global ShowSnipBorder, BorderThickness, BorderColor, TransColor, CaptureAdjustMargin
     dpi := A_ScreenDPI + 0.0
+
+    ; ── Frozen master snapshot ────────────────────────────────────────────────
+    ; Grab the selection PLUS a margin on every side into a bitmap we keep for
+    ; the snip's lifetime. Post-capture "adjust region" simply crops a different
+    ; sub-rectangle out of THIS frozen copy — so we never re-BitBlt the live
+    ; screen (which would re-capture the snip's own always-on-top window and any
+    ; overlapping windows). The margin is clamped to the virtual desktop, so a
+    ; huge CaptureAdjustMargin just snapshots everything on-screen and can't read
+    ; off-screen or produce negative dimensions.
+    GetVirtualScreen(&vx, &vy, &vw, &vh)
+    m      := Max(0, CaptureAdjustMargin)
+    mLeft  := Max(Area.X - m,            vx)
+    mTop   := Max(Area.Y - m,            vy)
+    mRight := Min(Area.X + Area.W + m,   vx + vw)
+    mBot   := Min(Area.Y + Area.H + m,   vy + vh)
+    masterX := mLeft,                 masterY := mTop
+    masterW := Max(1, mRight - mLeft), masterH := Max(1, mBot - mTop)
+
+    SrcBitmap := GDIp.BitmapFromScreen({ X: masterX, Y: masterY, W: masterW, H: masterH })
+    DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', SrcBitmap, 'Float', dpi, 'Float', dpi)
+
+    ; Crop rectangle in master-local coords, initially the exact selection.
+    ; Defensive clamp keeps it inside the snapshot even in odd edge cases.
+    crop := { X: Area.X - masterX, Y: Area.Y - masterY, W: Area.W, H: Area.H }
+    crop.X := Max(0, Min(crop.X, masterW - 1))
+    crop.Y := Max(0, Min(crop.Y, masterH - 1))
+    crop.W := Max(1, Min(crop.W, masterW - crop.X))
+    crop.H := Max(1, Min(crop.H, masterH - crop.Y))
+
+    ; Displayed bitmap starts as the upright crop — identical to a direct grab.
+    pBitmap := GDIp.CloneBitmapArea(SrcBitmap, crop.X, crop.Y, crop.W, crop.H)
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', pBitmap, 'Float', dpi, 'Float', dpi)
 
     if SetClipboard
@@ -324,10 +444,18 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     global Bevel3D, Bevel3DMaxThickness
     if (ShowSnipBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
         DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(g.Hwnd), BevelDarknessFor(g.Hwnd))
-    ObjMap[g.Hwnd] := { GuiObj: g, Area: Area, Alpha: 255, pBitmap: pBitmap
-                      , Angle: 0, HasBorder: ShowSnipBorder, TransColor: snipTransColor }
 
-    ; Do NOT DisposeImage here — pBitmap is stored for later transforms.
+    ; State model: SrcBitmap (frozen master) + Crop (which sub-rect shows) are
+    ; the source of truth for CONTENT; Angle/FlipH/FlipV are a display transform
+    ; layered on top. pBitmap always holds the current UPRIGHT crop (handy for
+    ; OCR and re-rendering). Everything routes through RenderSnip().
+    ObjMap[g.Hwnd] := { GuiObj: g, Area: Area, Alpha: 255, pBitmap: pBitmap
+                      , Angle: 0, FlipH: false, FlipV: false
+                      , HasBorder: ShowSnipBorder, TransColor: snipTransColor
+                      , SrcBitmap: SrcBitmap, SrcX: masterX, SrcY: masterY
+                      , MasterW: masterW, MasterH: masterH, Crop: crop }
+
+    ; Do NOT DisposeImage here — pBitmap and SrcBitmap are kept for the snip's life.
     return g.Hwnd
 }
 
@@ -340,6 +468,8 @@ CloseSnip(Hwnd?) {
         snip := guiSnips[Hwnd]
         guiSnips.Delete(Hwnd)   ; remove first so in-flight handlers/timers bail out
         GDIp.DisposeImage(snip.pBitmap)
+        if (snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+            GDIp.DisposeImage(snip.SrcBitmap)
         snip.GuiObj.Destroy()
     }
 }
@@ -351,6 +481,8 @@ CloseAllSnips() {
     guiSnips := Map()   ; clear first so in-flight handlers/timers bail out
     for Hwnd, snip in snipsToClose {
         GDIp.DisposeImage(snip.pBitmap)
+        if (snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+            GDIp.DisposeImage(snip.SrcBitmap)
         snip.GuiObj.Destroy()
     }
 }
@@ -386,81 +518,142 @@ AdjustSnipAlpha(delta) {
     SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
 }
 
-; Rotate the active snip by delta degrees (cumulative).
-; Redraws from pBitmap each time to avoid quality loss from repeated transforms.
+; Rotate the active snip by delta degrees (cumulative, arbitrary angle).
+; Just updates the tracked Angle; RenderSnip rebuilds from the frozen master.
 AdjustSnipAngle(delta) {
-    global guiSnips, BorderThickness, BorderColor
+    global guiSnips
     hwnd := WinGetID('A')
     if !guiSnips.Has(hwnd)
         return
     snip := guiSnips[hwnd]
-    g    := snip.GuiObj
     snip.Angle := Mod(snip.Angle + delta + 360, 360)
+    RenderSnip(snip)
+}
 
-    ; At non-cardinal angles the window is still rectangular but the image
-    ; is rotated inside it, so the border would just show as background flash.
-    ; Suppress it during rotation and restore at 0/90/180/270.
-    isCardinal := (snip.Angle = 0 || snip.Angle = 90
-                || snip.Angle = 180 || snip.Angle = 270)
-    showBorder := snip.HasBorder && isCardinal
-    if showBorder {
-        g.BackColor := BorderColor
-        g.MarginX   := BorderThickness
-        g.MarginY   := BorderThickness
+; ==============================================================================
+; RENDER PIPELINE  (single source of truth for what a snip displays)
+; ==============================================================================
+; Every content or transform change — recrop (pan/resize), rotate, flip —
+; mutates the snip's state (Crop / Angle / FlipH / FlipV) and then calls
+; RenderSnip(). The pipeline is always:
+;
+;     SrcBitmap ──crop(Crop)──► pBitmap (upright) ──flips──►──rotate──► display
+;
+; Because rotation and flips are re-derived from the upright crop every time
+; (never baked in), "do X then Y" combinations — e.g. flip, then adjust the
+; region, then rotate — stay well-defined and can't corrupt each other.
+
+; Build the on-screen (transformed) bitmap from a snip's upright crop.
+; Returns a NEW bitmap that the caller must dispose; never mutates pBitmap.
+BuildDisplayBitmap(snip) {
+    ; Work on a clone so the stored upright crop (pBitmap) is left intact.
+    DllCall('gdiplus\GdipCloneImage', 'UPtr', snip.pBitmap, 'UPtr*', &work := 0)
+    if !work
+        return 0
+
+    ; Flips first — lossless, exact.
+    if snip.FlipH
+        DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', 4)   ; FlipX (horizontal)
+    if snip.FlipV
+        DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', 6)   ; FlipY (vertical)
+
+    angle := Mod(snip.Angle + 360, 360)
+    if (angle = 0) {
+        result := work                                   ; nothing more to do
+    } else if (Mod(angle, 90) = 0) {
+        ; Exact 90/180/270 — lossless, no transparent-corner halo.
+        DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', angle // 90)
+        result := work
     } else {
-        g.BackColor := Format('0x{:06X}', snip.TransColor)
-        g.MarginX   := 0
-        g.MarginY   := 0
+        ; Arbitrary angle — padded bounding box with trans-color corners.
+        result := GDIp.RotateBitmap(work, angle, snip.TransColor)
+        GDIp.DisposeImage(work)
     }
 
-    ; Build rotated bitmap from the stored original pBitmap
-    rotBitmap := GDIp.RotateBitmap(snip.pBitmap, snip.Angle, snip.TransColor)
+    dpi := A_ScreenDPI + 0.0
+    DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', result, 'Float', dpi, 'Float', dpi)
+    return result
+}
 
-    ; New bitmap dimensions are already in physical pixels
-    DllCall('gdiplus\GdipGetImageWidth',  'UPtr', rotBitmap, 'UInt*', &newW := 0)
-    DllCall('gdiplus\GdipGetImageHeight', 'UPtr', rotBitmap, 'UInt*', &newH := 0)
+; Rebuild a snip's picture + window from its frozen master and current state.
+RenderSnip(snip) {
+    global BorderThickness, BorderColor, Bevel3D, Bevel3DMaxThickness
+    g    := snip.GuiObj
+    hwnd := g.Hwnd
+    dpi  := A_ScreenDPI + 0.0
 
-    ; Account for border in physical pixels at cardinal angles
+    ; 1) Fresh upright crop from the master. Clone into a temp first so a rare
+    ;    failure can't leave the snip with a disposed pBitmap and no image.
+    newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
+    if !newCrop
+        return
+    DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', newCrop, 'Float', dpi, 'Float', dpi)
+    if snip.pBitmap
+        GDIp.DisposeImage(snip.pBitmap)
+    snip.pBitmap := newCrop
+
+    ; Keep Area (screen coords of the current capture rect) in sync for any
+    ; consumer that reads it (e.g. OCR helpers).
+    snip.Area := { X: snip.SrcX + snip.Crop.X, Y: snip.SrcY + snip.Crop.Y
+                 , W: snip.Crop.W, H: snip.Crop.H }
+
+    ; 2) Apply the display transform (flips + rotation).
+    display := BuildDisplayBitmap(snip)
+    if !display
+        return
+
+    ; Border only shows at cardinal angles; otherwise it's just a bg flash.
+    isCardinal := (Mod(snip.Angle, 90) = 0)
+    showBorder := snip.HasBorder && isCardinal
+
+    DllCall('gdiplus\GdipGetImageWidth',  'UPtr', display, 'UInt*', &newW := 0)
+    DllCall('gdiplus\GdipGetImageHeight', 'UPtr', display, 'UInt*', &newH := 0)
+
     scale      := A_ScreenDPI / 96
     physBorder := showBorder ? Round(BorderThickness * scale) : 0
     totalW     := newW + physBorder * 2
     totalH     := newH + physBorder * 2
 
-    ; Get current window rect in physical screen pixels
+    ; Keep the window centered on its current physical position. For a pan
+    ; (size unchanged) this is a no-op move; for resize/rotate it grows or
+    ; shrinks symmetrically around the current center.
     rect := Buffer(16, 0)
     DllCall('GetWindowRect', 'Ptr', hwnd, 'Ptr', rect)
-    curL := NumGet(rect,  0, 'Int')
-    curT := NumGet(rect,  4, 'Int')
-    curR := NumGet(rect,  8, 'Int')
-    curB := NumGet(rect, 12, 'Int')
+    curL := NumGet(rect, 0, 'Int'), curT := NumGet(rect,  4, 'Int')
+    curR := NumGet(rect, 8, 'Int'), curB := NumGet(rect, 12, 'Int')
+    centerX := (curL + curR) // 2,  centerY := (curT + curB) // 2
+    newX := centerX - totalW // 2,  newY := centerY - totalH // 2
 
-    ; Keep the window centered on its current physical position
-    centerX := (curL + curR) // 2
-    centerY := (curT + curB) // 2
-    newX := centerX - totalW // 2
-    newY := centerY - totalH // 2
+    if showBorder {
+        g.BackColor := BorderColor
+        g.MarginX := BorderThickness, g.MarginY := BorderThickness
+    } else {
+        g.BackColor := Format('0x{:06X}', snip.TransColor)
+        g.MarginX := 0, g.MarginY := 0
+    }
 
-    ; Suppress all redraws during the swap to prevent flicker.
-    ; WM_SETREDRAW(FALSE) queues all paint messages until we re-enable.
+    ; Suppress redraws during the swap to prevent flicker.
     DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)
 
-    ; Swap out the Picture control
-    DllCall("DestroyWindow", "Ptr", g.Pic.Hwnd)
-    hBitmap    := GDIp.CreateHBITMAPFromBitmap(rotBitmap)
-    picOffset  := showBorder ? BorderThickness : 0
-    g.Pic      := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
-    GDIp.DisposeImage(rotBitmap)
+    ; Swap the Picture control, freeing the old HBITMAP we own (prevents a
+    ; GDI handle leak that would otherwise grow fast under rapid recrops).
+    oldHbm := SendMessage(0x0173, 0, 0, g.Pic.Hwnd)   ; STM_GETIMAGE
+    DllCall('DestroyWindow', 'Ptr', g.Pic.Hwnd)
+    hBitmap   := GDIp.CreateHBITMAPFromBitmap(display)
+    picOffset := showBorder ? BorderThickness : 0
+    g.Pic     := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
+    GDIp.DisposeImage(display)
+    if oldHbm
+        DllCall('DeleteObject', 'Ptr', oldHbm)
 
     DllCall('SetWindowPos', 'Ptr', hwnd, 'Ptr', 0,
             'Int', newX, 'Int', newY, 'Int', totalW, 'Int', totalH,
             'UInt', 0x0014)   ; SWP_NOZORDER | SWP_NOACTIVATE
 
-    ; Re-enable redraws and force a single clean repaint.
     DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)
     DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0,
             'UInt', 0x0085)   ; RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN
 
-    global Bevel3D, Bevel3DMaxThickness
     if (showBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
         DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
 
@@ -468,10 +661,85 @@ AdjustSnipAngle(delta) {
         SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
 }
 
-; Flip the active snip horizontally or vertically.
-FlipSnip(transform) {
-    hwnd := WinGetID('A')
-    TransformSnip(hwnd, transform)
+; ==============================================================================
+; ADJUST CAPTURE REGION  (re-crop the frozen master snapshot)
+; ==============================================================================
+
+; Pan the capture region over the frozen master (changes WHICH pixels show;
+; size is unchanged). Clamped so the crop stays fully inside the snapshot.
+PanSnipRegion(dx, dy, hwnd := 0) {
+    global guiSnips
+    if !hwnd
+        hwnd := WinGetID('A')
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return
+    c  := snip.Crop
+    nx := Max(0, Min(c.X + dx, snip.MasterW - c.W))
+    ny := Max(0, Min(c.Y + dy, snip.MasterH - c.H))
+    if (nx = c.X && ny = c.Y)                 ; hit the snapshot edge — nothing to do
+        return
+    c.X := nx, c.Y := ny
+    RenderSnip(snip)
+}
+
+; Resize the capture region, anchored at its top-left corner (Right/Down grow,
+; Left/Up shrink). Clamped to an 8px minimum and to the snapshot's far edges.
+ResizeSnipRegion(dw, dh, hwnd := 0) {
+    global guiSnips
+    static MINSZ := 8
+    if !hwnd
+        hwnd := WinGetID('A')
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return
+    c  := snip.Crop
+    nw := Max(MINSZ, Min(c.W + dw, snip.MasterW - c.X))
+    nh := Max(MINSZ, Min(c.H + dh, snip.MasterH - c.Y))
+    if (nw = c.W && nh = c.H)                 ; clamped — nothing changed
+        return
+    c.W := nw, c.H := nh
+    RenderSnip(snip)
+}
+
+; Virtual-desktop bounds (all monitors), in physical pixels. Used to clamp the
+; master snapshot so an oversized CaptureAdjustMargin can't read off-screen.
+GetVirtualScreen(&vx, &vy, &vw, &vh) {
+    vx := DllCall('GetSystemMetrics', 'Int', 76, 'Int')   ; SM_XVIRTUALSCREEN
+    vy := DllCall('GetSystemMetrics', 'Int', 77, 'Int')   ; SM_YVIRTUALSCREEN
+    vw := DllCall('GetSystemMetrics', 'Int', 78, 'Int')   ; SM_CXVIRTUALSCREEN
+    vh := DllCall('GetSystemMetrics', 'Int', 79, 'Int')   ; SM_CYVIRTUALSCREEN
+}
+
+; Toggle a snip's horizontal or vertical flip, then re-render. Flips are now
+; tracked state (not baked into the bitmap), so they compose cleanly with
+; rotation and region adjustments in any order.
+FlipSnip(Hwnd, axis) {
+    global guiSnips
+    if !guiSnips.Has(Hwnd)
+        return
+    snip := guiSnips[Hwnd]
+    if (axis = 'FlipV')
+        snip.FlipV := !snip.FlipV
+    else
+        snip.FlipH := !snip.FlipH
+    RenderSnip(snip)
+}
+
+; Rotate a snip by a signed number of degrees (cumulative). Menu 90/180/270
+; items route here; they now ADD to the tracked angle instead of baking, so a
+; menu rotate after a fine (Alt+arrow) rotate keeps the fine angle.
+RotateSnip(Hwnd, deltaDeg) {
+    global guiSnips
+    if !guiSnips.Has(Hwnd)
+        return
+    snip := guiSnips[Hwnd]
+    snip.Angle := Mod(snip.Angle + deltaDeg + 360, 360)
+    RenderSnip(snip)
 }
 
 ; Snap the active snip to the next multiple of 30° in the given direction.
@@ -498,8 +766,9 @@ SnapSnipAngle(dir) {
 }
 
 ; Move the active snip by dx/dy physical pixels.
-NudgeSnip(dx, dy) {
-    hwnd := WinGetID('A')
+NudgeSnip(dx, dy, hwnd := 0) {
+    if !hwnd
+        hwnd := WinGetID('A')
     rect := Buffer(16, 0)
     DllCall('GetWindowRect', 'Ptr', hwnd, 'Ptr', rect)
     x := NumGet(rect, 0, 'Int') + dx
@@ -519,7 +788,7 @@ ShowHelp() {
     }
     g := Gui('+AlwaysOnTop +ToolWindow', 'ScreenSnip — Help')
     g.SetFont('s10', 'Courier New')
-    g.Add('Edit', 'r27 w462 ReadOnly -E0x200 -VScroll', HelpText)
+    g.Add('Edit', 'r39 w550 ReadOnly -E0x200 -VScroll', HelpText)
     g.SetFont('s9', 'Segoe UI')
     btn := g.Add('Button', 'xm w80 Default', 'OK')
     btn.OnEvent('Click', (*) => g.Destroy())
@@ -534,84 +803,36 @@ ShowHelp() {
 ; CONTEXT MENU
 ; ==============================================================================
 
+; Bridge for the directional context-menu items. Bound with a function ref
+; (NudgeSnip / PanSnipRegion / ResizeSnipRegion) and a dx/dy; supplies the
+; right-clicked snip from SnipMenu._targetHwnd. Declared global here because
+; SnipMenu is a plain global (not super-global), so a lambda couldn't see it.
+SnipAdjustFromMenu(fn, dx, dy, *) {
+    global SnipMenu
+    fn(dx, dy, SnipMenu._targetHwnd)
+}
+
 SnipMenu_Handler(ItemName, ItemPos, *) {
     global SnipMenu
     TargetHwnd := SnipMenu._targetHwnd
-    switch ItemName {
+    ; Menu labels may carry a right-aligned "`taccelerator" hint — match on the
+    ; base label only so those items still dispatch correctly.
+    base := StrSplit(ItemName, "`t")[1]
+    switch base {
         case 'Copy to Clipboard':       SnipToClipboard(TargetHwnd)
         case 'Copy Text (Windows)':     SnipOcrWindowsText(TargetHwnd)
         case 'Copy Text (PaddleOCR)':   SnipOcrPaddleText(TargetHwnd)
         case 'Copy Table (PaddleOCR)':  SnipOcrPaddleTable(TargetHwnd)
-        case 'Rotate 90° CW':           TransformSnip(TargetHwnd, 'Rotate90CW')
-        case 'Rotate 180°':             TransformSnip(TargetHwnd, 'Rotate180')
-        case 'Rotate 90° CCW':          TransformSnip(TargetHwnd, 'Rotate90CCW')
-        case 'Flip Horizontal (L/R)':   TransformSnip(TargetHwnd, 'FlipH')
-        case 'Flip Vertical (U/D)':     TransformSnip(TargetHwnd, 'FlipV')
+        case 'Rotate 90° CW':           RotateSnip(TargetHwnd, +90)
+        case 'Rotate 180°':             RotateSnip(TargetHwnd, 180)
+        case 'Rotate 90° CCW':          RotateSnip(TargetHwnd, -90)
+        case 'Flip Horizontal (L/R)':   FlipSnip(TargetHwnd, 'FlipH')
+        case 'Flip Vertical (U/D)':     FlipSnip(TargetHwnd, 'FlipV')
         case 'Border':                  ToggleSnipBorder(TargetHwnd)
-        case 'Help (F1)':               ShowHelp()
+        case 'Help':                    ShowHelp()
         case 'Close This Snip':         CloseSnip(TargetHwnd)
         case 'Close All Snips':         CloseAllSnips()
     }
-}
-
-; Apply a rotation or flip transform to a snip in-place.
-; Replaces pBitmap in the map entry and rebuilds the Picture control.
-; For 90/270 rotations, W and H are swapped and the window is resized
-; so the image stays centered on the same screen position.
-TransformSnip(Hwnd, Transform) {
-    global guiSnips
-    if !guiSnips.Has(Hwnd)
-        return
-    snip := guiSnips[Hwnd]
-    g    := snip.GuiObj
-
-    ; Apply transform — produces a new pBitmap, disposes the old one
-    oldBitmap  := snip.pBitmap
-    newBitmap  := GDIp.TransformBitmap(oldBitmap, Transform)
-    GDIp.DisposeImage(oldBitmap)
-    snip.pBitmap := newBitmap
-
-    ; Get new image dimensions (physical pixels)
-    DllCall('gdiplus\GdipGetImageWidth',  'UPtr', newBitmap, 'UInt*', &newW := 0)
-    DllCall('gdiplus\GdipGetImageHeight', 'UPtr', newBitmap, 'UInt*', &newH := 0)
-
-    ; Account for border in physical pixels
-    global ShowSnipBorder, BorderThickness, BorderColor
-    scale      := A_ScreenDPI / 96
-    physBorder := ShowSnipBorder ? Round(BorderThickness * scale) : 0
-    totalW     := newW + physBorder * 2
-    totalH     := newH + physBorder * 2
-
-    ; Get current window rect in physical pixels and keep it centered
-    rect := Buffer(16, 0)
-    DllCall('GetWindowRect', 'Ptr', Hwnd, 'Ptr', rect)
-    curL := NumGet(rect,  0, 'Int'), curT := NumGet(rect,  4, 'Int')
-    curR := NumGet(rect,  8, 'Int'), curB := NumGet(rect, 12, 'Int')
-    centerX := (curL + curR) // 2
-    centerY := (curT + curB) // 2
-    newX := centerX - totalW // 2
-    newY := centerY - totalH // 2
-
-    ; Rebuild the Picture control at the correct inset
-    DllCall("DestroyWindow", "Ptr", g.Pic.Hwnd)
-    hBitmap := GDIp.CreateHBITMAPFromBitmap(newBitmap)
-    picOffset := ShowSnipBorder ? BorderThickness : 0
-    g.Pic   := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
-
-    ; Reposition in physical pixels via SetWindowPos
-    DllCall('SetWindowPos', 'Ptr', Hwnd, 'Ptr', 0,
-            'Int', newX, 'Int', newY, 'Int', totalW, 'Int', totalH,
-            'UInt', 0x0014)   ; SWP_NOZORDER | SWP_NOACTIVATE
-
-    ; Restore the border (and bevel, if enabled) after the bitmap swap
-    if ShowSnipBorder
-        SnipWinBorderColor(g, BorderColor)
-
-    ; Re-apply transparency if it was set
-    if snip.Alpha < 255
-        SetLayeredWinAttribs(Hwnd, snip.TransColor, snip.Alpha)
-
-    snip.Angle := 0
 }
 
 ; ==============================================================================
@@ -1082,6 +1303,19 @@ Class GDIp {
     }
 
     Static DisposeImage(pBitmap) => DllCall("gdiplus\GdipDisposeImage", "UPtr", pBitmap)
+
+    ; Clone a rectangular sub-area of a bitmap into a new 32bppARGB bitmap.
+    ; Used to crop the frozen master snapshot down to the current capture rect.
+    ; Returns 0 on failure (e.g. rect out of bounds) so callers can bail safely.
+    Static CloneBitmapArea(pBitmap, x, y, w, h) {
+        pClone := 0
+        ; 0x21808 = PixelFormat32bppARGB (matches the master's format).
+        DllCall("gdiplus\GdipCloneBitmapAreaI",
+                "Int", x, "Int", y, "Int", w, "Int", h,
+                "Int", 0x21808,
+                "UPtr", pBitmap, "UPtr*", &pClone)
+        return pClone
+    }
 
     Static SetBitmapToClipboard(pBitmap) {
         off1 := A_PtrSize = 8 ? 52 : 44
