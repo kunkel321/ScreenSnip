@@ -12,8 +12,8 @@ SetWinDelay(0)
 ; Based on Snipper by FanaticGuru 
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
-; Adapted and simplified by kunkel321 / Claude
-; Version date: 7-22-2026
+; Adapted by kunkel321 / Claude
+; Version date: 7-24-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -31,44 +31,55 @@ SetWinDelay(0)
 HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admin.`n"
 . "
 (
-  ------------------------------------------------
+  --------------------------------------------------
   CAPTURING
-  Ctrl + RButton drag          Capture region
+  Ctrl + RButton drag          Capture a region
   Ctrl + Shift + RButton drag  Capture + copy to clipboard
-  Shift + PrintScreen          Toggle show / hide all snips
+  Shift + PrintScreen          Show / hide all snips
 
-  SNIP CONTROLS  (snip window must be focused)
-  Left-click drag              Move
+  ON A SNIP  (mouse — click a snip first)
+  Left-drag                    Move the window
+  Right-drag                   Pan the image within the frame
+  Alt + drag edge / corner     Resize (trim / grow the capture)
   Right-click                  Context menu
   Esc                          Close this snip
 
-  OCR  (right-click menu > OCR)
-  Copy Text (Windows)          Fast text grab, no setup
-  Copy Text (PaddleOCR)        Slower, more accurate
-  Copy Table (PaddleOCR)       Rebuilds a grid; paste into Excel
+  EXPORT
+  Ctrl + C                     Copy image to clipboard
+  Ctrl + S                     Save image  (PNG / JPG / BMP)
+  Menu > OCR > Text (Windows)  Fast text grab, no setup
+  Menu > OCR > Text (Paddle)   Slower, more accurate
+  Menu > OCR > Table (Paddle)  Rebuilds a grid for Excel
 
-  TRANSPARENCY
-  Alt + Up / Down              Adjust ±25
-  Alt + Wheel                  Adjust ±10
+  ADJUST CAPTURE REGION  (re-crops the frozen snapshot)
+  Ctrl + Alt + Arrow           Pan  ± 1 px    (or right-drag)
+  Ctrl + Shift + Alt + Arrow   Pan  ± 10 px
+  Win + Alt + Arrow            Resize ± 1 px  (or Alt-drag an edge)
+  Win + Shift + Alt + Arrow    Resize ± 10 px (grow = Right / Down)
+  Range is limited by CaptureAdjustMargin (top of script).
 
-  ROTATION
-  Alt + Left / Right           Rotate ±1°
+  ROTATE  (turns the whole snip, frame and all)
+  Alt + Left / Right           Rotate ± 1°
   Shift + Alt + Left / Right   Snap to next 30° (CW / CCW)
+
+  STRAIGHTEN  (deskew — tilts the image inside a fixed frame)
+  Alt + , / .                  Straighten ± 1°  (CCW / CW)
+  Shift + Alt + , / .          Straighten ± 0.5°  (fine)
+  Squares up a skewed table before OCR: straighten,
+  then Alt-drag an edge to trim the exposed corners.
 
   FLIP
   Shift + Left / Right         Flip horizontal
   Shift + Up / Down            Flip vertical
 
-  NUDGE POSITION  (moves the floating window)
-  Ctrl + Arrow                 Move ±1 px
-  Ctrl + Shift + Arrow         Move ±10 px
+  MOVE WINDOW  (the floating window, not the capture)
+  Ctrl + Arrow                 Move ± 1 px
+  Ctrl + Shift + Arrow         Move ± 10 px
 
-  ADJUST CAPTURE REGION  (re-crops the frozen snapshot)
-  Ctrl + Alt + Arrow           Pan region ±1 px
-  Ctrl + Shift + Alt + Arrow   Pan region ±10 px
-  Win + Alt + Arrow            Resize ±1 px  (grow = Right / Down)
-  Win + Shift + Alt + Arrow    Resize ±10 px
-  (Range is limited by CaptureAdjustMargin, set near top of script.)
+  TRANSPARENCY
+  Alt + Up / Down              Adjust ± 25
+  Alt + Wheel                  Adjust ± 10
+  --------------------------------------------------
 )"
 
 ; ── Globals ────────────────────────────────────────────────────────────────────
@@ -96,6 +107,38 @@ SelectionColor := 'b58500'
 ; numbers are safe (they just capture everything and use more RAM — they
 ; won't crash or read off-screen).
 CaptureAdjustMargin := 150
+
+; Right-drag pan sensitivity: how many pixels of right-mouse drag map to ONE
+; pixel of region pan (hand-tool style — the image follows the cursor). Higher
+; = finer/slower, which suits nudging an edge into place; 1 = 1:1 tracking.
+; The fractional remainder is carried between frames, so even a slow drag moves
+; smoothly instead of stair-stepping. (The first few px of any drag are a dead
+; zone that distinguishes a pan from a plain right-click; see PanClickSlop.)
+PanDragDivisor := 3
+; Total right-drag travel (screen px) below which the gesture is treated as a
+; right-CLICK and opens the context menu instead of panning.
+PanClickSlop := 5
+
+; Edge-drag resize: hold Alt and drag a snip's edge/corner to grow or shrink the
+; capture region (the opposite edge stays put). EdgeGrabZone is how far inward,
+; in px, the grabbable band reaches from each edge; it's automatically widened to
+; at least the border thickness so a thick border is still fully grabbable. Only
+; active on upright snips (Angle 0) — a rotated snip's edges don't map cleanly to
+; the capture rectangle, so it's suppressed there (same rule as the border).
+EdgeGrabZone := 6
+
+; Straighten (deskew) — rotate the IMAGE inside a fixed rectangular frame,
+; e.g. to square up a skewed table before OCR. Unlike Rotation (which turns
+; the whole snip, frame and all), Straighten leaves the frame axis-aligned
+; and only tilts the content within it; you then trim the exposed corners
+; with a Resize. The content pivots about the frozen snapshot's CENTER, so
+; panning slides the frame over one stable rotated image (no swirl). The
+; surrounding CaptureAdjustMargin supplies the extra pixels the tilt pulls
+; in — a larger margin allows a larger clean straighten before the corners
+; run past the snapshot edge.
+StraightenStep     := 1      ; degrees per Alt+, / Alt+.
+StraightenFineStep := 0.5    ; degrees per Shift+Alt+, / Shift+Alt+.
+StraightenMaxAngle := 15     ; hard clamp (the practical limit is the margin)
 
 ; Show a colored border around each floating snip?
 ; true = show border,  false = no border (image only, fully borderless)
@@ -227,6 +270,7 @@ TrayStartup(*) {
 noop := (*) => 0
 SnipMenu := Menu()
 SnipMenu.Add('Copy to Clipboard', SnipMenu_Handler)
+SnipMenu.Add('Save Image As…`tCtrl+S', SnipMenu_Handler)
 
 ; OCR submenu — see SnipOCR.ahk (included at the bottom of this file) for setup.
 OcrMenu := Menu()
@@ -250,6 +294,16 @@ FlipMenu := Menu()
 FlipMenu.Add('Flip Horizontal (L/R)`tShift+←/→', SnipMenu_Handler)
 FlipMenu.Add('Flip Vertical (U/D)`tShift+↑/↓',   SnipMenu_Handler)
 SnipMenu.Add('Flip', FlipMenu)
+
+; Straighten (deskew) the image WITHIN a fixed frame — see StraightenSnip.
+StraightenMenu := Menu()
+StraightenMenu.Add('Straighten CW`tAlt+.',  SnipMenu_Handler)
+StraightenMenu.Add('Straighten CCW`tAlt+,', SnipMenu_Handler)
+StraightenMenu.Add('Reset Straighten',      SnipMenu_Handler)
+StraightenMenu.Add('')
+StraightenMenu.Add('Hold Shift → ±0.5° fine', noop)
+StraightenMenu.Disable('Hold Shift → ±0.5° fine')
+SnipMenu.Add('Straighten', StraightenMenu)
 
 ; Move the floating window (does NOT change what was captured).
 NudgeMenu := Menu()
@@ -302,6 +356,7 @@ OnMessage(0x200, WM_MOUSEMOVE)    ; keep selection overlay from stealing focus
 OnMessage(0x201, WM_LBUTTONDOWN)  ; allow dragging snip windows
 OnMessage(0x000F, WM_PAINT_BEVEL) ; re-paint the 3D bevel after any repaint
 OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
+OnMessage(0x0020, WM_SETCURSOR_RESIZE) ; Alt-hover over an edge → resize cursor
 
 ; ==============================================================================
 ; HOTKEYS
@@ -325,6 +380,8 @@ OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 #HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI')
 Esc::           CloseSnip() ; hide
 F1::            ShowHelp() ; hide
+^c::            SnipToClipboard() ; hide  — same as the menu's Copy to Clipboard
+^s::            SaveSnipAs() ; hide       — same as the menu's Save Image As…
 !Up::           AdjustSnipAlpha(+25) ; hide
 !Down::         AdjustSnipAlpha(-25) ; hide
 !WheelUp::      AdjustSnipAlpha(+10) ; hide
@@ -333,6 +390,12 @@ F1::            ShowHelp() ; hide
 !Right::        AdjustSnipAngle(+1) ; hide
 !+Left::        SnapSnipAngle(-1) ; hide
 !+Right::       SnapSnipAngle(+1) ; hide
+; Straighten (deskew): tilt the image inside a fixed frame. Comma = CCW (left
+; key), period = CW (right key); add Shift for the finer sub-degree step.
+!,::            StraightenSnip(-1) ; hide
+!.::            StraightenSnip(+1) ; hide
+!+,::           StraightenSnip(-1, true) ; hide
+!+.::           StraightenSnip(+1, true) ; hide
 +Left::         FlipSnip(WinGetID('A'), 'FlipH') ; hide
 +Right::        FlipSnip(WinGetID('A'), 'FlipH') ; hide
 +Up::           FlipSnip(WinGetID('A'), 'FlipV') ; hide
@@ -369,6 +432,71 @@ F1::            ShowHelp() ; hide
 #!+Up::         ResizeSnipRegion( 0, -10) ; hide
 #!+Down::       ResizeSnipRegion( 0, +10) ; hide
 #HotIf
+
+; ── Right-drag over a snip = PAN the capture region (hand-tool) ────────────────
+; Gated on the CURSOR being over a snip (not on focus), so it works even on a
+; just-captured snip that isn't active yet. It's a plain CONSUMING RButton
+; hotkey, so on a snip it takes over the right-drag gesture — which also means
+; AC2's global DragTools right-drag is suppressed HERE (on snips) but untouched
+; everywhere else. A right-CLICK with no meaningful travel still opens the menu.
+#HotIf SnipUnderCursor()
+RButton::       SnipRightButton() ; hide
+#HotIf
+
+; True when the mouse is over one of our snip windows. Used as the #HotIf
+; context for the right-drag pan so the gesture is scoped to snips only.
+SnipUnderCursor() {
+    global guiSnips
+    MouseGetPos(, , &win)
+    return guiSnips.Has(win)
+}
+
+; Handle a right-button press over a snip: drag to pan (image follows the
+; cursor, scaled by PanDragDivisor); a click (travel < PanClickSlop) opens the
+; context menu. Panning uses the size-preserving fast path (RenderSnipFast /
+; STM_SETIMAGE) so live dragging stays smooth instead of rebuilding the window.
+SnipRightButton() {
+    global guiSnips, PanDragDivisor, PanClickSlop
+    MouseGetPos(&startX, &startY, &win)
+    if !guiSnips.Has(win)
+        return
+    snip := guiSnips[win]
+    WinActivate('ahk_id ' win)         ; focus so keyboard adjusts work after, and
+                                        ; any stray DragTools keystrokes land here
+    divisor := Max(1, PanDragDivisor)
+    accX := 0.0, accY := 0.0
+    lastX := startX, lastY := startY
+    travel   := 0
+    dragging := false
+    while GetKeyState('RButton', 'P') {
+        if !guiSnips.Has(win)          ; snip closed mid-gesture — bail cleanly
+            return
+        MouseGetPos(&cx, &cy)
+        ddx := cx - lastX, ddy := cy - lastY
+        if (ddx || ddy) {
+            lastX := cx, lastY := cy
+            travel += Abs(ddx) + Abs(ddy)
+            ; Wait until we've cleared the click slop before panning, so a plain
+            ; right-click never nudges the region. The slop itself isn't applied.
+            if (!dragging && travel >= PanClickSlop)
+                dragging := true
+            if dragging {
+                ; Image follows the cursor → the crop moves the OTHER way, /divisor.
+                accX -= ddx / divisor
+                accY -= ddy / divisor
+                stepX := (accX >= 0) ? Floor(accX) : Ceil(accX)
+                stepY := (accY >= 0) ? Floor(accY) : Ceil(accY)
+                if (stepX || stepY) {
+                    accX -= stepX, accY -= stepY
+                    PanSnipRegionFast(snip, stepX, stepY)
+                }
+            }
+        }
+        Sleep 8
+    }
+    if !dragging                        ; it was a click, not a drag → show menu
+        ShowSnipMenuFor(win)
+}
 
 ; ==============================================================================
 ; SNIP MANAGEMENT
@@ -450,7 +578,7 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     ; layered on top. pBitmap always holds the current UPRIGHT crop (handy for
     ; OCR and re-rendering). Everything routes through RenderSnip().
     ObjMap[g.Hwnd] := { GuiObj: g, Area: Area, Alpha: 255, pBitmap: pBitmap
-                      , Angle: 0, FlipH: false, FlipV: false
+                      , Angle: 0, FlipH: false, FlipV: false, Skew: 0
                       , HasBorder: ShowSnipBorder, TransColor: snipTransColor
                       , SrcBitmap: SrcBitmap, SrcX: masterX, SrcY: masterY
                       , MasterW: masterW, MasterH: masterH, Crop: crop }
@@ -530,6 +658,43 @@ AdjustSnipAngle(delta) {
     RenderSnip(snip)
 }
 
+; Straighten (deskew) the active snip: tilt the CONTENT inside the fixed frame
+; without changing the frame's size or orientation. dir is -1 (CCW) or +1 (CW);
+; fine=true uses the smaller sub-degree step. Skew accumulates and is clamped to
+; ±StraightenMaxAngle (the real ceiling is usually the snapshot margin — past it
+; the pulled-in corners fill with the transparent color). The frame stays
+; rectangular, so the border survives and there's no magenta rotation halo.
+StraightenSnip(dir, fine := false, hwnd := 0) {
+    global guiSnips, StraightenStep, StraightenFineStep, StraightenMaxAngle
+    if !hwnd
+        hwnd := WinGetID('A')
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return
+    step    := fine ? StraightenFineStep : StraightenStep
+    newSkew := Max(-StraightenMaxAngle, Min(StraightenMaxAngle, snip.Skew + dir * step))
+    if (newSkew = snip.Skew)                  ; already at the clamp — nothing to do
+        return
+    snip.Skew := newSkew
+    RenderSnip(snip)
+}
+
+; Return a snip's content to level (Skew = 0), reverting to the lossless crop.
+ResetStraighten(hwnd := 0) {
+    global guiSnips
+    if !hwnd
+        hwnd := WinGetID('A')
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+    if (snip.Skew = 0)
+        return
+    snip.Skew := 0
+    RenderSnip(snip)
+}
+
 ; ==============================================================================
 ; RENDER PIPELINE  (single source of truth for what a snip displays)
 ; ==============================================================================
@@ -575,6 +740,85 @@ BuildDisplayBitmap(snip) {
     return result
 }
 
+; Build the bitmap to SAVE — same transforms as the on-screen image (WYSIWYG),
+; but for a non-cardinal rotation the corners are made genuinely TRANSPARENT
+; (when wantTransparent is true, i.e. saving PNG) instead of filled with the
+; magenta color key. Upright and 90/180/270 snips have no corners at all, so the
+; flag is moot for them. Returns a NEW bitmap the caller must dispose.
+BuildSaveBitmap(snip, wantTransparent) {
+    DllCall('gdiplus\GdipCloneImage', 'UPtr', snip.pBitmap, 'UPtr*', &work := 0)
+    if !work
+        return 0
+    if snip.FlipH
+        DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', 4)   ; horizontal
+    if snip.FlipV
+        DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', 6)   ; vertical
+
+    angle := Mod(snip.Angle + 360, 360)
+    if (angle = 0) {
+        result := work
+    } else if (Mod(angle, 90) = 0) {
+        DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', angle // 90)
+        result := work
+    } else {
+        result := GDIp.RotateBitmap(work, angle, snip.TransColor, wantTransparent)
+        GDIp.DisposeImage(work)
+    }
+    dpi := A_ScreenDPI + 0.0
+    DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', result, 'Float', dpi, 'Float', dpi)
+    return result
+}
+
+; Save a snip's current image (WYSIWYG) to a file the user picks. PNG (default)
+; gets clean transparent corners on tilted snips; JPG/BMP have no alpha so they
+; save exactly as displayed. Remembers the last-used folder for the session.
+SaveSnipAs(hwnd := 0) {
+    global guiSnips, appName
+    static lastDir := ''
+    if !hwnd
+        hwnd := WinGetID('A')
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+
+    if (lastDir = '' || !DirExist(lastDir)) {
+        lastDir := EnvGet('USERPROFILE') '\Pictures'
+        if !DirExist(lastDir)
+            lastDir := A_MyDocuments
+    }
+    default := lastDir '\ScreenSnip_' FormatTime(A_Now, 'yyyyMMdd_HHmmss') '.png'
+
+    ; "S16" = Save-As dialog that prompts before overwriting an existing file.
+    sel := FileSelect('S16', default, 'Save Snip As'
+                    , 'Images (*.png; *.jpg; *.jpeg; *.bmp)')
+    if (sel = '')
+        return   ; user cancelled
+
+    SplitPath(sel, , &outDir, &ext)
+    ext := StrLower(ext)
+    if (ext = '') {                       ; no extension typed → default to PNG
+        sel .= '.png', ext := 'png'
+    }
+    if (outDir != '')
+        lastDir := outDir
+
+    mime := (ext = 'jpg' || ext = 'jpeg') ? 'image/jpeg'
+          : (ext = 'bmp')                 ? 'image/bmp'
+          :                                 'image/png'
+    wantTransparent := (mime = 'image/png')
+
+    saveBmp := BuildSaveBitmap(snip, wantTransparent)
+    if !saveBmp {
+        MsgBox('Could not build the image to save.', appName, 4096)
+        return
+    }
+    status := GDIp.SaveImageToFile(saveBmp, sel, mime)
+    GDIp.DisposeImage(saveBmp)
+
+    if (status != 0)
+        MsgBox('Save failed (code ' status ').`n`nThe folder may be read-only, or the format unsupported.', appName, 4096)
+}
+
 ; Rebuild a snip's picture + window from its frozen master and current state.
 RenderSnip(snip) {
     global BorderThickness, BorderColor, Bevel3D, Bevel3DMaxThickness
@@ -584,7 +828,17 @@ RenderSnip(snip) {
 
     ; 1) Fresh upright crop from the master. Clone into a temp first so a rare
     ;    failure can't leave the snip with a disposed pBitmap and no image.
-    newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
+    ;    When Skew ≠ 0 (deskew), instead of a straight clone we draw the master
+    ;    rotated about ITS center and extract the (same-sized) crop rectangle —
+    ;    so the content tilts inside an unchanged, axis-aligned frame. At
+    ;    Skew = 0 CropSkewed would reproduce CloneBitmapArea exactly, but we
+    ;    keep the fast, lossless clone for that common case.
+    if (snip.Skew = 0)
+        newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
+    else
+        newCrop := GDIp.CropSkewed(snip.SrcBitmap
+                 , snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H
+                 , snip.MasterW / 2, snip.MasterH / 2, snip.Skew, snip.TransColor)
     if !newCrop
         return
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', newCrop, 'Float', dpi, 'Float', dpi)
@@ -685,8 +939,123 @@ PanSnipRegion(dx, dy, hwnd := 0) {
     RenderSnip(snip)
 }
 
-; Resize the capture region, anchored at its top-left corner (Right/Down grow,
-; Left/Up shrink). Clamped to an 8px minimum and to the snapshot's far edges.
+; Fast pan for live right-drag: mutate the crop like PanSnipRegion, but re-crop
+; and swap the bitmap IN PLACE (RenderSnipFast) instead of rebuilding the whole
+; window. Takes an already-resolved snip object. Returns true if the crop moved.
+; A pan never changes the crop's size, so the size-preserving fast path is safe.
+PanSnipRegionFast(snip, dx, dy) {
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return false
+    c  := snip.Crop
+    nx := Max(0, Min(c.X + dx, snip.MasterW - c.W))
+    ny := Max(0, Min(c.Y + dy, snip.MasterH - c.H))
+    if (nx = c.X && ny = c.Y)                 ; hit the snapshot edge — nothing to do
+        return false
+    c.X := nx, c.Y := ny
+    RenderSnipFast(snip)
+    return true
+}
+
+; Size-preserving render: rebuild the upright crop + display transform and swap
+; the Picture's bitmap via STM_SETIMAGE, WITHOUT destroying/recreating the
+; control or moving/resizing the window. PRECONDITION: the display size is
+; unchanged (true for pan). Used for smooth live dragging; anything that changes
+; the snip's dimensions (resize, rotate) must still go through RenderSnip.
+RenderSnipFast(snip) {
+    dpi := A_ScreenDPI + 0.0
+    if (snip.Skew = 0)
+        newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
+    else
+        newCrop := GDIp.CropSkewed(snip.SrcBitmap
+                 , snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H
+                 , snip.MasterW / 2, snip.MasterH / 2, snip.Skew, snip.TransColor)
+    if !newCrop
+        return
+    DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', newCrop, 'Float', dpi, 'Float', dpi)
+    if snip.pBitmap
+        GDIp.DisposeImage(snip.pBitmap)
+    snip.pBitmap := newCrop
+
+    ; Keep Area (screen coords of the current capture rect) in sync for OCR etc.
+    snip.Area := { X: snip.SrcX + snip.Crop.X, Y: snip.SrcY + snip.Crop.Y
+                 , W: snip.Crop.W, H: snip.Crop.H }
+
+    display := BuildDisplayBitmap(snip)
+    if !display
+        return
+    hBitmap := GDIp.CreateHBITMAPFromBitmap(display)
+    GDIp.DisposeImage(display)
+    ; STM_SETIMAGE both installs the new bitmap and returns the previous one,
+    ; which we own and must delete to avoid a GDI handle leak during fast pans.
+    oldHbm := SendMessage(0x0172, 0, hBitmap, snip.GuiObj.Pic.Hwnd)   ; STM_SETIMAGE, IMAGE_BITMAP
+    if oldHbm
+        DllCall('DeleteObject', 'Ptr', oldHbm)
+}
+
+; Render for a live edge-drag resize: like RenderSnipFast, but the window (and
+; the Picture control) also CHANGE SIZE, and the caller supplies the exact window
+; top-left (winX, winY) so the anchored edge can stay put instead of re-centering.
+; Reuses the existing Picture control (SetWindowPos + STM_SETIMAGE) rather than
+; destroying/recreating it, to keep the drag smooth. Angle is 0 during a resize,
+; so the display size equals the crop size (flips don't change dimensions).
+RenderSnipResize(snip, winX, winY) {
+    global BorderThickness, BorderColor, Bevel3D, Bevel3DMaxThickness
+    g    := snip.GuiObj
+    hwnd := g.Hwnd
+    dpi  := A_ScreenDPI + 0.0
+
+    if (snip.Skew = 0)
+        newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
+    else
+        newCrop := GDIp.CropSkewed(snip.SrcBitmap
+                 , snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H
+                 , snip.MasterW / 2, snip.MasterH / 2, snip.Skew, snip.TransColor)
+    if !newCrop
+        return
+    DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', newCrop, 'Float', dpi, 'Float', dpi)
+    if snip.pBitmap
+        GDIp.DisposeImage(snip.pBitmap)
+    snip.pBitmap := newCrop
+    snip.Area := { X: snip.SrcX + snip.Crop.X, Y: snip.SrcY + snip.Crop.Y
+                 , W: snip.Crop.W, H: snip.Crop.H }
+
+    display := BuildDisplayBitmap(snip)
+    if !display
+        return
+    DllCall('gdiplus\GdipGetImageWidth',  'UPtr', display, 'UInt*', &newW := 0)
+    DllCall('gdiplus\GdipGetImageHeight', 'UPtr', display, 'UInt*', &newH := 0)
+
+    scale      := A_ScreenDPI / 96
+    physBorder := snip.HasBorder ? Round(BorderThickness * scale) : 0
+    totalW     := newW + physBorder * 2
+    totalH     := newH + physBorder * 2
+
+    DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)   ; WM_SETREDRAW off
+
+    if snip.HasBorder {
+        g.BackColor := BorderColor
+        g.MarginX := BorderThickness, g.MarginY := BorderThickness
+    }
+    ; Resize/move the window, then the Picture child, then swap its bitmap.
+    DllCall('SetWindowPos', 'Ptr', hwnd, 'Ptr', 0,
+            'Int', winX, 'Int', winY, 'Int', totalW, 'Int', totalH, 'UInt', 0x0014)
+    DllCall('SetWindowPos', 'Ptr', g.Pic.Hwnd, 'Ptr', 0,
+            'Int', physBorder, 'Int', physBorder, 'Int', newW, 'Int', newH, 'UInt', 0x0014)
+    hBitmap := GDIp.CreateHBITMAPFromBitmap(display)
+    GDIp.DisposeImage(display)
+    oldHbm := SendMessage(0x0172, 0, hBitmap, g.Pic.Hwnd)   ; STM_SETIMAGE
+    if oldHbm
+        DllCall('DeleteObject', 'Ptr', oldHbm)
+
+    DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)   ; WM_SETREDRAW on
+    DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0085)
+
+    if (snip.HasBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
+    if snip.Alpha < 255
+        SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
+}
+
 ResizeSnipRegion(dw, dh, hwnd := 0) {
     global guiSnips
     static MINSZ := 8
@@ -788,7 +1157,7 @@ ShowHelp() {
     }
     g := Gui('+AlwaysOnTop +ToolWindow', 'ScreenSnip — Help')
     g.SetFont('s10', 'Courier New')
-    g.Add('Edit', 'r39 w550 ReadOnly -E0x200 -VScroll', HelpText)
+    g.Add('Edit', 'r30 w570 ReadOnly -E0x200 +VScroll', HelpText)
     g.SetFont('s9', 'Segoe UI')
     btn := g.Add('Button', 'xm w80 Default', 'OK')
     btn.OnEvent('Click', (*) => g.Destroy())
@@ -820,6 +1189,7 @@ SnipMenu_Handler(ItemName, ItemPos, *) {
     base := StrSplit(ItemName, "`t")[1]
     switch base {
         case 'Copy to Clipboard':       SnipToClipboard(TargetHwnd)
+        case 'Save Image As…':          SaveSnipAs(TargetHwnd)
         case 'Copy Text (Windows)':     SnipOcrWindowsText(TargetHwnd)
         case 'Copy Text (PaddleOCR)':   SnipOcrPaddleText(TargetHwnd)
         case 'Copy Table (PaddleOCR)':  SnipOcrPaddleTable(TargetHwnd)
@@ -828,6 +1198,9 @@ SnipMenu_Handler(ItemName, ItemPos, *) {
         case 'Rotate 90° CCW':          RotateSnip(TargetHwnd, -90)
         case 'Flip Horizontal (L/R)':   FlipSnip(TargetHwnd, 'FlipH')
         case 'Flip Vertical (U/D)':     FlipSnip(TargetHwnd, 'FlipV')
+        case 'Straighten CW':           StraightenSnip(+1, false, TargetHwnd)
+        case 'Straighten CCW':          StraightenSnip(-1, false, TargetHwnd)
+        case 'Reset Straighten':        ResetStraighten(TargetHwnd)
         case 'Border':                  ToggleSnipBorder(TargetHwnd)
         case 'Help':                    ShowHelp()
         case 'Close This Snip':         CloseSnip(TargetHwnd)
@@ -847,14 +1220,175 @@ WM_MOUSEMOVE(wParam, lParam, msg, hwnd) {
 
 WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
     global guiSnips
-    ; Allow dragging any snip window by its client area
-    if guiSnips.Has(hwnd)
-        PostMessage(0xA1, 2, , hwnd)
-    ; Also allow dragging by clicking a child control (Picture, border Text)
-    else {
-        parent := DllCall("GetParent", "Ptr", hwnd, "Ptr")
-        if guiSnips.Has(parent)
-            PostMessage(0xA1, 2, , parent)
+    ; Resolve to the snip window (the message may arrive on the Picture child).
+    snipHwnd := guiSnips.Has(hwnd) ? hwnd : DllCall("GetParent", "Ptr", hwnd, "Ptr")
+    if !guiSnips.Has(snipHwnd)
+        return
+    ; Alt + press on an edge/corner = resize the capture region; the opposite
+    ; edge stays anchored. Anything else (no Alt, or Alt away from an edge) keeps
+    ; the original "left-drag moves the window" behaviour.
+    if GetKeyState('Alt', 'P') {
+        edge := SnipEdgeAtCursor(snipHwnd)
+        if (edge != '') {
+            SnipResizeDrag(snipHwnd, edge)
+            return
+        }
+    }
+    PostMessage(0xA1, 2, , snipHwnd)   ; WM_NCLBUTTONDOWN, HTCAPTION → move
+}
+
+; While Alt is held and the cursor is over a snip's edge/corner, show the
+; matching resize cursor. This is PER-WINDOW (SetCursor on our own window only) —
+; deliberately NOT SetSystemCursor — so there's nothing to own, restore, or leave
+; stuck: the next WM_SETCURSOR (any mouse move off the edge, or Alt released)
+; falls through to the default arrow on its own. Returns 1 to tell Windows we
+; handled it (suppresses the default arrow); returns nothing to allow default.
+WM_SETCURSOR_RESIZE(wParam, lParam, msg, hwnd) {
+    global guiSnips
+    if !GetKeyState('Alt', 'P')
+        return
+    snipHwnd := guiSnips.Has(hwnd) ? hwnd : DllCall("GetParent", "Ptr", hwnd, "Ptr")
+    if !guiSnips.Has(snipHwnd)
+        return
+    edge := SnipEdgeAtCursor(snipHwnd)
+    if (edge = '')
+        return
+    DllCall("SetCursor", "Ptr", DllCall("LoadCursor", "Ptr", 0, "Ptr", CursorIdForEdge(edge), "Ptr"))
+    return 1
+}
+
+; Map an edge code to the appropriate IDC_SIZE* cursor id.
+CursorIdForEdge(edge) {
+    switch edge {
+        case 'L', 'R':   return 32644   ; IDC_SIZEWE   ↔
+        case 'T', 'B':   return 32645   ; IDC_SIZENS   ↕
+        case 'TL', 'BR': return 32642   ; IDC_SIZENWSE ↖↘
+        case 'TR', 'BL': return 32643   ; IDC_SIZENESW ↗↙
+    }
+    return 32512   ; IDC_ARROW (shouldn't happen)
+}
+
+; Which edge/corner of a snip is the cursor over (within the grab zone)? Returns
+; a code like 'L','R','T','B','TL','TR','BL','BR', or '' for none. Only upright
+; snips (Angle 0) qualify — a rotated snip's screen edges don't correspond to the
+; capture rectangle. Uses absolute screen coords (GetCursorPos) so it's immune to
+; whatever CoordMode is currently in effect.
+SnipEdgeAtCursor(snipHwnd) {
+    global guiSnips, EdgeGrabZone, BorderThickness
+    if !guiSnips.Has(snipHwnd)
+        return ''
+    snip := guiSnips[snipHwnd]
+    if (Mod(snip.Angle, 360) != 0)
+        return ''
+    rect := Buffer(16, 0)
+    DllCall('GetWindowRect', 'Ptr', snipHwnd, 'Ptr', rect)
+    L := NumGet(rect, 0, 'Int'), T := NumGet(rect,  4, 'Int')
+    R := NumGet(rect, 8, 'Int'), B := NumGet(rect, 12, 'Int')
+    pt := Buffer(8, 0)
+    DllCall('GetCursorPos', 'Ptr', pt)
+    mx := NumGet(pt, 0, 'Int'), my := NumGet(pt, 4, 'Int')
+    ; Ignore if the cursor isn't actually within (a hair of) the window.
+    if (mx < L - 2 || mx > R + 2 || my < T - 2 || my > B + 2)
+        return ''
+    scale := A_ScreenDPI / 96
+    z := Max(EdgeGrabZone, Round(BorderThickness * scale))
+    h := (mx <= L + z) ? 'L' : (mx >= R - z) ? 'R' : ''
+    v := (my <= T + z) ? 'T' : (my >= B - z) ? 'B' : ''
+    return v h   ; 'T'+'L'='TL', 'B'+'R'='BR', 'T'+''='T', ''+'L'='L', ''+''=''
+}
+
+; Drag an edge/corner to resize the capture region. The dragged edge follows the
+; cursor; the opposite edge stays nailed to its start screen position. Works in
+; MASTER coordinates: each frame maps the cursor to a master-x/-y (accounting for
+; flips), pairs it with the fixed anchor edge, and takes min/max to get the new
+; crop — so flips fall out naturally with no special-casing. Angle is 0 here (the
+; gate in SnipEdgeAtCursor guarantees it), so screen px map 1:1 to crop px.
+SnipResizeDrag(snipHwnd, edge) {
+    global guiSnips, BorderThickness
+    static MINSZ := 8
+    if !guiSnips.Has(snipHwnd)
+        return
+    snip := guiSnips[snipHwnd]
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return
+
+    ; Start geometry (physical px). Image area = window inset by the border.
+    rect := Buffer(16, 0)
+    DllCall('GetWindowRect', 'Ptr', snipHwnd, 'Ptr', rect)
+    winL := NumGet(rect, 0, 'Int'), winT := NumGet(rect,  4, 'Int')
+    winR := NumGet(rect, 8, 'Int'), winB := NumGet(rect, 12, 'Int')
+    scale      := A_ScreenDPI / 96
+    physBorder := snip.HasBorder ? Round(BorderThickness * scale) : 0
+    imgL := winL + physBorder, imgT := winT + physBorder
+    imgR := winR - physBorder, imgB := winB - physBorder
+
+    sc := { X: snip.Crop.X, Y: snip.Crop.Y, W: snip.Crop.W, H: snip.Crop.H }   ; start crop
+
+    dragL := InStr(edge, 'L'), dragR := InStr(edge, 'R')
+    dragT := InStr(edge, 'T'), dragB := InStr(edge, 'B')
+
+    ; Fixed anchor edges (master coords) taken from the non-dragged side. With a
+    ; flip, the visible-left edge maps to the crop's RIGHT master edge, etc.; the
+    ; two expressions below already bake that in via the FlipH/FlipV branch.
+    anchorMX := dragL ? (snip.FlipH ? sc.X : sc.X + sc.W)    ; dragging left → right edge anchored
+                      : (snip.FlipH ? sc.X + sc.W : sc.X)    ; else            → left  edge anchored
+    anchorMY := dragT ? (snip.FlipV ? sc.Y : sc.Y + sc.H)
+                      : (snip.FlipV ? sc.Y + sc.H : sc.Y)
+
+    resizeCursor := DllCall("LoadCursor", "Ptr", 0, "Ptr", CursorIdForEdge(edge), "Ptr")
+
+    while GetKeyState('LButton', 'P') {
+        if !guiSnips.Has(snipHwnd)
+            return
+        DllCall("SetCursor", "Ptr", resizeCursor)   ; hold the cursor through the drag
+        pt := Buffer(8, 0)
+        DllCall('GetCursorPos', 'Ptr', pt)
+        mx := NumGet(pt, 0, 'Int'), my := NumGet(pt, 4, 'Int')
+
+        ; ---- horizontal ----
+        if (dragL || dragR) {
+            dispX := mx - imgL
+            draggedMX := snip.FlipH ? (sc.X + sc.W - dispX) : (sc.X + dispX)
+            draggedMX := Max(0, Min(draggedMX, snip.MasterW))
+            if (Abs(draggedMX - anchorMX) < MINSZ)
+                draggedMX := (draggedMX >= anchorMX) ? anchorMX + MINSZ : anchorMX - MINSZ
+            draggedMX := Max(0, Min(draggedMX, snip.MasterW))
+            nx := Min(anchorMX, draggedMX)
+            nw := Max(MINSZ, Abs(draggedMX - anchorMX))
+            nw := Min(nw, snip.MasterW - nx)
+        } else {
+            nx := sc.X, nw := sc.W
+        }
+
+        ; ---- vertical ----
+        if (dragT || dragB) {
+            dispY := my - imgT
+            draggedMY := snip.FlipV ? (sc.Y + sc.H - dispY) : (sc.Y + dispY)
+            draggedMY := Max(0, Min(draggedMY, snip.MasterH))
+            if (Abs(draggedMY - anchorMY) < MINSZ)
+                draggedMY := (draggedMY >= anchorMY) ? anchorMY + MINSZ : anchorMY - MINSZ
+            draggedMY := Max(0, Min(draggedMY, snip.MasterH))
+            ny := Min(anchorMY, draggedMY)
+            nh := Max(MINSZ, Abs(draggedMY - anchorMY))
+            nh := Min(nh, snip.MasterH - ny)
+        } else {
+            ny := sc.Y, nh := sc.H
+        }
+
+        ; No change this frame — skip the re-render.
+        if (nx = snip.Crop.X && ny = snip.Crop.Y && nw = snip.Crop.W && nh = snip.Crop.H) {
+            Sleep 8
+            continue
+        }
+        snip.Crop.X := nx, snip.Crop.Y := ny, snip.Crop.W := nw, snip.Crop.H := nh
+
+        ; Keep the anchored VISIBLE edge fixed on screen: the left image edge
+        ; stays at imgL unless we're dragging left (then the right edge, imgR,
+        ; is fixed and the left is derived from the new width). Same vertically.
+        newImgL := dragL ? (imgR - nw) : imgL
+        newImgT := dragT ? (imgB - nh) : imgT
+        RenderSnipResize(snip, newImgL - physBorder, newImgT - physBorder)
+        Sleep 8
     }
 }
 
@@ -1090,8 +1624,14 @@ ToggleSnipBorder(Hwnd) {
 ; click itself — both the reasons the old global ~RButton hotkey was flaky.
 ; Signature: (GuiObj, Ctrl, Item, IsRightClick, X, Y) — we only need the Gui.
 ShowSnipMenu(GuiObj, *) {
+    ShowSnipMenuFor(GuiObj.Hwnd)
+}
+
+; Show the snip context menu for a specific window. Split out from the
+; ContextMenu-event entry point so the right-drag handler (which consumes
+; RButton and thus never fires that event) can open the menu on a click too.
+ShowSnipMenuFor(Hwnd) {
     global guiSnips, SnipMenu
-    Hwnd := GuiObj.Hwnd
     if !guiSnips.Has(Hwnd)
         return
     SnipMenu._targetHwnd := Hwnd
@@ -1317,6 +1857,52 @@ Class GDIp {
         return pClone
     }
 
+    ; Deskew crop (for the Straighten feature). Draws the master rotated by
+    ; angleDeg about the master-local pivot (cx, cy) into a NEW cropW×cropH
+    ; bitmap whose origin is the crop's top-left. Result is the same-sized
+    ; upright rectangle CloneBitmapArea would give, but with the content tilted
+    ; inside it. Rotating about a FIXED pivot (the master center) rather than
+    ; the moving crop center is what lets panning slide the frame over one
+    ; stable rotated image instead of swirling the content.
+    ;
+    ; Transform (GDI+ prepend order → first call listed is applied LAST):
+    ;     device = Translate(cx-cropX, cy-cropY) · Rotate(θ) · Translate(-cx,-cy) · world
+    ; A master pixel at (cx,cy) lands at (cx-cropX, cy-cropY); at θ=0 the whole
+    ; thing collapses to a plain (cropX,cropY)-origin crop, so a first straighten
+    ; from level doesn't visibly jump. Corners the tilt pulls from beyond the
+    ; master fill with transColor — but CaptureAdjustMargin normally supplies
+    ; real pixels there, so the fill rarely shows.
+    Static CropSkewed(pMaster, cropX, cropY, cropW, cropH, cx, cy, angleDeg, transColor := 0xFF00FF) {
+        DllCall('gdiplus\GdipCreateBitmapFromScan0',
+            'Int', cropW, 'Int', cropH, 'Int', 0, 'Int', 0x21808, 'Ptr', 0, 'UPtr*', &pNew := 0)
+        if !pNew
+            return 0
+        DllCall('gdiplus\GdipGetImageGraphicsContext', 'UPtr', pNew, 'UPtr*', &pGfx := 0)
+
+        ; Background = the transparent color key, so any exposed corner blends
+        ; toward it (matches how RotateBitmap handles rotation overflow).
+        fillColor := 0xFF000000 | transColor
+        DllCall('gdiplus\GdipCreateSolidFill', 'UInt', fillColor, 'UPtr*', &pBrush := 0)
+        DllCall('gdiplus\GdipFillRectangleI', 'UPtr', pGfx, 'UPtr', pBrush,
+            'Int', 0, 'Int', 0, 'Int', cropW, 'Int', cropH)
+        DllCall('gdiplus\GdipDeleteBrush', 'UPtr', pBrush)
+
+        DllCall('gdiplus\GdipSetInterpolationMode', 'UPtr', pGfx, 'Int', 7)   ; HighQualityBicubic
+        DllCall('gdiplus\GdipSetSmoothingMode',     'UPtr', pGfx, 'Int', 4)
+        DllCall('gdiplus\GdipSetPixelOffsetMode',   'UPtr', pGfx, 'Int', 2)
+
+        DllCall('gdiplus\GdipTranslateWorldTransform', 'UPtr', pGfx, 'Float', cx - cropX, 'Float', cy - cropY, 'Int', 0)
+        DllCall('gdiplus\GdipRotateWorldTransform',    'UPtr', pGfx, 'Float', angleDeg + 0.0, 'Int', 0)
+        DllCall('gdiplus\GdipTranslateWorldTransform', 'UPtr', pGfx, 'Float', -cx, 'Float', -cy, 'Int', 0)
+
+        DllCall('gdiplus\GdipDrawImageI', 'UPtr', pGfx, 'UPtr', pMaster, 'Int', 0, 'Int', 0)
+
+        dpi := A_ScreenDPI + 0.0
+        DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', pNew, 'Float', dpi, 'Float', dpi)
+        DllCall('gdiplus\GdipDeleteGraphics', 'UPtr', pGfx)
+        return pNew
+    }
+
     Static SetBitmapToClipboard(pBitmap) {
         off1 := A_PtrSize = 8 ? 52 : 44
         off2 := A_PtrSize = 8 ? 32 : 24
@@ -1379,7 +1965,7 @@ Class GDIp {
     ; The canvas is padded by 1px on each side so antialiased edge pixels
     ; blend inward into the image rather than outward into the trans color,
     ; preventing a 1px color fringe that would otherwise appear.
-    Static RotateBitmap(pBitmap, angleDeg, transColor := 0xFF00FF) {
+    Static RotateBitmap(pBitmap, angleDeg, transColor := 0xFF00FF, fillTransparent := false) {
         ; Get original dimensions
         DllCall('gdiplus\GdipGetImageWidth',  'UPtr', pBitmap, 'UInt*', &origW := 0)
         DllCall('gdiplus\GdipGetImageHeight', 'UPtr', pBitmap, 'UInt*', &origH := 0)
@@ -1390,21 +1976,33 @@ Class GDIp {
         newW := Round(origW * cosA + origH * sinA)
         newH := Round(origW * sinA + origH * cosA)
 
-        ; Create a new blank bitmap — use RGB (no alpha) so the fill color
-        ; is preserved exactly when converted to HBITMAP for display.
+        ; Create the destination canvas. For DISPLAY we use 24bppRGB (0x21808)
+        ; and fill it with an opaque color the layered window keys out — a 24bpp
+        ; surface has no alpha, so the fill survives HBITMAP conversion exactly.
+        ; For SAVING transparent (fillTransparent) we need a real alpha channel,
+        ; so we use 32bppARGB (0x26200A): the scan0 buffer is zero-initialised to
+        ; (0,0,0,0) — fully transparent — and the un-drawn corners stay that way.
+        ; (A 24bpp surface can't be transparent; its zeroed corners are opaque
+        ; black, which is exactly the "black corners in the saved PNG" bug.)
+        pixFmt := fillTransparent ? 0x26200A : 0x21808
         DllCall('gdiplus\GdipCreateBitmapFromScan0',
-            'Int', newW, 'Int', newH, 'Int', 0, 'Int', 0x21808, 'Ptr', 0, 'UPtr*', &pNew := 0)
+            'Int', newW, 'Int', newH, 'Int', 0, 'Int', pixFmt, 'Ptr', 0, 'UPtr*', &pNew := 0)
 
         ; Get graphics context for the new bitmap
         DllCall('gdiplus\GdipGetImageGraphicsContext', 'UPtr', pNew, 'UPtr*', &pGfx := 0)
 
-        ; Fill background with the trans color so antialiased edge pixels
-        ; blend toward it rather than leaving a hard, mismatched edge.
-        fillColor := 0xFF000000 | transColor   ; GDI+ ARGB: full opacity + RGB
-        DllCall('gdiplus\GdipCreateSolidFill', 'UInt', fillColor, 'UPtr*', &pBrush := 0)
-        DllCall('gdiplus\GdipFillRectangleI', 'UPtr', pGfx, 'UPtr', pBrush,
-            'Int', 0, 'Int', 0, 'Int', newW, 'Int', newH)
-        DllCall('gdiplus\GdipDeleteBrush', 'UPtr', pBrush)
+        ; Fill background with the trans color so antialiased edge pixels blend
+        ; toward it rather than leaving a hard, mismatched edge. In the transparent
+        ; case we skip the fill and let the antialiased edges blend toward the
+        ; zero-alpha background instead. The rotated content itself comes from an
+        ; opaque (24bpp) source, so it draws fully opaque over the clear canvas.
+        if !fillTransparent {
+            fillColor := 0xFF000000 | transColor   ; GDI+ ARGB: full opacity + RGB
+            DllCall('gdiplus\GdipCreateSolidFill', 'UInt', fillColor, 'UPtr*', &pBrush := 0)
+            DllCall('gdiplus\GdipFillRectangleI', 'UPtr', pGfx, 'UPtr', pBrush,
+                'Int', 0, 'Int', 0, 'Int', newW, 'Int', newH)
+            DllCall('gdiplus\GdipDeleteBrush', 'UPtr', pBrush)
+        }
 
         ; Set interpolation to high quality
         DllCall('gdiplus\GdipSetInterpolationMode', 'UPtr', pGfx, 'Int', 7)
@@ -1446,6 +2044,44 @@ Class GDIp {
         dpi := A_ScreenDPI + 0.0
         DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', pNew, 'Float', dpi, 'Float', dpi)
         return pNew
+    }
+
+    ; Find the GDI+ encoder CLSID for a MIME type (e.g. "image/png"), returned as
+    ; a 16-byte Buffer, or 0 if not found. Walks the installed-encoders array; the
+    ; MimeType field sits after the CLSID(16) + FormatID(16) + four string pointers.
+    Static GetEncoderClsid(mimeType) {
+        DllCall("gdiplus\GdipGetImageEncodersSize", "UInt*", &num := 0, "UInt*", &size := 0)
+        if (num = 0 || size = 0)
+            return 0
+        ci := Buffer(size)
+        DllCall("gdiplus\GdipGetImageEncoders", "UInt", num, "UInt", size, "Ptr", ci)
+        ; sizeof(ImageCodecInfo): CLSID(16) + FormatID(16) + 4 DWORDs(16) + 7
+        ; pointers. NOT size//num — `size` also covers the trailing string/sig
+        ; data the pointers reference, so size//num overshoots the real stride
+        ; and walks off into that data from the 2nd encoder on (→ bad pointer).
+        structSize := 48 + 7 * A_PtrSize
+        ; MimeType sits after CLSID(16) + FormatID(16) + 4 string pointers.
+        offMime    := 32 + 4 * A_PtrSize
+        Loop num {
+            base  := ci.Ptr + (A_Index - 1) * structSize
+            pMime := NumGet(base + offMime, "Ptr")
+            if (pMime && StrGet(pMime, "UTF-16") = mimeType) {
+                clsid := Buffer(16)
+                DllCall("RtlMoveMemory", "Ptr", clsid, "Ptr", base, "UPtr", 16)
+                return clsid
+            }
+        }
+        return 0
+    }
+
+    ; Encode pBitmap to a file. mimeType picks the format ("image/png" etc.).
+    ; Returns 0 on success, or a negative/GDI+ status code on failure.
+    Static SaveImageToFile(pBitmap, filePath, mimeType := "image/png") {
+        clsid := this.GetEncoderClsid(mimeType)
+        if !clsid
+            return -1
+        return DllCall("gdiplus\GdipSaveImageToFile",
+                       "UPtr", pBitmap, "WStr", filePath, "Ptr", clsid, "Ptr", 0, "Int")
     }
 }
 
