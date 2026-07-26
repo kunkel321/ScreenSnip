@@ -218,6 +218,11 @@ InfoFontSize := 10
 InfoWMinWidth  := 75
 InfoHMinHeight := 55
 
+; Master switch for the on-screen dimension (W × H) labels. Set to false to
+; disable BOTH the capture-time labels (shown while Ctrl+RButton dragging) and
+; the post-capture resize labels (shown while Alt-dragging a snip's edge).
+ShowDimensionLabels := true
+
 ; Transparent color key used to hide the corners of rotated snips.
 ; Always magenta — chosen because it almost never appears naturally in
 ; screen captures, avoiding accidental transparency within the image.
@@ -1352,6 +1357,66 @@ SnipEdgeAtCursor(snipHwnd) {
     return v h   ; 'T'+'L'='TL', 'B'+'R'='BR', 'T'+''='T', ''+'L'='L', ''+''=''
 }
 
+; Live W/H labels shown WHILE Alt-dragging a snip's edge/corner. The capture-time
+; labels (in SelectScreenRegion) live on the full-screen selection overlay, which
+; no longer exists once a snip is made — so we use our own tiny overlay window and
+; position it to exactly cover the snip's IMAGE area (screen physical px). The
+; labels are then placed within it just like capture: W centered on the bottom
+; edge, H centered on the right edge. Same font/box style, same min-size gating,
+; same dynamic digit-width math. Gated by the ShowDimensionLabels master switch.
+;   cmd 'update' — show (first call) / reposition, then update the two labels
+;   cmd 'hide'   — hide the overlay (call on every drag-exit path)
+; Angle is 0 during a resize and flips don't change dimensions, so w/h (= the new
+; crop size) equal the on-screen image size 1:1 and double as both the box size
+; and the displayed numbers.
+ResizeDimLabels(cmd, imgLeft := 0, imgTop := 0, w := 0, h := 0) {
+    global InfoFontSize, InfoWHOffsetRight, InfoWHOffsetBottom
+    global InfoWMinWidth, InfoHMinHeight, ShowDimensionLabels
+    static ov := "", shown := false
+    if !ShowDimensionLabels
+        return
+    if (ov = "") {
+        ; +E0x08000020 = WS_EX_NOACTIVATE | WS_EX_TRANSPARENT: never steals focus,
+        ; and the mouse passes straight through to the snip beneath during the drag.
+        ov := Gui('+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x08000020', 'SnipResizeInfo')
+        ov.MarginX := 0, ov.MarginY := 0
+        ov.BackColor := 1
+        WinSetTransColor(1, ov)   ; keyed color 1 → background invisible, only the boxes show
+        ov.InfoW := ov.Add('Text', 'Background0xDDDDDD w55 h22 Center', '')
+        ov.InfoW.SetFont('s' InfoFontSize ' bold c101010', 'Courier New')
+        ov.InfoH := ov.Add('Text', 'Background0xDDDDDD w55 h22 Right', '')
+        ov.InfoH.SetFont('s' InfoFontSize ' bold c101010', 'Courier New')
+        ov.InfoW.Visible := false, ov.InfoH.Visible := false
+    }
+    if (cmd = 'hide') {
+        if shown
+            ov.Hide(), shown := false
+        return
+    }
+    ; cmd = 'update' — Show once (NA = don't activate), then Move on later frames,
+    ; mirroring the capture loop's show-once-then-move approach to avoid flicker.
+    if !shown {
+        ov.Show('NA x' imgLeft ' y' imgTop ' w' w ' h' h)
+        shown := true
+    } else
+        ov.Move(imgLeft, imgTop, w, h)
+    pxPerDigit := Round(InfoFontSize * 0.72)
+    ctrlWofW := Max(30, StrLen(String(w)) * pxPerDigit + 12)
+    ctrlWofH := Max(30, StrLen(String(h)) * pxPerDigit + 12)
+    if (w > InfoWMinWidth) {
+        ov.InfoW.Text := w
+        ov.InfoW.Move(w // 2 - ctrlWofW // 2, h - InfoWHOffsetBottom, ctrlWofW, 22)
+        ov.InfoW.Visible := true
+    } else
+        ov.InfoW.Visible := false
+    if (h > InfoHMinHeight) {
+        ov.InfoH.Text := h
+        ov.InfoH.Move(w - InfoWHOffsetRight, h // 2 - 11, ctrlWofH, 22)
+        ov.InfoH.Visible := true
+    } else
+        ov.InfoH.Visible := false
+}
+
 ; Drag an edge/corner to resize the capture region. The dragged edge follows the
 ; cursor; the opposite edge stays nailed to its start screen position. Works in
 ; MASTER coordinates: each frame maps the cursor to a master-x/-y (accounting for
@@ -1392,9 +1457,15 @@ SnipResizeDrag(snipHwnd, edge) {
 
     resizeCursor := DllCall("LoadCursor", "Ptr", 0, "Ptr", CursorIdForEdge(edge), "Ptr")
 
+    ; Show the live W/H labels immediately at the starting size (no-op if the
+    ; ShowDimensionLabels master switch is off).
+    ResizeDimLabels('update', imgL, imgT, imgR - imgL, imgB - imgT)
+
     while GetKeyState('LButton', 'P') {
-        if !guiSnips.Has(snipHwnd)
+        if !guiSnips.Has(snipHwnd) {
+            ResizeDimLabels('hide')
             return
+        }
         DllCall("SetCursor", "Ptr", resizeCursor)   ; hold the cursor through the drag
         pt := Buffer(8, 0)
         DllCall('GetCursorPos', 'Ptr', pt)
@@ -1443,8 +1514,10 @@ SnipResizeDrag(snipHwnd, edge) {
         newImgL := dragL ? (imgR - nw) : imgL
         newImgT := dragT ? (imgB - nh) : imgT
         RenderSnipResize(snip, newImgL - physBorder, newImgT - physBorder)
+        ResizeDimLabels('update', newImgL, newImgT, nw, nh)
         Sleep 8
     }
+    ResizeDimLabels('hide')   ; drag released — clear the labels
 }
 
 ; Whenever a snip window repaints (focus change, drag, restore-from-minimize,
@@ -1972,6 +2045,7 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
         guiSSR.InfoW.SetFont('s' InfoFontSize ' bold c101010', 'Courier New')
         guiSSR.InfoH := guiSSR.Add('Text', 'Background0xDDDDDD w55 h22 Right', '')
         guiSSR.InfoH.SetFont('s' InfoFontSize ' bold c101010', 'Courier New')
+        guiSSR.InfoW.Visible := false, guiSSR.InfoH.Visible := false
     }
 
     CoordMode('Mouse', 'Screen')
@@ -2040,27 +2114,33 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
         ; Show width on bottom edge (centered) and height on right edge (centered).
         ; Each control is shown/hidden independently based on its own threshold.
         if (W != Wprev || H != Hprev) {
-            global InfoWHOffsetRight, InfoWHOffsetBottom, InfoFontSize, InfoWMinWidth, InfoHMinHeight
-            ; Dynamic control width: font-scaled px per digit + 12px padding.
-            ; Courier New bold: ~0.72px per pt per digit is a reliable approximation.
-            pxPerDigit := Round(InfoFontSize * 0.72)
-            wDigits  := StrLen(String(W))
-            hDigits  := StrLen(String(H))
-            ctrlWofW := Max(30, wDigits * pxPerDigit + 12)   ; width of the InfoW control
-            ctrlWofH := Max(30, hDigits * pxPerDigit + 12)   ; width of the InfoH control
-            if (W > InfoWMinWidth) {
-                guiSSR.InfoW.Text := W
-                guiSSR.InfoW.Move(W // 2 - ctrlWofW // 2, H - InfoWHOffsetBottom, ctrlWofW, 22)
-                guiSSR.InfoW.Visible := true
-            } else {
+            global InfoWHOffsetRight, InfoWHOffsetBottom, InfoFontSize, InfoWMinWidth, InfoHMinHeight, ShowDimensionLabels
+            if !ShowDimensionLabels {
+                ; Master switch off — keep both labels hidden.
                 guiSSR.InfoW.Visible := false
-            }
-            if (H > InfoHMinHeight) {
-                guiSSR.InfoH.Text := H
-                guiSSR.InfoH.Move(W - InfoWHOffsetRight, H // 2 - 11, ctrlWofH, 22)
-                guiSSR.InfoH.Visible := true
-            } else {
                 guiSSR.InfoH.Visible := false
+            } else {
+                ; Dynamic control width: font-scaled px per digit + 12px padding.
+                ; Courier New bold: ~0.72px per pt per digit is a reliable approximation.
+                pxPerDigit := Round(InfoFontSize * 0.72)
+                wDigits  := StrLen(String(W))
+                hDigits  := StrLen(String(H))
+                ctrlWofW := Max(30, wDigits * pxPerDigit + 12)   ; width of the InfoW control
+                ctrlWofH := Max(30, hDigits * pxPerDigit + 12)   ; width of the InfoH control
+                if (W > InfoWMinWidth) {
+                    guiSSR.InfoW.Text := W
+                    guiSSR.InfoW.Move(W // 2 - ctrlWofW // 2, H - InfoWHOffsetBottom, ctrlWofW, 22)
+                    guiSSR.InfoW.Visible := true
+                } else {
+                    guiSSR.InfoW.Visible := false
+                }
+                if (H > InfoHMinHeight) {
+                    guiSSR.InfoH.Text := H
+                    guiSSR.InfoH.Move(W - InfoWHOffsetRight, H // 2 - 11, ctrlWofH, 22)
+                    guiSSR.InfoH.Visible := true
+                } else {
+                    guiSSR.InfoH.Visible := false
+                }
             }
             Wprev := W, Hprev := H
         }
