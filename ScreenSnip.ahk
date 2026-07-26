@@ -1,9 +1,9 @@
-#Requires AutoHotkey v2
+﻿#Requires AutoHotkey v2
 #Warn All, Off
 #SingleInstance Force
 DetectHiddenWindows true
 SetWinDelay(0)
-
+;
 ;               ScreenSnip.ahk
 ;
 ; Github https://github.com/kunkel321/ScreenSnip
@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 7-24-2026
+; Version date: 7-26-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -171,6 +171,38 @@ Bevel3DInactiveStrength := 0.55
 ; which gives a focus cue without needing a second border color.
 Bevel3DInactiveDarknessFactor := 0.5
 
+; Drop shadow: cast a soft translucent shadow to the bottom/right of each snip.
+; This is a separate, click-through window that sits just behind the snip and is
+; kept glued to it via WM_WINDOWPOSCHANGED — the snip window itself is never
+; touched. It's painted per-pixel with UpdateLayeredWindow (real feathered
+; alpha); ShadowBlur softens the edges via a downscale/upscale pass. Suppressed
+; (hidden) at non-cardinal / skewed angles (a rectangle wouldn't match a tilted
+; snip), and whenever the snip isn't 100% opaque (a shadow behind a see-through
+; snip looks wrong). true = show shadow (default for new snips), false = none.
+; Toggle per-snip at runtime via the right-click "Shadow" menu item.
+ShowSnipShadow := true
+; Shadow color as a hex value, 0xRRGGBB (e.g. 0x000000 black, 0x203040 slate).
+; Hex only here — the GDI+ fill needs a numeric RGB, not an AHK colour name.
+ShadowColor := "0x000000"
+; How far, in logical px, the shadow is offset down/right (DPI-scaled like the
+; rest of the snip geometry). Keep this >= ShadowBlur for a clean bottom/right
+; drop; if blur exceeds offset you get a soft all-around halo/glow instead.
+ShadowOffset := 7
+; Offset used when the snip ISN'T the focused window. Making it smaller than
+; ShadowOffset lets an inactive snip cast a shorter shadow (reads as sitting
+; closer to the desktop), so the focused snip visually lifts forward — the same
+; trick the Bevel3D active/inactive strengths use. Set equal to ShadowOffset for
+; no active/inactive difference.
+ShadowOffsetInactive := 4
+; Edge softness in logical px. 0 = crisp rectangle; 5-8 = a gentle feathered
+; drop shadow; larger = softer/wider. Softening is done with plain GDI+ bilinear
+; scaling (no effects API, no machine code), so it works everywhere.
+ShadowBlur := 6
+; Peak shadow opacity at the core, 0 (invisible) - 255 (solid). The feather fades
+; below this. ~90-120 ≈ 35-47%, which reads as a shadow over most backdrops.
+ShadowAlpha := 105
+
+
 ; Position of the W and H labels during selection.
 ; InfoWHOffsetRight  — inset from the right edge for the H (height) label.
 ; InfoWHOffsetBottom — inset from the bottom edge for the W (width) label.
@@ -221,6 +253,8 @@ LogUnhandledError(err, mode) {
 CleanupOnExit(*) {
     try OnMessage(0x000F, WM_PAINT_BEVEL, 0)     ; deregister (MaxThreads 0)
     try OnMessage(0x0006, WM_ACTIVATE_BEVEL, 0)
+    try OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW, 0)
+    try OnMessage(0x0006, WM_ACTIVATE_SHADOW, 0)
     try CloseAllSnips()
     try GDIp.Shutdown()
 }
@@ -340,6 +374,7 @@ SnipMenu.Add('Resize Region', ResizeMenu)
 
 SnipMenu.Add('')
 SnipMenu.Add('Border',          SnipMenu_Handler)   ; checkable toggle
+SnipMenu.Add('Shadow',          SnipMenu_Handler)   ; checkable toggle
 
 SnipMenu.Add('')
 SnipMenu.Add('Close This Snip`tEsc', SnipMenu_Handler)
@@ -350,6 +385,9 @@ SnipMenu.Add('Help`tF1',        SnipMenu_Handler)
 ; Initialise the Border menu item to reflect the default ShowSnipBorder setting
 if ShowSnipBorder
     SnipMenu.Check('Border')
+; Same for the Shadow item and its default
+if ShowSnipShadow
+    SnipMenu.Check('Shadow')
 
 ; ── WM handlers (must be registered before hotkeys fire) ──────────────────────
 OnMessage(0x200, WM_MOUSEMOVE)    ; keep selection overlay from stealing focus
@@ -357,6 +395,8 @@ OnMessage(0x201, WM_LBUTTONDOWN)  ; allow dragging snip windows
 OnMessage(0x000F, WM_PAINT_BEVEL) ; re-paint the 3D bevel after any repaint
 OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 OnMessage(0x0020, WM_SETCURSOR_RESIZE) ; Alt-hover over an edge → resize cursor
+OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW) ; keep each snip's drop shadow glued behind it
+OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (active/inactive depth)
 
 ; ==============================================================================
 ; HOTKEYS
@@ -573,6 +613,13 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     if (ShowSnipBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
         DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(g.Hwnd), BevelDarknessFor(g.Hwnd))
 
+    ; Drop shadow — an independent click-through window glued just behind this
+    ; snip (see CreateSnipShadow / UpdateSnipShadow / WM_WINDOWPOSCHANGED_SHADOW).
+    ; Created empty here; the first paint happens below once the snip object
+    ; exists (UpdateSnipShadow needs its Angle/Skew/geometry).
+    global ShowSnipShadow
+    shadowGui := ShowSnipShadow ? CreateSnipShadow() : ""
+
     ; State model: SrcBitmap (frozen master) + Crop (which sub-rect shows) are
     ; the source of truth for CONTENT; Angle/FlipH/FlipV are a display transform
     ; layered on top. pBitmap always holds the current UPRIGHT crop (handy for
@@ -581,7 +628,11 @@ SnipArea(Area, SetClipboard, &ObjMap) {
                       , Angle: 0, FlipH: false, FlipV: false, Skew: 0
                       , HasBorder: ShowSnipBorder, TransColor: snipTransColor
                       , SrcBitmap: SrcBitmap, SrcX: masterX, SrcY: masterY
-                      , MasterW: masterW, MasterH: masterH, Crop: crop }
+                      , MasterW: masterW, MasterH: masterH, Crop: crop
+                      , HasShadow: ShowSnipShadow, ShadowGui: shadowGui }
+
+    if shadowGui                        ; first paint + place behind the snip
+        UpdateSnipShadow(ObjMap[g.Hwnd])
 
     ; Do NOT DisposeImage here — pBitmap and SrcBitmap are kept for the snip's life.
     return g.Hwnd
@@ -595,6 +646,7 @@ CloseSnip(Hwnd?) {
     if guiSnips.Has(Hwnd) {
         snip := guiSnips[Hwnd]
         guiSnips.Delete(Hwnd)   ; remove first so in-flight handlers/timers bail out
+        DestroySnipShadow(snip)
         GDIp.DisposeImage(snip.pBitmap)
         if (snip.HasProp('SrcBitmap') && snip.SrcBitmap)
             GDIp.DisposeImage(snip.SrcBitmap)
@@ -608,6 +660,7 @@ CloseAllSnips() {
     snipsToClose := guiSnips
     guiSnips := Map()   ; clear first so in-flight handlers/timers bail out
     for Hwnd, snip in snipsToClose {
+        DestroySnipShadow(snip)
         GDIp.DisposeImage(snip.pBitmap)
         if (snip.HasProp('SrcBitmap') && snip.SrcBitmap)
             GDIp.DisposeImage(snip.SrcBitmap)
@@ -644,6 +697,7 @@ AdjustSnipAlpha(delta) {
     snip := guiSnips[hwnd]
     snip.Alpha := Max(20, Min(255, snip.Alpha + delta))
     SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
+    UpdateSnipShadow(snip)   ; hide/show the shadow (it's only shown at full opacity)
 }
 
 ; Rotate the active snip by delta degrees (cumulative, arbitrary angle).
@@ -1202,6 +1256,7 @@ SnipMenu_Handler(ItemName, ItemPos, *) {
         case 'Straighten CCW':          StraightenSnip(-1, false, TargetHwnd)
         case 'Reset Straighten':        ResetStraighten(TargetHwnd)
         case 'Border':                  ToggleSnipBorder(TargetHwnd)
+        case 'Shadow':                  ToggleSnipShadow(TargetHwnd)
         case 'Help':                    ShowHelp()
         case 'Close This Snip':         CloseSnip(TargetHwnd)
         case 'Close All Snips':         CloseAllSnips()
@@ -1567,6 +1622,259 @@ _RGBSwap(colorHex) {
     return (b << 16) | (g << 8) | r
 }
 
+; ── Drop shadow ───────────────────────────────────────────────────────────────
+; A snip's shadow is a SEPARATE top-level window (never a parent/child of the
+; snip — reparenting would break the snip's activation, per-hwnd WM handlers,
+; alpha, and drag/resize/rotate machinery). It's borderless, tool-window,
+; always-on-top, layered, and — critically — WS_EX_NOACTIVATE + WS_EX_TRANSPARENT
+; so it never steals focus and clicks fall straight through to whatever's beneath.
+;
+; The content is painted PER-PIXEL with UpdateLayeredWindow: a GDI+ 32bpp
+; premultiplied-ARGB bitmap holding a translucent filled rectangle, optionally
+; Gaussian-blurred (ShadowBlur) so the edges feather. The canvas is padded by the
+; blur radius so the blur has room to bleed outward.
+;
+; Positioning + z-order + repaint are driven from ONE place: UpdateSnipShadow,
+; off the snip's WM_WINDOWPOSCHANGED. That single message fires whenever the snip
+; moves, resizes, rotates, toggles its border, or changes z-order (including the
+; internal HTCAPTION drag loop and activation). To keep drags smooth, the bitmap
+; is only re-blurred when the SIZE changes; a pure move is a cheap SetWindowPos.
+
+; Create an empty shadow window (hidden). The first paint happens via
+; UpdateSnipShadow once the snip object exists. Returns the shadow Gui.
+CreateSnipShadow() {
+    ; E-styles: 0x08000000 NOACTIVATE | 0x80000 LAYERED | 0x20 TRANSPARENT(click-through)
+    sg := Gui('-Caption +ToolWindow +AlwaysOnTop -DPIScale +E0x08080020', 'SnipShadow')
+    sg.Show('Hide')     ; realize the hwnd; stays hidden until the first paint
+    return sg
+}
+
+; Reposition / resize / re-stack a snip's shadow to match the snip's current
+; geometry, repainting the blurred bitmap only when the size actually changes.
+; Suppressed (fully hidden) when the shadow can't look right: at non-cardinal /
+; skewed angles (a rectangle wouldn't match a tilted snip and its transparent
+; corners would leak through), OR when the snip isn't 100% opaque (a shadow
+; behind a see-through snip looks wrong, and usually isn't wanted then).
+UpdateSnipShadow(snip) {
+    global ShadowOffset, ShadowOffsetInactive, ShadowBlur
+    if !snip.HasProp('ShadowGui') || !snip.ShadowGui
+        return
+    sg := snip.ShadowGui
+
+    translucent := snip.HasProp('Alpha') && snip.Alpha < 255
+    if (Mod(snip.Angle, 90) != 0 || snip.Skew != 0 || translucent) {
+        try sg.Hide()
+        snip.ShadowHidden := true
+        return
+    }
+
+    snipHwnd := snip.GuiObj.Hwnd
+    if !DllCall('IsWindow', 'Ptr', snipHwnd, 'Int')
+        return
+    WinGetPos(&sx, &sy, &sw, &sh, snipHwnd)
+
+    scale := A_ScreenDPI / 96
+    ; Active snip casts a longer shadow (lifted forward); inactive a shorter one
+    ; (closer to the desktop) — same active/inactive language as the bevel.
+    active := (DllCall('GetForegroundWindow', 'Ptr') = snipHwnd)
+    off   := Round((active ? ShadowOffset : ShadowOffsetInactive) * scale)
+    blur  := Min(255, Round(ShadowBlur * scale))
+    coreX := sx + off,  coreY := sy + off         ; where the solid core's top-left lands
+
+    wasHidden   := snip.HasProp('ShadowHidden') && snip.ShadowHidden
+    sizeChanged := !snip.HasProp('ShadowCoreW') || snip.ShadowCoreW != sw || snip.ShadowCoreH != sh
+
+    if (sizeChanged || wasHidden) {
+        ; (Re)paint the softened bitmap at the new size and ULW it into place.
+        info := PaintSnipShadow(sg.Hwnd, sw, sh, coreX, coreY, blur)
+        snip.ShadowCoreW := sw,  snip.ShadowCoreH := sh
+        snip.ShadowEx := info.ex,  snip.ShadowEy := info.ey
+        snip.ShadowHidden := false
+        ; Reveal (if returning from hidden) and re-stack just behind the snip.
+        DllCall('SetWindowPos', 'Ptr', sg.Hwnd, 'Ptr', snipHwnd, 'Int', 0, 'Int', 0
+              , 'Int', 0, 'Int', 0, 'UInt', 0x0001 | 0x0002 | 0x0010 | 0x0040)  ; NOSIZE|NOMOVE|NOACTIVATE|SHOWWINDOW
+    } else {
+        ; Same size — just relocate (layered content is retained) and re-stack.
+        ; ShadowEx/Ey are the feather margins added around the core.
+        DllCall('SetWindowPos', 'Ptr', sg.Hwnd, 'Ptr', snipHwnd
+              , 'Int', coreX - snip.ShadowEx, 'Int', coreY - snip.ShadowEy
+              , 'Int', 0, 'Int', 0, 'UInt', 0x0001 | 0x0010)                     ; NOSIZE|NOACTIVATE
+    }
+}
+
+; Build the shadow bitmap and push it to the layered window. The canvas is padded
+; by `pad` on every side so the softened edge has room; the solid core rect is
+; drawn inset by `pad`, then the whole thing is feathered by _SoftBlurBitmap. The
+; core's top-left is anchored at (coreX, coreY), so the window (which includes the
+; pad margin) is shifted up-left by `pad`. Returns {ex, ey} = the pad margins.
+PaintSnipShadow(sgHwnd, coreW, coreH, coreX, coreY, blur) {
+    static ARGB := 0x26200A   ; PixelFormat32bppARGB (straight, non-premultiplied)
+    global ShadowColor
+
+    pad := (blur > 0) ? blur + 2 : 0
+    cw  := coreW + pad * 2,  ch := coreH + pad * 2
+    bg  := Integer(ShadowColor) & 0xFFFFFF   ; shadow RGB with alpha 0 (clear color)
+
+    DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', cw, 'Int', ch
+          , 'Int', 0, 'Int', ARGB, 'Ptr', 0, 'Ptr*', &pBmp := 0)
+    DllCall('gdiplus\GdipGetImageGraphicsContext', 'Ptr', pBmp, 'Ptr*', &pGfx := 0)
+    ; Clear to the shadow colour at alpha 0 so blurring only feathers the ALPHA
+    ; channel — no dark fringe, even if ShadowColor isn't black.
+    DllCall('gdiplus\GdipGraphicsClear', 'Ptr', pGfx, 'UInt', bg)
+    DllCall('gdiplus\GdipCreateSolidFill', 'UInt', _ShadowArgb(), 'Ptr*', &pBrush := 0)
+    DllCall('gdiplus\GdipFillRectangleI', 'Ptr', pGfx, 'Ptr', pBrush
+          , 'Int', pad, 'Int', pad, 'Int', coreW, 'Int', coreH)
+    DllCall('gdiplus\GdipDeleteBrush', 'Ptr', pBrush)
+
+    if (blur > 0)
+        _SoftBlurBitmap(pGfx, pBmp, cw, ch, blur)
+
+    DllCall('gdiplus\GdipDeleteGraphics', 'Ptr', pGfx)
+    _UlwFromGdipBitmap(sgHwnd, pBmp, cw, ch, coreX - pad, coreY - pad)
+    DllCall('gdiplus\GdipDisposeImage', 'Ptr', pBmp)
+    return { ex: pad, ey: pad }
+}
+
+; Feather a bitmap's edges by scaling it DOWN then back UP with high-quality
+; bilinear interpolation — the round-trip averaging softens hard edges. Pure
+; core GDI+ (no effects API, no machine code); isotropic, so all edges feather
+; equally. `k` (≈ blur radius) sets how far down we shrink = how soft it gets.
+_SoftBlurBitmap(pGfx, pBmp, cw, ch, blur) {
+    static ARGB := 0x26200A
+    k  := blur + 1
+    dw := Max(1, cw // k),  dh := Max(1, ch // k)
+
+    ; Shrink into a small scratch bitmap (HighQualityBilinear prefilters/averages).
+    DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', dw, 'Int', dh
+          , 'Int', 0, 'Int', ARGB, 'Ptr', 0, 'Ptr*', &pSmall := 0)
+    DllCall('gdiplus\GdipGetImageGraphicsContext', 'Ptr', pSmall, 'Ptr*', &pSmallG := 0)
+    DllCall('gdiplus\GdipSetInterpolationMode', 'Ptr', pSmallG, 'Int', 6)  ; HighQualityBilinear
+    DllCall('gdiplus\GdipSetPixelOffsetMode',  'Ptr', pSmallG, 'Int', 2)   ; HighQuality
+    DllCall('gdiplus\GdipSetCompositingMode',  'Ptr', pSmallG, 'Int', 1)   ; SourceCopy
+    _DrawImageRectRect(pSmallG, pBmp, 0, 0, dw, dh, 0, 0, cw, ch)          ; down
+    DllCall('gdiplus\GdipDeleteGraphics', 'Ptr', pSmallG)
+
+    ; Draw the small bitmap back up over the full canvas — bilinear smooths it.
+    DllCall('gdiplus\GdipSetInterpolationMode', 'Ptr', pGfx, 'Int', 6)
+    DllCall('gdiplus\GdipSetPixelOffsetMode',  'Ptr', pGfx, 'Int', 2)
+    DllCall('gdiplus\GdipSetCompositingMode',  'Ptr', pGfx, 'Int', 1)      ; SourceCopy (overwrite)
+    _DrawImageRectRect(pGfx, pSmall, 0, 0, cw, ch, 0, 0, dw, dh)           ; up
+    DllCall('gdiplus\GdipDisposeImage', 'Ptr', pSmall)
+}
+
+; Thin wrapper over GdipDrawImageRectRectI (dst rect ← src rect, UnitPixel).
+_DrawImageRectRect(pGfx, pImg, dx, dy, dw, dh, sx, sy, sw, sh) {
+    DllCall('gdiplus\GdipDrawImageRectRectI', 'Ptr', pGfx, 'Ptr', pImg
+          , 'Int', dx, 'Int', dy, 'Int', dw, 'Int', dh
+          , 'Int', sx, 'Int', sy, 'Int', sw, 'Int', sh
+          , 'Int', 2, 'Ptr', 0, 'Ptr', 0, 'Ptr', 0)   ; UnitPixel
+}
+
+; Copy a GDI+ premultiplied-ARGB bitmap into a top-down 32bpp DIB and present it
+; via UpdateLayeredWindow (per-pixel alpha). x64 marshalling assumed.
+_UlwFromGdipBitmap(sgHwnd, pBmp, w, h, x, y) {
+    ; Top-down 32bpp DIB section (negative height = top-down).
+    bi := Buffer(40, 0)
+    NumPut('UInt', 40, bi, 0),  NumPut('Int', w, bi, 4),  NumPut('Int', -h, bi, 8)
+    NumPut('UShort', 1, bi, 12), NumPut('UShort', 32, bi, 14)   ; planes, bpp; BI_RGB = 0
+    hdcScreen := DllCall('GetDC', 'Ptr', 0, 'Ptr')
+    hdcMem    := DllCall('CreateCompatibleDC', 'Ptr', hdcScreen, 'Ptr')
+    pBits := 0
+    hDib := DllCall('CreateDIBSection', 'Ptr', hdcMem, 'Ptr', bi, 'UInt', 0
+                  , 'Ptr*', &pBits, 'Ptr', 0, 'UInt', 0, 'Ptr')
+    hOld := DllCall('SelectObject', 'Ptr', hdcMem, 'Ptr', hDib, 'Ptr')
+
+    ; Lock the GDI+ bits as PARGB (already premultiplied) and blit into the DIB.
+    rect := Buffer(16, 0)
+    NumPut('Int', 0, 'Int', 0, 'Int', w, 'Int', h, rect)
+    bd := Buffer(32, 0)   ; BitmapData: Width,Height,Stride,PixelFormat,Scan0,Reserved
+    DllCall('gdiplus\GdipBitmapLockBits', 'Ptr', pBmp, 'Ptr', rect
+          , 'UInt', 1, 'Int', 0x0E200B, 'Ptr', bd)             ; ImageLockModeRead, PARGB
+    srcStride := NumGet(bd, 8, 'Int')
+    srcScan0  := NumGet(bd, 16, 'Ptr')
+    dstStride := w * 4
+    Loop h
+        DllCall('RtlMoveMemory', 'Ptr', pBits + (A_Index - 1) * dstStride
+              , 'Ptr', srcScan0 + (A_Index - 1) * srcStride, 'UPtr', dstStride)
+    DllCall('gdiplus\GdipBitmapUnlockBits', 'Ptr', pBmp, 'Ptr', bd)
+
+    ; Present. BLENDFUNCTION = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA}; ULW_ALPHA = 2.
+    ptDst := Buffer(8, 0),  NumPut('Int', x, ptDst, 0),  NumPut('Int', y, ptDst, 4)
+    sz    := Buffer(8, 0),  NumPut('Int', w, sz, 0),     NumPut('Int', h, sz, 4)
+    ptSrc := Buffer(8, 0)
+    blend := Buffer(4, 0)
+    NumPut('UChar', 0, blend, 0), NumPut('UChar', 0, blend, 1)
+    NumPut('UChar', 255, blend, 2), NumPut('UChar', 1, blend, 3)
+    DllCall('UpdateLayeredWindow', 'Ptr', sgHwnd, 'Ptr', hdcScreen, 'Ptr', ptDst
+          , 'Ptr', sz, 'Ptr', hdcMem, 'Ptr', ptSrc, 'UInt', 0, 'Ptr', blend, 'UInt', 2)
+
+    DllCall('SelectObject', 'Ptr', hdcMem, 'Ptr', hOld)
+    DllCall('DeleteObject', 'Ptr', hDib)
+    DllCall('DeleteDC', 'Ptr', hdcMem)
+    DllCall('ReleaseDC', 'Ptr', 0, 'Ptr', hdcScreen)
+}
+
+; GDI+ ARGB (0xAARRGGBB) for the shadow fill, from ShadowColor + ShadowAlpha.
+_ShadowArgb() {
+    global ShadowColor, ShadowAlpha
+    return ((ShadowAlpha & 0xFF) << 24) | (Integer(ShadowColor) & 0xFFFFFF)
+}
+
+; Tear down a snip's shadow window.
+DestroySnipShadow(snip) {
+    if (snip.HasProp('ShadowGui') && snip.ShadowGui) {
+        try snip.ShadowGui.Destroy()
+        snip.ShadowGui := ''
+    }
+}
+
+; Toggle the drop shadow on/off for a single snip at runtime (right-click menu).
+ToggleSnipShadow(Hwnd) {
+    global guiSnips, SnipMenu
+    if !guiSnips.Has(Hwnd)
+        return
+    snip := guiSnips[Hwnd]
+    if snip.HasShadow {
+        snip.HasShadow := false
+        SnipMenu.UnCheck('Shadow')
+        DestroySnipShadow(snip)
+    } else {
+        snip.HasShadow := true
+        SnipMenu.Check('Shadow')
+        snip.ShadowGui := CreateSnipShadow()
+        try snip.DeleteProp('ShadowCoreW')  ; force a fresh paint at current size
+        try snip.DeleteProp('ShadowHidden')
+        UpdateSnipShadow(snip)
+    }
+}
+
+; The single glue point: any time a snip window moves, resizes, or re-stacks,
+; Windows sends it WM_WINDOWPOSCHANGED — we mirror that onto its shadow. Guarded
+; so it ignores the Picture child, the shadow windows, and every other Gui.
+; No global gate here: a per-snip "Shadow" toggle is authoritative, so a snip
+; whose shadow was turned on still tracks even if ShowSnipShadow defaulted off.
+WM_WINDOWPOSCHANGED_SHADOW(wParam, lParam, msg, hwnd) {
+    global guiSnips
+    if !guiSnips.Has(hwnd)
+        return
+    UpdateSnipShadow(guiSnips[hwnd])
+}
+
+; Focus changed: refresh the shadow so its offset switches between the active and
+; inactive values. WM_ACTIVATE reaches BOTH the snip gaining and the one losing
+; focus (unlike WM_WINDOWPOSCHANGED, which only reliably hits the one coming
+; forward). Deferred via SetTimer(-1) so GetForegroundWindow reflects the settled
+; state by the time we read it — the same approach the bevel uses.
+WM_ACTIVATE_SHADOW(wParam, lParam, msg, hwnd) {
+    global guiSnips
+    if !guiSnips.Has(hwnd)
+        return
+    snip := guiSnips[hwnd]
+    if !snip.HasProp('ShadowGui') || !snip.ShadowGui
+        return
+    SetTimer(() => UpdateSnipShadow(snip), -1)
+}
+
 ; Toggle border on/off for a single snip at runtime.
 ; Resizes the window in physical pixels to add/remove the border margin.
 ToggleSnipBorder(Hwnd) {
@@ -1639,6 +1947,10 @@ ShowSnipMenuFor(Hwnd) {
     guiSnips[Hwnd].HasBorder
         ? SnipMenu.Check('Border')
         : SnipMenu.UnCheck('Border')
+    ; Same for the Shadow checkmark
+    guiSnips[Hwnd].HasShadow
+        ? SnipMenu.Check('Shadow')
+        : SnipMenu.UnCheck('Shadow')
     WinActivate('ahk_id ' Hwnd)
     SnipMenu.Show()
 }
@@ -1680,6 +1992,14 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
 
     Wprev := Hprev := 0
     aborted := false
+
+    ; This drag suppresses the mouse button (Key), so onscreenkeybrd.ahk's own hook
+    ; never sees it and can't light it up. Tell the OSK to light it now; the matching
+    ; fade call after the loop covers BOTH exits -- normal release AND the Esc-abort
+    ; safety valve -- so the on-screen button can never stay stuck lit. Silent no-op
+    ; when the OSK isn't running. See OSKMouseHighlight() below.
+    OSKMouseHighlight(Key, true)
+
     Loop {
         ; Safety valve: Esc cancels the capture cleanly, so a snip can never
         ; get stuck on screen even if every button-release path fails.
@@ -1758,11 +2078,26 @@ SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
     guiSSR.Hide()
     guiSSR.InfoW.Visible := false
     guiSSR.InfoH.Visible := false
+    OSKMouseHighlight(Key, false)   ; drag over (released OR Esc-aborted) -> fade the button
     ; On Esc-abort, return a zero-size area so the caller's (W>8 && H>8) guard
     ; skips snip creation.
     if aborted
         return { X: X, Y: Y, W: 0, H: 0, X2: X, Y2: Y }
     return { X: X, Y: Y, W: W, H: H, X2: X+W, Y2: Y+H }
+}
+
+; Tell onscreenkeybrd.ahk to light (lightUp=true) or fade (false) a mouse button that
+; THIS script is suppressing for a drag, so the on-screen keyboard still shows it held.
+; RegisterWindowMessage returns the same id in every process for a given string, so no
+; shared file or hard-coded number is needed -- the OSK registers the identical string
+; and listens for it. Broadcast (ahk_id 0xFFFF) so we need no window handle, wrapped in
+; try so it's a harmless no-op when the OSK isn't running. Only the L/R mouse buttons map
+; to on-screen keys (codes 1/2, matching VK_LBUTTON/VK_RBUTTON); anything else is ignored.
+OSKMouseHighlight(keyName, lightUp) {
+    static msg := DllCall("RegisterWindowMessage", "Str", "AHK_OSK_MouseHighlight", "UInt")
+    code := (keyName = "LButton") ? 1 : (keyName = "RButton") ? 2 : 0
+    if code
+        try PostMessage(msg, lightUp ? 1 : 0, code, , "ahk_id 0xFFFF")
 }
 
 ; ==============================================================================
