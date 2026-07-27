@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 7-26-2026
+; Version date: 7-27-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -418,8 +418,23 @@ OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (ac
 +PrintScreen:: {  ; Shift + PrintScreen — toggle all snips ; hide
     global SnipVisible, guiSnips
     SnipVisible := !SnipVisible
-    for Hwnd, snip in guiSnips
-        SnipVisible ? snip.GuiObj.Show('NA') : snip.GuiObj.Hide()
+    for Hwnd, snip in guiSnips {
+        if SnipVisible {
+            snip.GuiObj.Show('NA')
+            ; The shadow is a SEPARATE top-level window, so it must be revealed
+            ; explicitly. Route through UpdateSnipShadow so a snip that shouldn't
+            ; cast one (tilted / skewed / translucent) stays correctly suppressed.
+            UpdateSnipShadow(snip)
+        } else {
+            snip.GuiObj.Hide()
+            ; Hide the snip's shadow window too, and mark it hidden so the next
+            ; UpdateSnipShadow repaints + reveals it from scratch.
+            if (snip.HasProp('ShadowGui') && snip.ShadowGui) {
+                try snip.ShadowGui.Hide()
+                snip.ShadowHidden := true
+            }
+        }
+    }
 }
 
 #HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI')
@@ -1733,6 +1748,16 @@ UpdateSnipShadow(snip) {
     if !snip.HasProp('ShadowGui') || !snip.ShadowGui
         return
     sg := snip.ShadowGui
+
+    ; A shadow must never show when its snip window isn't visible — e.g. after
+    ; Shift+PrintScreen hides all snips. The deferred WM_ACTIVATE_SHADOW timer
+    ; (scheduled when the focused snip loses focus as it hides) would otherwise
+    ; fire AFTER the toggle loop and repaint this shadow behind a hidden snip.
+    if !DllCall('IsWindowVisible', 'Ptr', snip.GuiObj.Hwnd, 'Int') {
+        try sg.Hide()
+        snip.ShadowHidden := true
+        return
+    }
 
     translucent := snip.HasProp('Alpha') && snip.Alpha < 255
     if (Mod(snip.Angle, 90) != 0 || snip.Skew != 0 || translucent) {
