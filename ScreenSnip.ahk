@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 7-27-2026
+; Version date: 8-1-2026 
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -37,6 +37,15 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Ctrl + Shift + RButton drag  Capture + copy to clipboard
   Shift + PrintScreen          Show / hide all snips
 
+  FREEZE CAPTURE  (grabs menus, tooltips, drop-downs)
+  {FreezeTrig}
+  Then RButton drag            Select a region from the frozen image
+  Hold Shift on release        ...and copy to clipboard
+  Esc                          Cancel the freeze
+  A mouse click closes a menu; a key press doesn't — so the whole
+  desktop is snapshotted first and you select from that image.
+  Trigger key is set by FreezeCaptureKey at the top of the script.
+
   ON A SNIP  (mouse — click a snip first)
   Left-drag                    Move the window
   Right-drag                   Pan the image within the frame
@@ -50,6 +59,9 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Menu > OCR > Text (Windows)  Fast text grab, no setup
   Menu > OCR > Text (Paddle)   Slower, more accurate
   Menu > OCR > Table (Paddle)  Rebuilds a grid for Excel
+  Menu > Imgur > Upload        Public link; [img] tag to clipboard
+  Menu > Imgur > Uploader...   Formats, delete, Client ID setup
+  Imgur needs a free imgur.com account — see SnipImgur.ahk.
 
   ADJUST CAPTURE REGION  (re-crops the frozen snapshot)
   Ctrl + Alt + Arrow           Pan  ± 1 px    (or right-drag)
@@ -85,6 +97,10 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
 ; ── Globals ────────────────────────────────────────────────────────────────────
 global guiSnips    := Map()   ; hwnd → { GuiObj, Area }
 global SnipVisible := true
+; True only while a Freeze Capture is in progress (backdrop up, awaiting a
+; selection). Used to short-circuit the normal Ctrl+RButton capture hotkey so a
+; Ctrl-held right-drag on the backdrop can't start a SECOND, nested selection.
+global FreezeActive := false
 
 ; ══════════════════════════════════════════════════════════════════════════════
 ; USER SETTINGS — adjust these to taste
@@ -107,6 +123,81 @@ SelectionColor := 'b58500'
 ; numbers are safe (they just capture everything and use more RAM — they
 ; won't crash or read off-screen).
 CaptureAdjustMargin := 150
+
+; ── FREEZE CAPTURE ────────────────────────────────────────────────────────────
+; Problem this solves: the normal Ctrl+RButton drag can't capture a context
+; menu, tooltip, or drop-down, because pressing a mouse button dismisses them.
+; Freeze Capture fixes that with a KEYBOARD trigger: the instant you press it,
+; the entire virtual desktop is BitBlt'd into memory, and a full-screen backdrop
+; showing that frozen image is put up. The real menu is then free to close — we
+; already have its pixels. You select a region on the frozen image with the same
+; RButton drag as always, and the snip is cut from the bitmap, not the screen.
+;
+; Because the crop reads from the frozen bitmap, ANY UI floated over the backdrop
+; (the hint message below, the W×H labels, the selection rectangle) is invisible
+; to the capture by construction. The one rule that keeps this true: never
+; re-grab from the screen after the initial freeze.
+;
+; Key to trigger Freeze Capture. Any single key AHK understands: 'ScrollLock',
+; 'PrintScreen', 'CapsLock', 'Pause', 'F12', etc. Set to '' to disable the
+; built-in trigger entirely (the cross-script message trigger below still works).
+;   ScrollLock  — the default. Almost nothing else uses it, it has a status LED,
+;                 and no app fights you for it.
+;   PrintScreen — the conventional choice, BUT SnagIt and Win11's Snipping Tool
+;                 both grab it; only use it if nothing else on your box has it.
+;   CapsLock    — fine IF no other script already claims CapsLock. Each AHK
+;                 script installs its own keyboard hook, and a consuming
+;                 CapsLock hotkey in an earlier hook means this one never sees
+;                 the key. (kunkel321: PersonalHotstrings.ahk nullifies CapsLock,
+;                 so use the message trigger from there instead — see below.)
+FreezeCaptureKey := 'ScrollLock'
+
+; Require a DOUBLE press of FreezeCaptureKey (true) or fire on a single press
+; (false)? Double-press is recommended for keys that have a normal function or a
+; toggle state: the hotkey is registered with '~' (pass-through), so two presses
+; of a toggle key like CapsLock or ScrollLock turn it on then straight back off,
+; leaving the lock state exactly as it was.
+FreezeDoublePress     := true
+; Maximum gap, in milliseconds, between the two presses.
+FreezeDoublePressTime := 400
+
+; Nullify a CapsLock SINGLE press while ScreenSnip is running?
+; Only has any effect when FreezeCaptureKey is 'CapsLock' — it's ignored for
+; every other key, so it can't surprise someone who never chose CapsLock.
+;
+; Why it exists: the trigger is registered with '~' (pass-through), so a DOUBLE
+; press toggles CapsLock on then straight back off and nets out. A single stray
+; press has nothing to cancel it, and leaves CapsLock on. If you're one of the
+; many people who never use CapsLock deliberately and would rather it did
+; nothing at all, set this true and ScreenSnip will switch it back off after
+; every press — single or double.
+;
+; Default is FALSE. Turning a key off on someone's keyboard is not a decision an
+; app should make for them, and plenty of people do use CapsLock.
+;
+; Note this does NOT block other scripts: the hotkey is non-suppressing, so any
+; other app's CapsLock binding still fires. It only resets the LOCK STATE
+; afterwards. If you have another script that USES the caps state (rather than
+; just hotkeying on the key), leave this false.
+FreezeNullifyCapsLock := false
+
+; Hint message shown over the frozen backdrop. It floats ABOVE the frozen image
+; and is never included in the snip, so it can be large and central without
+; obscuring anything. Use `n for a line break.
+FreezeHintText := 'Screen frozen — right-click-drag to select a region.'
+                . '`nEsc cancels.'
+; Set false for no hint at all (you'll get a silently frozen screen — only do
+; this once the gesture is deep muscle memory).
+ShowFreezeHint     := true
+FreezeHintFontSize := 15
+FreezeHintFontName := 'Segoe UI'
+FreezeHintTextColor := 'FFFFFF'    ; hex RRGGBB
+FreezeHintBackColor := '1E1E1E'    ; hex RRGGBB
+; Overall opacity of the hint pill, 0 (invisible) - 255 (solid). Semi-transparent
+; so anything directly under it is still readable while you aim the selection.
+FreezeHintAlpha    := 215
+; Corner rounding, in px, of the hint pill. 0 = square corners.
+FreezeHintCornerRadius := 16
 
 ; Right-drag pan sensitivity: how many pixels of right-mouse drag map to ONE
 ; pixel of region pan (hand-tool style — the image follows the cursor). Higher
@@ -131,8 +222,10 @@ EdgeGrabZone := 6
 ; e.g. to square up a skewed table before OCR. Unlike Rotation (which turns
 ; the whole snip, frame and all), Straighten leaves the frame axis-aligned
 ; and only tilts the content within it; you then trim the exposed corners
-; with a Resize. The content pivots about the frozen snapshot's CENTER, so
-; panning slides the frame over one stable rotated image (no swirl). The
+; with a Resize. The content pivots about the centre of the crop AS IT WAS when
+; you began straightening, and that pivot is then held fixed until you return to
+; level — so panning slides the frame over one stable rotated image (no swirl),
+; while the tilt still turns about what you're actually looking at. The
 ; surrounding CaptureAdjustMargin supplies the extra pixels the tilt pulls
 ; in — a larger margin allows a larger clean straighten before the corners
 ; run past the snapshot edge.
@@ -169,7 +262,7 @@ Bevel3DInactiveStrength := 0.55
 ; (unfocused) snip, 0.0-1.0. E.g. 0.2 = both edges are 20% darker than
 ; they'd be on the active snip — same contrast/shape, just dimmed overall,
 ; which gives a focus cue without needing a second border color.
-Bevel3DInactiveDarknessFactor := 0.5
+Bevel3DInactiveDarknessFactor := 0.2
 
 ; Drop shadow: cast a soft translucent shadow to the bottom/right of each snip.
 ; This is a separate, click-through window that sits just behind the snip and is
@@ -232,6 +325,17 @@ TransColor := 0xFF00FF
 
 ; ══════════════════════════════════════════════════════════════════════════════
 
+; HelpText is built at the very top of the script, ABOVE the settings, so its
+; freeze trigger line is left as a {FreezeTrig} placeholder and filled in here —
+; once FreezeCaptureKey / FreezeDoublePress are actually known, rather than
+; hard-coding a key name that goes stale the moment someone changes it. Padding
+; to 29 chars keeps the row aligned with the hard-coded ones around it.
+HelpText := StrReplace(HelpText, '{FreezeTrig}'
+    , (FreezeCaptureKey = '')
+        ? 'No trigger key set — see FreezeCaptureKey'
+        : Format('{:-29s}', (FreezeDoublePress ? 'Double-tap ' : 'Press ') FreezeCaptureKey)
+          . 'Freeze the whole screen')
+
 ; ── DPI awareness (helps on scaled displays) ───────────────────────────────────
 Try DllCall("SetThreadDpiAwarenessContext", "ptr", -3, "ptr")
 
@@ -279,6 +383,12 @@ trayMenu.Disable(trayTitle)
 trayMenu.Add()
 trayMenu.AddStandard()
 trayMenu.Add()
+; A discoverable way in for anyone who never reads the config block, and a
+; fallback when another script has won the race for FreezeCaptureKey. Safe
+; despite the "can't freeze ScreenSnip's own menus" limitation: selecting a tray
+; item makes TrackPopupMenu return and the menu close BEFORE the callback runs,
+; so the script's thread is free by the time FreezeCapture() blocks on it.
+trayMenu.Add('Freeze Capture', (*) => FreezeCapture())
 trayMenu.Add('Start with Windows', TrayStartup)
 if FileExist(A_Startup '\' appName '.lnk')
     trayMenu.Check('Start with Windows')
@@ -317,6 +427,19 @@ OcrMenu.Add('Copy Text (Windows)',    SnipMenu_Handler)  ; fast, no engine to in
 OcrMenu.Add('Copy Text (PaddleOCR)',  SnipMenu_Handler)  ; slower, more accurate
 OcrMenu.Add('Copy Table (PaddleOCR)', SnipMenu_Handler)  ; rebuilds a grid as TSV
 SnipMenu.Add('OCR', OcrMenu)
+
+; Imgur submenu — see SnipImgur.ahk (optionally included at the bottom of this
+; file).  The whole feature is opt-out: delete SnipImgur.ahk, or comment out its
+; #Include, and the `Imgur` class never comes into existence, so this block is
+; skipped and the menu is built without it.  Class objects are created before the
+; auto-execute section runs, which is why IsSet() can see one that's declared
+; 2,000 lines further down.  ImgurBuildMenu is invoked through the %name%()
+; dynamic-call form on purpose: a DIRECT call to a function that might not exist
+; is a LOAD-TIME error in v2, which would defeat the whole point.
+if IsSet(Imgur) {
+    imgurMenuBuilder := 'ImgurBuildMenu'
+    SnipMenu.Add('Imgur', %imgurMenuBuilder%())
+}
 
 SnipMenu.Add('')
 
@@ -403,13 +526,63 @@ OnMessage(0x0020, WM_SETCURSOR_RESIZE) ; Alt-hover over an edge → resize curso
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW) ; keep each snip's drop shadow glued behind it
 OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (active/inactive depth)
 
+; ── Freeze Capture triggers (see the FREEZE CAPTURE section further down) ─────
+; Registered HERE, above the first hotkey definition, so they're unambiguously
+; part of the auto-execute section.
+;
+; The trigger key goes through Hotkey() rather than a literal double-colon line
+; so it stays configurable from the settings block. The '~' prefix passes the key
+; through (so a toggle key's two presses cancel out and leave the lock state
+; untouched); '*' fires regardless of stray modifiers.
+if (FreezeCaptureKey != '') {
+    try Hotkey('~*' FreezeCaptureKey, FreezeHotkeyPressed)
+    catch as e
+        MsgBox('Could not register the Freeze Capture key "' FreezeCaptureKey '".'
+             . '`n`n' e.Message
+             . '`n`nCheck FreezeCaptureKey at the top of the script.', appName, 4096)
+}
+
+; Cross-script trigger. RegisterWindowMessage returns the same id in every
+; process for a given string, so another script can start a Freeze Capture with
+; no shared file and no hard-coded number — the same trick OSKMouseHighlight()
+; uses in the other direction. This matters when some OTHER script already owns
+; the key you'd like to trigger with: each AHK script installs its own keyboard
+; hook, and whichever hook sits earlier in the chain and suppresses a key wins,
+; so two scripts claiming one key is a race. Rather than fight it, let the script
+; that already owns the key keep it and have it broadcast this message. E.g. in
+; PersonalHotstrings.ahk, which nullifies CapsLock:
+;
+;     ~CapsLock:: {
+;         static lastTick := 0, msg := DllCall('RegisterWindowMessage'
+;                                     , 'Str', 'AHK_ScreenSnip_FreezeCapture', 'UInt')
+;         if (A_TickCount - lastTick <= 400) {
+;             lastTick := 0
+;             try PostMessage(msg, 0, 0, , 'ahk_id 0xFFFF')
+;         } else
+;             lastTick := A_TickCount
+;         SetCapsLockState('Off')      ; keep CapsLock nullified as before
+;     }
+;
+; Harmless no-op when ScreenSnip isn't running, so it can live in the library
+; unconditionally.
+OnMessage(DllCall('RegisterWindowMessage', 'Str', 'AHK_ScreenSnip_FreezeCapture', 'UInt')
+        , FreezeCaptureMessage)
+
 ; ==============================================================================
 ; HOTKEYS
 ; ==============================================================================
 
 ^+RButton::  ; hide
 ^RButton:: {  ; Ctrl + RButton drag — snip (+ clipboard if Shift held) ; hide
-    global guiSnips, SelectionColor
+    global guiSnips, SelectionColor, FreezeActive
+    ; During a Freeze Capture the backdrop is up and FreezeCapture() is running
+    ; its own wait loop, watching the PHYSICAL RButton state. Returning here
+    ; still SUPPRESSES the button (the hotkey fired), which is what we want — the
+    ; click must not reach anything — while the physical state the hook records
+    ; is exactly what the freeze loop reads. Same mechanism SelectScreenRegion
+    ; relies on for its own suppressed drag.
+    if FreezeActive
+        return
     Area := SelectScreenRegion('RButton', SelectionColor)
     if (Area.W > 8 && Area.H > 8)
         SnipArea(Area, GetKeyState('Shift'), &guiSnips)
@@ -435,6 +608,239 @@ OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (ac
             }
         }
     }
+}
+
+; ==============================================================================
+; FREEZE CAPTURE  (snapshot the whole desktop first, then select from the image)
+; ==============================================================================
+; See the FREEZE CAPTURE settings block at the top of the script for the why.
+; The flow is deliberately ordered:
+;
+;   1. hook fires  →  2. BitBlt the whole virtual screen  →  3. show backdrop
+;   →  4. show hint  →  5. wait for RButton  →  6. hide hint, run the NORMAL
+;   SelectScreenRegion drag  →  7. hide backdrop  →  8. SnipArea() from the
+;   frozen bitmap instead of the live screen.
+;
+; Steps 2 and 3 must not be swapped: creating any window first steals activation
+; and the menu we're trying to capture is gone before the BitBlt happens.
+
+; (The trigger key and the cross-script message are REGISTERED up in the
+; WM-handler block, above the first hotkey definition, so they're guaranteed to
+; run in the auto-execute section. The handlers themselves live here.)
+
+; Fired by the broadcast message registered up top. The capture runs a blocking wait loop,
+; which must never happen inside a message handler — so hand off to a -1 timer
+; (runs once, on the next message check, outside this handler) and return
+; immediately.
+FreezeCaptureMessage(*) {
+    SetTimer(FreezeCapture, -1)
+    return 1
+}
+
+; Trigger-key handler: fire immediately, or on the second press within
+; FreezeDoublePressTime when FreezeDoublePress is on.
+;
+; The CapsLock reset runs on EVERY press, whether or not it triggered a capture,
+; so single and double presses both end with the lock state off. That's what
+; makes FreezeNullifyCapsLock behave like a plain "CapsLock does nothing" binding
+; while still leaving the key usable as a trigger. The hotkey is non-suppressing
+; ('~'), so the key event itself still reaches every other hook in the chain —
+; only the resulting lock state is undone.
+FreezeHotkeyPressed(*) {
+    global FreezeDoublePress, FreezeDoublePressTime
+    global FreezeCaptureKey, FreezeNullifyCapsLock
+    static lastTick := 0
+
+    ; Reset FIRST, not last: FreezeCapture() below blocks for the entire capture
+    ; (backdrop up, waiting on the selection drag), so resetting afterwards would
+    ; leave the caps light on for the whole time. Guarded on the key name as well
+    ; as the setting, so it stays inert for anyone who chose a different trigger
+    ; and can't quietly disable a CapsLock they actually use.
+    if (FreezeNullifyCapsLock && FreezeCaptureKey = 'CapsLock')
+        SetCapsLockState('Off')
+
+    if !FreezeDoublePress
+        FreezeCapture()
+    else if (A_TickCount - lastTick <= FreezeDoublePressTime) {
+        lastTick := 0            ; consume the pair, so a 3rd press starts fresh
+        FreezeCapture()
+    } else
+        lastTick := A_TickCount
+}
+
+; The capture itself.
+FreezeCapture() {
+    global guiSnips, SelectionColor, FreezeActive, ShowFreezeHint
+    if FreezeActive              ; already frozen — ignore a re-trigger
+        return
+    FreezeActive := true
+
+    frozen := backdrop := backdropPic := hbm := 0
+    try {
+        ; ── 1) Snapshot FIRST, before any window exists ──────────────────────
+        GetVirtualScreen(&vx, &vy, &vw, &vh)
+        frozen := GDIp.BitmapFromScreen({ X: vx, Y: vy, W: vw, H: vh })
+        if !frozen
+            return
+        dpi := A_ScreenDPI + 0.0
+        DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', frozen, 'Float', dpi, 'Float', dpi)
+
+        ; ── 2) Full-screen backdrop showing the frozen image ─────────────────
+        ; +E0x08000000 = WS_EX_NOACTIVATE: never takes focus, so it can't fight
+        ; the foreground window or disturb the selection drag. -DPIScale because
+        ; the coordinates below are already real (physical) screen pixels.
+        hbm      := GDIp.CreateHBITMAPFromBitmap(frozen)
+        backdrop := Gui('-Caption +AlwaysOnTop +ToolWindow -DPIScale +E0x08000000', 'SnipperFreeze')
+        backdrop.MarginX := 0, backdrop.MarginY := 0
+        backdrop.BackColor := 0x000000
+        backdropPic := backdrop.Add('Picture', 'x0 y0 w' vw ' h' vh, 'HBITMAP:' hbm)
+        backdrop.Show('NA x' vx ' y' vy ' w' vw ' h' vh)
+
+        ; ── 3) Hint, floated ABOVE the backdrop ──────────────────────────────
+        ; Not captured: the snip is cut from `frozen`, which was grabbed before
+        ; this window existed. Shown after the backdrop so it lands on top of it;
+        ; SelectScreenRegion's own overlay then shows on top of BOTH.
+        hint := ShowFreezeHint ? ShowFreezeHintGui(backdrop.Hwnd) : 0
+
+        ; ── 4) Wait for the selection to start ───────────────────────────────
+        aborted := false
+        while true {
+            if GetKeyState('Escape', 'P') {
+                aborted := true
+                break
+            }
+            if GetKeyState('RButton', 'P')
+                break
+            Sleep 10
+        }
+        if aborted
+            return
+
+        ; The hint has said what it needed to; drop it now that the drag is
+        ; starting, so it doesn't compete with the W×H dimension labels.
+        if hint
+            HideFreezeHintGui(&hint)
+
+        ; ── 5) Normal selection drag, unmodified ─────────────────────────────
+        ; SelectScreenRegion only reads mouse coordinates and returns a rect —
+        ; it neither knows nor cares that the pixels beneath it are frozen.
+        Area := SelectScreenRegion('RButton', SelectionColor)
+
+        ; ── 6) Drop the backdrop BEFORE creating the snip ────────────────────
+        ; The live desktop comes back immediately, and the new snip window can't
+        ; end up sandwiched behind a full-screen topmost window.
+        if hint
+            HideFreezeHintGui(&hint)
+        DestroyFreezeBackdrop(&backdrop, &backdropPic, &hbm)
+
+        ; ── 7) Cut the snip out of the frozen bitmap ─────────────────────────
+        if (Area.W > 8 && Area.H > 8)
+            SnipArea(Area, GetKeyState('Shift'), &guiSnips, frozen, vx, vy)
+    } catch as e {
+        LogUnhandledError(e, 'FreezeCapture')
+    } finally {
+        ; Guaranteed teardown on every path — normal finish, Esc abort, or a
+        ; throw part-way through. Each helper clears the reference it frees, so
+        ; the second call here is a no-op rather than a double-free, and one
+        ; failure can't strand a full-screen topmost window on the desktop.
+        if (IsSet(hint) && hint)
+            try HideFreezeHintGui(&hint)
+        DestroyFreezeBackdrop(&backdrop, &backdropPic, &hbm)
+        if frozen
+            try GDIp.DisposeImage(frozen)
+        FreezeActive := false
+    }
+}
+
+; Tear down the frozen backdrop and release its bitmap, clearing every reference
+; so a second call does nothing.
+;
+; Ordering matters and mirrors what RenderSnip already does for its own picture
+; swap: destroy the Picture control's window FIRST, then DeleteObject the HBITMAP
+; we created. RenderSnip's comment records why — an HBITMAP handed to a Picture
+; control is not reliably freed for us, and at full-virtual-screen size that's a
+; ~vw × vh × 4 byte leak per capture, which would add up fast. Destroying the
+; control before deleting the bitmap means nothing is still referencing it.
+DestroyFreezeBackdrop(&backdrop, &pic, &hbm) {
+    if pic {
+        try DllCall('DestroyWindow', 'Ptr', pic.Hwnd)
+        pic := 0
+    }
+    if hbm {
+        try DllCall('DeleteObject', 'Ptr', hbm)
+        hbm := 0
+    }
+    if backdrop {
+        try backdrop.Destroy()
+        backdrop := 0
+    }
+}
+
+; Build and show the floating hint. Returns the Gui (or 0 if it couldn't be
+; made). WS_EX_TRANSPARENT (0x20) makes it click-through so the right-drag goes
+; straight to whatever is underneath; WS_EX_NOACTIVATE (0x08000000) keeps it from
+; ever taking focus. Owned by the backdrop so the z-order between them is stable.
+;
+; Deliberately NOT using a color-key (WinSetTransColor) for the transparency:
+; antialiased glyph edges pick up colored fringing against it, which looks
+; especially bad over an arbitrary screenshot. A uniform WinSetTransparent alpha
+; on the whole pill has no such problem, and the solid backing is what makes the
+; text readable over a busy desktop in the first place.
+ShowFreezeHintGui(ownerHwnd) {
+    global FreezeHintText, FreezeHintFontSize, FreezeHintFontName
+    global FreezeHintTextColor, FreezeHintBackColor, FreezeHintAlpha
+    global FreezeHintCornerRadius
+
+    hint := Gui('-Caption +AlwaysOnTop +ToolWindow -DPIScale +E0x08000020', 'SnipperFreezeHint')
+    hint.Opt('+Owner' ownerHwnd)
+    hint.MarginX := 22, hint.MarginY := 16
+    hint.BackColor := FreezeHintBackColor
+    hint.SetFont('s' FreezeHintFontSize ' c' FreezeHintTextColor, FreezeHintFontName)
+    hint.Add('Text', 'Center', FreezeHintText)
+
+    ; Create it hidden so we can measure the auto-sized result, then place it
+    ; centered on whichever monitor the cursor is on (NOT the primary — on a
+    ; multi-monitor setup those are usually different).
+    hint.Show('Hide AutoSize')
+    hint.GetPos(, , &hw, &hh)
+    CoordMode('Mouse', 'Screen')
+    MouseGetPos(&mx, &my)
+    MonitorGet(MonitorIndexAt(mx, my), &mL, &mT, &mR, &mB)
+    hint.Show('NA x' (mL + (mR - mL - hw) // 2) ' y' (mT + (mB - mT - hh) // 2)
+            . ' w' hw ' h' hh)
+
+    WinSetTransparent(FreezeHintAlpha, hint)
+
+    ; Rounded corners via a window region. The +1s are because CreateRoundRectRgn
+    ; treats the right/bottom edges as exclusive.
+    if (FreezeHintCornerRadius > 0) {
+        r := FreezeHintCornerRadius
+        hRgn := DllCall('CreateRoundRectRgn', 'Int', 0, 'Int', 0
+                      , 'Int', hw + 1, 'Int', hh + 1, 'Int', r, 'Int', r, 'Ptr')
+        if hRgn                        ; the window owns the region after this,
+            DllCall('SetWindowRgn', 'Ptr', hint.Hwnd, 'Ptr', hRgn, 'Int', 1)
+    }                                  ; so we must NOT DeleteObject it.
+    return hint
+}
+
+; Destroy the hint and clear the caller's reference, so the finally-block's
+; second call is a safe no-op rather than a double-destroy.
+HideFreezeHintGui(&hint) {
+    if hint {
+        try hint.Destroy()
+        hint := 0
+    }
+}
+
+; 1-based index of the monitor containing a screen point; falls back to the
+; primary monitor if the point is in a gap between/outside displays.
+MonitorIndexAt(x, y) {
+    Loop MonitorGetCount() {
+        MonitorGet(A_Index, &L, &T, &R, &B)
+        if (x >= L && x < R && y >= T && y < B)
+            return A_Index
+    }
+    return MonitorGetPrimary()
 }
 
 #HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI')
@@ -564,7 +970,15 @@ SnipRightButton() {
 
 ; Create a floating snip from a screen area.
 ; SetClipboard=true also puts the image on the clipboard.
-SnipArea(Area, SetClipboard, &ObjMap) {
+;
+; FrozenSrc (optional) is a GDI+ bitmap of the whole virtual screen, already
+; captured, with FrozenX/FrozenY as its top-left in screen coordinates — passed
+; in by FreezeCapture(). When supplied, the master snapshot below is cut from
+; THAT image instead of being BitBlt'd from the live screen. Everything
+; downstream (crop, margin, pan, resize, straighten, render) is identical, so
+; a frozen snip behaves exactly like a normal one. The caller retains ownership
+; of FrozenSrc and disposes it; we only copy out of it.
+SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0) {
     global ShowSnipBorder, BorderThickness, BorderColor, TransColor, CaptureAdjustMargin
     dpi := A_ScreenDPI + 0.0
 
@@ -585,7 +999,18 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     masterX := mLeft,                 masterY := mTop
     masterW := Max(1, mRight - mLeft), masterH := Max(1, mBot - mTop)
 
-    SrcBitmap := GDIp.BitmapFromScreen({ X: masterX, Y: masterY, W: masterW, H: masterH })
+    ; Frozen source → copy the master out of the snapshot we already hold. Note
+    ; the master is cut to the SAME selection+CaptureAdjustMargin size as a live
+    ; grab, rather than keeping the whole desktop: identical adjust behaviour,
+    ; identical memory cost, and no surprise where panning wanders off across
+    ; unrelated parts of the screen. (Want whole-desktop roam? That's already
+    ; what a very large CaptureAdjustMargin does — for both capture modes.)
+    if FrozenSrc {
+        SrcBitmap := GDIp.CloneBitmapArea(FrozenSrc, masterX - FrozenX, masterY - FrozenY, masterW, masterH)
+        if !SrcBitmap                       ; clone failed — fall back to a live
+            SrcBitmap := GDIp.BitmapFromScreen({ X: masterX, Y: masterY, W: masterW, H: masterH })
+    } else                                  ; grab so we still produce a snip
+        SrcBitmap := GDIp.BitmapFromScreen({ X: masterX, Y: masterY, W: masterW, H: masterH })
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', SrcBitmap, 'Float', dpi, 'Float', dpi)
 
     ; Crop rectangle in master-local coords, initially the exact selection.
@@ -644,11 +1069,17 @@ SnipArea(Area, SetClipboard, &ObjMap) {
     ; the source of truth for CONTENT; Angle/FlipH/FlipV are a display transform
     ; layered on top. pBitmap always holds the current UPRIGHT crop (handy for
     ; OCR and re-rendering). Everything routes through RenderSnip().
+    ; SkewPivotX/Y — the master-local point the Straighten tilt turns about (see
+    ; SkewPivotOf / StraightenSnip). Anchored at the CROP centre, not the master
+    ; centre: for a normal grab those coincide, but they diverge whenever the
+    ; margin gets clamped by a screen edge, and they diverge a lot after panning.
     ObjMap[g.Hwnd] := { GuiObj: g, Area: Area, Alpha: 255, pBitmap: pBitmap
                       , Angle: 0, FlipH: false, FlipV: false, Skew: 0
                       , HasBorder: ShowSnipBorder, TransColor: snipTransColor
                       , SrcBitmap: SrcBitmap, SrcX: masterX, SrcY: masterY
                       , MasterW: masterW, MasterH: masterH, Crop: crop
+                      , SkewPivotX: crop.X + crop.W / 2
+                      , SkewPivotY: crop.Y + crop.H / 2
                       , HasShadow: ShowSnipShadow, ShadowGui: shadowGui }
 
     if shadowGui                        ; first paint + place behind the snip
@@ -751,8 +1182,36 @@ StraightenSnip(dir, fine := false, hwnd := 0) {
     newSkew := Max(-StraightenMaxAngle, Min(StraightenMaxAngle, snip.Skew + dir * step))
     if (newSkew = snip.Skew)                  ; already at the clamp — nothing to do
         return
+    ; Starting a fresh straighten from level → (re-)anchor the pivot to what the
+    ; user is actually looking at, i.e. the centre of the CURRENT crop. While the
+    ; skew is non-zero the pivot then stays put, which is what lets panning slide
+    ; the frame across one stable rotated image instead of swirling the content.
+    ; Re-anchoring only at the 0 → non-zero transition gives both properties.
+    if (snip.Skew = 0) {
+        snip.SkewPivotX := snip.Crop.X + snip.Crop.W / 2
+        snip.SkewPivotY := snip.Crop.Y + snip.Crop.H / 2
+    }
     snip.Skew := newSkew
     RenderSnip(snip)
+}
+
+; The master-local point a snip's Straighten tilt turns about. Falls back to the
+; master centre (the pre-pivot behaviour) if a snip object somehow predates the
+; SkewPivot properties — e.g. one handed in by a companion script.
+;
+; Why this matters: the tilt is applied to the MASTER and the crop rectangle is
+; then cut out of the result, so a pivot far from the crop turns a 1° straighten
+; into a large sideways sweep of the content (arc length ≈ radius × angle). With
+; a 150px CaptureAdjustMargin the master centre is close enough to pass, but the
+; error is real at screen edges, grows with every pan, and would be severe with
+; a very large margin — where the master can span the whole desktop and the
+; centre may be a thousand pixels from the crop.
+SkewPivotOf(snip, &cx, &cy) {
+    if (snip.HasProp('SkewPivotX') && snip.HasProp('SkewPivotY')) {
+        cx := snip.SkewPivotX, cy := snip.SkewPivotY
+    } else {
+        cx := snip.MasterW / 2, cy := snip.MasterH / 2
+    }
 }
 
 ; Return a snip's content to level (Skew = 0), reverting to the lossless crop.
@@ -909,10 +1368,12 @@ RenderSnip(snip) {
     ;    keep the fast, lossless clone for that common case.
     if (snip.Skew = 0)
         newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
-    else
+    else {
+        SkewPivotOf(snip, &pvx, &pvy)
         newCrop := GDIp.CropSkewed(snip.SrcBitmap
                  , snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H
-                 , snip.MasterW / 2, snip.MasterH / 2, snip.Skew, snip.TransColor)
+                 , pvx, pvy, snip.Skew, snip.TransColor)
+    }
     if !newCrop
         return
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', newCrop, 'Float', dpi, 'Float', dpi)
@@ -1039,10 +1500,12 @@ RenderSnipFast(snip) {
     dpi := A_ScreenDPI + 0.0
     if (snip.Skew = 0)
         newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
-    else
+    else {
+        SkewPivotOf(snip, &pvx, &pvy)
         newCrop := GDIp.CropSkewed(snip.SrcBitmap
                  , snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H
-                 , snip.MasterW / 2, snip.MasterH / 2, snip.Skew, snip.TransColor)
+                 , pvx, pvy, snip.Skew, snip.TransColor)
+    }
     if !newCrop
         return
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', newCrop, 'Float', dpi, 'Float', dpi)
@@ -1080,10 +1543,12 @@ RenderSnipResize(snip, winX, winY) {
 
     if (snip.Skew = 0)
         newCrop := GDIp.CloneBitmapArea(snip.SrcBitmap, snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H)
-    else
+    else {
+        SkewPivotOf(snip, &pvx, &pvy)
         newCrop := GDIp.CropSkewed(snip.SrcBitmap
                  , snip.Crop.X, snip.Crop.Y, snip.Crop.W, snip.Crop.H
-                 , snip.MasterW / 2, snip.MasterH / 2, snip.Skew, snip.TransColor)
+                 , pvx, pvy, snip.Skew, snip.TransColor)
+    }
     if !newCrop
         return
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', newCrop, 'Float', dpi, 'Float', dpi)
@@ -2301,9 +2766,11 @@ Class GDIp {
     ; angleDeg about the master-local pivot (cx, cy) into a NEW cropW×cropH
     ; bitmap whose origin is the crop's top-left. Result is the same-sized
     ; upright rectangle CloneBitmapArea would give, but with the content tilted
-    ; inside it. Rotating about a FIXED pivot (the master center) rather than
-    ; the moving crop center is what lets panning slide the frame over one
-    ; stable rotated image instead of swirling the content.
+    ; inside it. (cx, cy) is supplied by the caller as the snip's SkewPivot: it's
+    ; set to the crop centre when a straighten begins from level and then held
+    ; FIXED while the skew is non-zero. Being near the crop keeps a 1° tilt a 1°
+    ; tilt rather than a wide sideways sweep; being fixed is what lets panning
+    ; slide the frame over one stable rotated image instead of swirling it.
     ;
     ; Transform (GDI+ prepend order → first call listed is applied LAST):
     ;     device = Translate(cx-cropX, cy-cropY) · Rotate(θ) · Translate(-cx,-cy) · world
@@ -2530,3 +2997,15 @@ Class GDIp {
 ; from SnipMenu_Handler above.  Contains no top-level executable code, so it is
 ; safe to include here at the end of the file.
 #Include SnipOCR.ahk
+
+; ── Imgur upload add-on (optional) ────────────────────────────────────────────
+; Provides the Imgur class plus ImgurBuildMenu / ImgurUploadSnipBBCode /
+; ShowImgurGui, called from the Imgur submenu above.  Contains no top-level
+; executable code, so it is safe to include here at the end of the file.
+;
+; The *i flag means "include only if the file exists" — so ScreenSnip still runs
+; with SnipImgur.ahk deleted, and the Imgur submenu is simply left off (see the
+; IsSet(Imgur) test where SnipMenu is built).  Commenting out this line has the
+; same effect.  Requires a free imgur.com account; setup is documented in the
+; header of SnipImgur.ahk and in its "Client ID…" dialog.
+#Include *i SnipImgur.ahk
