@@ -2,7 +2,7 @@
 ;               SnipAI.ahk  —  AI vision add-on module for ScreenSnip.ahk
 ;
 ; Made by kunkel321 via Claude AI.
-; Version date: 8-8-2026
+; Version date: 8-9-2026
 ;
 ; Credit:  The idea of sending a screen snip to an AI vision model comes from
 ; one of Joe Glines' apps.  Joe's site — www.the-automator.com — is where a lot
@@ -184,6 +184,19 @@ Use it ONLY as a spelling and digit reference, to catch places where you might m
 
 OCR reading:
     )'
+
+    ; ── Table cleanup ─────────────────────────────────────────────────────────
+    ; Fold en/em dashes, curly quotes and non-breaking spaces down to ASCII in
+    ; table cells, so what lands in the clipboard pastes cleanly into a
+    ; spreadsheet.  See SnipAiNormalizePunct().  Table cells only — Copy Text
+    ; (AI) stays verbatim.
+    static NormalizeTablePunct := true
+
+    ; A cell whose entire content is a dash is a "no data" marker in most
+    ; printed tables, not a value.  true blanks those cells, which keeps a
+    ; numeric column numeric in Excel.  Off by default because it IS a content
+    ; change, and in some tables a dash means something specific.
+    static DashCellToEmpty := false
 
     ; Run PaddleOCR first and pass its text along as a spelling reference.
     ; Costs one extra engine run (a second or two, offline). Silently skipped if
@@ -373,7 +386,7 @@ SnipAiParseTableJson(raw, &cols, &warn, &errMsg) {
             continue
         row := []
         for c in r
-            row.Push(SnipAiFlattenCell(c))
+            row.Push(SnipAiCleanCell(c))
         while (row.Length < cols)
             row.Push(''), padded++
         if (row.Length > cols) {
@@ -409,6 +422,21 @@ SnipAiFlattenCell(c) {
     s := StrReplace(s, '`n', ' ')
     s := StrReplace(s, '`r', ' ')
     s := StrReplace(s, '`t', ' ')
+    return s
+}
+
+; Flatten, then apply the table-specific cleanups.
+SnipAiCleanCell(c) {
+    s := SnipAiFlattenCell(c)
+    if SnipAiCfg.NormalizeTablePunct
+        s := SnipAiNormalizePunct(s)
+    if SnipAiCfg.DashCellToEmpty {
+        t := Trim(s, ' `t')
+        ; Only after normalization, so this catches en/em dashes too — by this
+        ; point they are all plain hyphens.
+        if (t != '' && RegExMatch(t, '^-+$'))
+            s := ''
+    }
     return s
 }
 
@@ -688,7 +716,7 @@ SnipAiVisionRequest(pngPath, prompt, apiKey, &errMsg) {
         req.Send(body)
         req.WaitForResponse(SnipAiCfg.WaitSecs)
         status   := req.Status
-        response := req.ResponseText
+        response := SnipAiResponseUtf8(req)
     } catch as e {
         errMsg := 'Network error: ' e.Message
         return ''
@@ -736,9 +764,92 @@ SnipAiVisionRequest(pngPath, prompt, apiKey, &errMsg) {
 }
 
 
-; ══════════════════════════════════════════════════════════════════════════════
-; JSON
-; ══════════════════════════════════════════════════════════════════════════════
+; Decode the response body explicitly as UTF-8.
+;
+; NOT req.ResponseText.  WinHttpRequest chooses its decoder from the charset
+; parameter of the Content-Type header, and OpenAI sends "application/json"
+; with no charset — so ResponseText falls back to Latin-1 and mangles every
+; non-ASCII character in the reply.  An em dash (UTF-8 bytes E2 80 94) comes
+; back as "â" followed by U+0080 and U+0094, which are INVISIBLE C1 control
+; characters — so the damage is worse than it looks on screen, and those
+; controls travel into the clipboard and on into Excel.
+;
+; ResponseBody is the undecoded bytes as a SAFEARRAY, which we walk directly and
+; hand to StrGet with the correct encoding.
+SnipAiResponseUtf8(req) {
+    try {
+        arr := req.ResponseBody
+        pSA := ComObjValue(arr)          ; VT_ARRAY variant -> SAFEARRAY pointer
+        if !pSA
+            return ''
+        pData := 0
+        if DllCall('oleaut32\SafeArrayAccessData', 'Ptr', pSA, 'Ptr*', &pData)
+            return ''
+        lo := 0, hi := 0
+        DllCall('oleaut32\SafeArrayGetLBound', 'Ptr', pSA, 'UInt', 1, 'Int*', &lo)
+        DllCall('oleaut32\SafeArrayGetUBound', 'Ptr', pSA, 'UInt', 1, 'Int*', &hi)
+        len := hi - lo + 1
+        str := (len > 0) ? StrGet(pData, len, 'UTF-8') : ''
+        DllCall('oleaut32\SafeArrayUnaccessData', 'Ptr', pSA)
+        return str
+    } catch {
+        ; Last resort only.  This is the mis-decoding path described above, but
+        ; a mangled error message still beats no error message at all.
+        try return req.ResponseText
+        return ''
+    }
+}
+
+; Fold typographic punctuation down to ASCII.
+;
+; This is NOT the encoding fix — it runs after the text has been decoded
+; correctly.  It exists because scanned documents genuinely contain en dashes,
+; em dashes, curly quotes and non-breaking spaces, and the model transcribes
+; them faithfully (sometimes; it normalizes them itself at other times, which is
+; why output looks inconsistent).  For a table headed into a spreadsheet the
+; ASCII forms are almost always what's wanted — a non-breaking space in
+; particular will silently stop Excel parsing a cell as a number.
+;
+; Applied to table cells only.  Copy Text (AI) stays verbatim, since someone
+; transcribing prose may well want the real dashes.
+SnipAiNormalizePunct(s) {
+    ; Named PUNCT, not MAP.  AHK variable names are CASE-INSENSITIVE, so a
+    ; static called MAP is the same identifier as the built-in Map class and
+    ; shadows it inside this function — the initializer's own Map(...) call then
+    ; resolves to the not-yet-assigned static and dies with "this static
+    ; variable has not been assigned a value".  Same trap as naming a property
+    ; `base`.  Avoid built-in names for locals: Map, Array, Buffer, Gui, Menu,
+    ; File, Object, String, Number, Func, Error.
+    static PUNCT := Map(
+        0x2010, '-',    ; hyphen
+        0x2011, '-',    ; non-breaking hyphen
+        0x2012, '-',    ; figure dash
+        0x2013, '-',    ; en dash     <- the "45–47" case
+        0x2014, '-',    ; em dash     <- the empty-cell case
+        0x2015, '-',    ; horizontal bar
+        0x2212, '-',    ; minus sign
+        0x2018, "'",    ; left single quote
+        0x2019, "'",    ; right single quote / apostrophe
+        0x201A, "'",
+        0x201C, '"',    ; left double quote
+        0x201D, '"',    ; right double quote
+        0x201E, '"',
+        0x00A0, ' ',    ; non-breaking space
+        0x2007, ' ',    ; figure space
+        0x202F, ' ',    ; narrow no-break space
+        0x2026, '...')  ; ellipsis
+    out := ''
+    Loop Parse s {
+        o := Ord(A_LoopField)
+        if PUNCT.Has(o)
+            out .= PUNCT[o]
+        else if (o < 32 || (o >= 0x7F && o <= 0x9F))
+            out .= ''    ; strip C0/C1 controls outright — never wanted in a cell
+        else
+            out .= A_LoopField
+    }
+    return out
+}
 
 ; Escape a string for embedding in JSON. Everything outside printable ASCII
 ; becomes \uXXXX, which keeps the finished request body 7-bit clean.
