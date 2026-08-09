@@ -15,18 +15,30 @@
 ; WINDOWS OCR path (optional but recommended — it's free and instant):
 ;   Requires Descolada's OCR.ahk library.  Download OCR.ahk from
 ;     https://github.com/Descolada/OCR
-;   and drop it next to ScreenSnip.ahk.  Then uncomment the #Include below.
+;   and drop it in  Resources\  next to THIS file.  Then uncomment the #Include
+;   below.  In AHK v2 a relative #Include resolves against the folder of the
+;   file containing the directive, so no path is needed — "#Include OCR.ahk"
+;   finds it beside this one.
 ;   If it's absent, the Windows menu item simply reports that it's not set up;
 ;   everything else still works.
 ;
 ; PADDLEOCR path (only needed if you want tables / higher accuracy):
 ;   1. Download PaddleOCR-json (Windows x64) from
 ;        https://github.com/hiroi-sora/PaddleOCR-json/releases/latest
-;   2. Unzip it.  You want the folder that contains PaddleOCR-json.exe AND
-;      a "models" subfolder — they MUST stay together.
-;   3. Point OcrCfg.PaddleExe (below) at that .exe.
+;   2. Unzip it into  Resources\  as well.  You want the folder that contains
+;      PaddleOCR-json.exe AND a "models" subfolder — they MUST stay together.
+;      OcrRunPaddle launches the engine with that folder as its working
+;      directory, which is how LangConfig ("models\config_en.txt") resolves.
+;   3. If you put it somewhere else, point OcrCfg.PaddleExe (below) at the .exe.
 ;   4. Note: requires a CPU with AVX (any modern Core/Ryzen).  If yours lacks
 ;      it, use RapidOCR-json instead — same JSON output, same code works.
+;
+; ── OPT-OUT CONTRACT ──────────────────────────────────────────────────────────
+;
+; Included with  #Include *i Resources\SnipOCR.ahk , the same as SnipAI.ahk and
+; SnipImgur.ahk.  Delete this file (or comment out that line) and the OcrCfg
+; class never comes into existence, so the IsSet(OcrCfg) test where the OCR
+; submenu is built skips its three items and ScreenSnip runs normally.
 ;
 ; This file contains functions and a config class only; no top-level executable
 ; code.  #Include it at the BOTTOM of ScreenSnip.ahk.
@@ -45,7 +57,9 @@ class OcrCfg {
 
     ; ── PaddleOCR engine ──────────────────────────────────────────────────────
     ; Full path to PaddleOCR-json.exe.  The "models" folder must be its sibling.
-    static PaddleExe := A_ScriptDir '\PaddleOCR-json\PaddleOCR-json.exe'
+    ; A_ScriptDir is the MAIN script's folder, not this file's, so this stays
+    ; anchored to the top-level ScreenSnip folder wherever this module lives.
+    static PaddleExe := A_ScriptDir '\Resources\PaddleOCR-json\PaddleOCR-json.exe'
 
     ; Language config, RELATIVE to the engine folder.  The engine defaults to
     ; Simplified Chinese if this is blank, so leave it set for English.
@@ -189,7 +203,7 @@ class OcrState {
 OcrDebugPath(suffix) {
     if (OcrState.Stamp = '')
         OcrState.Stamp := FormatTime(, 'yyyyMMdd_HHmmss')
-    return A_ScriptDir '\SnipOCR_' OcrState.Stamp '_' suffix
+    return SnipDataPath('SnipOCR_' OcrState.Stamp '_' suffix)
 }
 
 
@@ -314,31 +328,44 @@ SnipOcrPaddleTable(Hwnd) {
 ; Coordinates are in UPSCALED image space, which is fine — all the clustering
 ; below is relative, and the tolerances scale with the text height.
 ; Returns 0 (falsy) on failure or empty result; messages the user itself.
-OcrPaddleBlocks(Hwnd) {
-    if !(png := OcrSnipToPng(Hwnd))
+;
+; `quiet` suppresses every MsgBox and tooltip and is for callers who are running
+; Paddle as a SUPPORTING step rather than as the user's actual request — see
+; SnipAiOcrHint() in SnipAI.ahk, which uses the text as a spelling reference for
+; an AI table read.  Such a caller must degrade silently when the engine isn't
+; installed: popping "PaddleOCR engine not found" at someone who asked for an AI
+; transcription would be nonsense.
+OcrPaddleBlocks(Hwnd, quiet := false) {
+    if !(png := OcrSnipToPng(Hwnd, quiet))
         return 0
 
-    OcrToolTip('Running PaddleOCR...')
+    if !quiet
+        OcrToolTip('Running PaddleOCR...')
     json := OcrRunPaddle(png, &errMsg)
 
     if !OcrCfg.Debug
         try FileDelete(png)
 
     if (errMsg != '') {
-        OcrToolTip()
-        MsgBox(errMsg, 'ScreenSnip OCR', 'Icon!')
+        if !quiet {
+            OcrToolTip()
+            MsgBox(errMsg, 'ScreenSnip OCR', 'Icon!')
+        }
         return 0
     }
 
     blocks := OcrParsePaddleJson(json, &errMsg)
-    OcrToolTip()
+    if !quiet
+        OcrToolTip()
 
     if (errMsg != '') {
-        MsgBox(errMsg, 'ScreenSnip OCR', 'Icon!')
+        if !quiet
+            MsgBox(errMsg, 'ScreenSnip OCR', 'Icon!')
         return 0
     }
     if !blocks.Length {
-        OcrToolTip('No text found in snip', 1400)
+        if !quiet
+            OcrToolTip('No text found in snip', 1400)
         return 0
     }
 
@@ -447,7 +474,10 @@ OcrRunPaddle(imgPath, &errMsg) {
         errMsg := 'PaddleOCR engine not found at:`n' exe '`n`n'
                 . 'Download PaddleOCR-json (Windows x64) from`n'
                 . 'https://github.com/hiroi-sora/PaddleOCR-json/releases/latest'
-                . '`n`nUnzip it, then set OcrCfg.PaddleExe at the top of SnipOCR.ahk.'
+                . '`n`nUnzip it into the Resources folder, keeping'
+                . ' PaddleOCR-json.exe and its "models" subfolder together.'
+                . '`n`nIf you put it elsewhere, set OcrCfg.PaddleExe at the top'
+                . ' of SnipOCR.ahk.'
         return ''
     }
 
@@ -890,7 +920,7 @@ OcrRowsToTsv(rows, cols) {
 ;
 ; Order is upscale-then-rotate: rotating at the higher resolution means the
 ; rotation's resampling pass costs much less text quality.
-OcrSnipToPng(Hwnd) {
+OcrSnipToPng(Hwnd, quiet := false) {
     global guiSnips
     if !guiSnips.Has(Hwnd)
         return ''
@@ -931,7 +961,8 @@ OcrSnipToPng(Hwnd) {
         GDIp.DisposeImage(pTemp)
 
     if !ok {
-        MsgBox('Could not write the temp image for OCR:`n' path, 'ScreenSnip OCR', 'Icon!')
+        if !quiet
+            MsgBox('Could not write the temp image for OCR:`n' path, 'ScreenSnip OCR', 'Icon!')
         return ''
     }
     return path

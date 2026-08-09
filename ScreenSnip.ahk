@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 8-1-2026 
+; Version date: 8-9-2026 
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -24,8 +24,16 @@ SetWinDelay(0)
 ; Known issue:  Can't snip elevated windows unless ScreenSnip is also
 ; running in elevated (admin) mode.  Top of SysTray Menu shows
 ; "ScreenSnip (admin)" when running in admin mode.  See also help dialog.
-; OCR functionality uses Descolada's OCR.ahk and Paddle OCR.  Please see 
-; companion SnipOCR.ahk comments for details.
+;
+; Optional add-on modules live in  Resources\  and are all included with the
+; *i flag, so any of them can simply be deleted:
+;   SnipOCR.ahk       OCR via Descolada's OCR.ahk and PaddleOCR-json.
+;   SnipAI.ahk        OCR and free-form questions via an AI vision model (paid).
+;   SnipImgur.ahk     One-click upload to imgur.com.
+;   SnipWinDetect.ahk Hover-highlight a whole window during Freeze Capture and
+;                     grab it with one left-click (SnagIt-style).
+; See each file's own header for setup.  Credentials and anything else written
+; at runtime go in  Data\  — add that folder to .gitignore.
 ;
 ; Hotkey cheat sheet — shown via F1 or right-click menu > Help.
 HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admin.`n"
@@ -41,6 +49,8 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   {FreezeTrig}
   Then RButton drag            Select a region from the frozen image
   Hold Shift on release        ...and copy to clipboard
+  Or LButton click             Capture the highlighted window whole
+  Wheel up / down              Cycle to a window stacked underneath
   Esc                          Cancel the freeze
   A mouse click closes a menu; a key press doesn't — so the whole
   desktop is snapshotted first and you select from that image.
@@ -59,8 +69,12 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Menu > OCR > Text (Windows)  Fast text grab, no setup
   Menu > OCR > Text (Paddle)   Slower, more accurate
   Menu > OCR > Table (Paddle)  Rebuilds a grid for Excel
+  Menu > OCR > Text (AI)       Better on odd layouts; paid
+  Menu > OCR > Table (AI)      Reads cell borders; best tables; paid
+  Menu > OCR > Ask AI...       Any question about the snip; paid
   Menu > Imgur > Upload        Public link; [img] tag to clipboard
   Menu > Imgur > Uploader...   Formats, delete, Client ID setup
+  Tray > Imgur Uploader...     Same dialog, for files already on disc
   Imgur needs a free imgur.com account — see SnipImgur.ahk.
 
   ADJUST CAPTURE REGION  (re-crops the frozen snapshot)
@@ -122,7 +136,7 @@ SelectionColor := 'b58500'
 ; The value is always clamped to the virtual desktop bounds, so oversized
 ; numbers are safe (they just capture everything and use more RAM — they
 ; won't crash or read off-screen).
-CaptureAdjustMargin := 150
+CaptureAdjustMargin := 250
 
 ; ── FREEZE CAPTURE ────────────────────────────────────────────────────────────
 ; Problem this solves: the normal Ctrl+RButton drag can't capture a context
@@ -150,7 +164,7 @@ CaptureAdjustMargin := 150
 ;                 CapsLock hotkey in an earlier hook means this one never sees
 ;                 the key. (kunkel321: PersonalHotstrings.ahk nullifies CapsLock,
 ;                 so use the message trigger from there instead — see below.)
-FreezeCaptureKey := 'ScrollLock'
+FreezeCaptureKey := 'CapsLock'
 
 ; Require a DOUBLE press of FreezeCaptureKey (true) or fire on a single press
 ; (false)? Double-press is recommended for keys that have a normal function or a
@@ -179,13 +193,24 @@ FreezeDoublePressTime := 400
 ; other app's CapsLock binding still fires. It only resets the LOCK STATE
 ; afterwards. If you have another script that USES the caps state (rather than
 ; just hotkeying on the key), leave this false.
-FreezeNullifyCapsLock := false
+FreezeNullifyCapsLock := true
 
 ; Hint message shown over the frozen backdrop. It floats ABOVE the frozen image
 ; and is never included in the snip, so it can be large and central without
 ; obscuring anything. Use `n for a line break.
-FreezeHintText := 'Screen frozen — right-click-drag to select a region.'
-                . '`nEsc cancels.'
+FreezeHintText := 'ScreenSnip has frozen the screen.'
+                . '`nRight-click-drag to select a region.'
+                . '`n`nThe new snip will `"float`" above the screen.'
+                . '`n`nEsc cancels.'
+; Shown INSTEAD of FreezeHintText when SnipWinDetect.ahk is present, because the
+; gesture set is genuinely different then. Kept as a separate string rather than
+; a line appended to the one above so that deleting the module leaves the hint
+; truthful — it would otherwise advertise a click that does nothing.
+FreezeHintTextWinDetect := 'ScreenSnip has frozen the screen.'
+                . '`nLeft-click a highlighted window to grab it whole,'
+                . '`nor right-click-drag to select any region.'
+                . '`n`nThe new snip will `"float`" above the screen.'
+                . '`n`nEsc cancels.'
 ; Set false for no hint at all (you'll get a silently frozen screen — only do
 ; this once the gesture is deep muscle memory).
 ShowFreezeHint     := true
@@ -351,8 +376,79 @@ OnError(LogUnhandledError) ;  <---- Temporary for debugging.
 LogUnhandledError(err, mode) {
     try FileAppend(FormatTime(A_Now, 'yyyy-MM-dd HH:mm:ss') '  '
         (IsObject(err) ? err.Message ' (' err.File ':' err.Line ')' : String(err))
-        '`n', A_ScriptDir '\ScreenSnip_error.log')
+        '`n', SnipDataPath('ScreenSnip_error.log'))
     return 0
+}
+
+; ══════════════════════════════════════════════════════════════════════════════
+; RESOURCE AND DATA FOLDERS
+; ══════════════════════════════════════════════════════════════════════════════
+;
+; ScreenSnip's own folder holds just ScreenSnip.ahk/.exe.  Everything else is in
+; one of two subfolders, split by WHO WRITES IT:
+;
+;   Resources\   Shipped with ScreenSnip and never modified — the optional
+;                add-on modules, Descolada's OCR.ahk, the PaddleOCR-json engine.
+;   Data\        Written at runtime — ApiKeys.ini, the error log, debug dumps.
+;                ADD THIS FOLDER TO .gitignore.  That is the point of the split:
+;                one folder to ignore beats remembering one filename.
+;
+; A_ScriptDir is the MAIN script's folder even when these are called from an
+; #Include'd file, which is exactly what's wanted — the add-ons down in
+; Resources\ still resolve Data\ against the top-level folder, not their own.
+
+; Returns A_ScriptDir\Data\<name>, creating the folder on first use.  Called
+; with no argument, returns the folder itself.
+SnipDataPath(name := '') {
+    static dir := ''
+    if (dir = '') {
+        dir := A_ScriptDir '\Data'
+        if !DirExist(dir) {
+            try {
+                DirCreate(dir)
+            } catch {
+                ; Read-only or protected install folder.  Fall back to the
+                ; script dir so writes still land somewhere, rather than
+                ; throwing on every OCR run and every error-log append.
+                dir := A_ScriptDir
+            }
+        }
+    }
+    return (name = '') ? dir : dir '\' name
+}
+
+; The one credentials file, shared by the add-ons that need one:
+;   [Imgur]   ClientID   — SnipImgur.ahk
+;   [OpenAI]  ApiKey     — SnipAI.ahk
+; One file to gitignore, one to back up.  Neither value is a password, but the
+; Imgur ID is rate-limited against your account and the OpenAI key spends your
+; prepaid credit, so treat both as private.
+;
+; Older installs kept the Client ID in ImgurClientID.ini beside ScreenSnip.ahk.
+; The first call migrates it across and renames the original to .bak — nothing
+; is silently destroyed, and downgrading to an older ScreenSnip still works.
+SnipKeysIni() {
+    static path := ''
+    if (path != '')
+        return path
+
+    path   := SnipDataPath('ApiKeys.ini')
+    legacy := A_ScriptDir '\ImgurClientID.ini'
+
+    if (!FileExist(path) && FileExist(legacy)) {
+        try {
+            id := Trim(IniRead(legacy, 'Imgur', 'ClientID', ''))
+            if (id != '')
+                IniWrite(id, path, 'Imgur', 'ClientID')
+            FileMove(legacy, legacy '.bak', true)
+        } catch {
+            ; Best effort.  If the migration fails (read-only folder, file in
+            ; use), keep using the legacy file so Imgur uploads carry on.
+            if FileExist(legacy)
+                path := legacy
+        }
+    }
+    return path
 }
 
 ; Ordered teardown: unhook the bevel paint/activate handlers FIRST so they
@@ -392,6 +488,15 @@ trayMenu.Add('Freeze Capture', (*) => FreezeCapture())
 trayMenu.Add('Start with Windows', TrayStartup)
 if FileExist(A_Startup '\' appName '.lnk')
     trayMenu.Check('Start with Windows')
+; Imgur Uploader — the same dialog as the snip context menu's  Imgur ▸ Imgur
+; Uploader…, but reachable with no snip on screen, so a file already sitting on
+; disc (an animated GIF, an old screenshot) can go up without capturing
+; something first.  Same opt-out contract as the snip submenu below: no
+; SnipImgur.ahk means no `Imgur` class, means no tray item.
+if IsSet(Imgur) {
+    trayMenu.Add()
+    trayMenu.Add('Imgur Uploader…', TrayImgurUploader)
+}
 trayMenu.Add()
 trayMenu.Add('ScreenSnip Help', (*) => ShowHelp())
 trayMenu.Default := trayTitle
@@ -410,6 +515,21 @@ TrayStartup(*) {
     Reload()
 }
 
+; Tray callback for the Imgur Uploader.  Two things are going on here:
+;   - Menu callbacks are handed (ItemName, ItemPos, MenuObj), none of which
+;     ShowImgurGui wants, so it can't be wired to the tray item directly.  The
+;     `(*)` swallows those three; the 0 means "no snip — open with an empty path
+;     box", which is exactly the state you want for a Browse… or a drag-and-drop.
+;   - The call is dynamic for the same reason ImgurBuildMenu's is (see the
+;     SnipMenu block below): a direct ShowImgurGui(0) would be a LOAD-TIME error
+;     whenever SnipImgur.ahk is absent, which would wreck the opt-out
+;     arrangement.  Nothing can reach this function in that case anyway — the
+;     tray item that calls it is only added when IsSet(Imgur).
+TrayImgurUploader(*) {
+    showImgurGuiFn := 'ShowImgurGui'
+    %showImgurGuiFn%(0)
+}
+
 ; ── Context menu for snip windows ─────────────────────────────────────────────
 ; Most snip manipulation is meant to be done with hotkeys (see the F1 help),
 ; but the actions are mirrored here so they're discoverable, and each item that
@@ -421,12 +541,33 @@ SnipMenu := Menu()
 SnipMenu.Add('Copy to Clipboard', SnipMenu_Handler)
 SnipMenu.Add('Save Image As…`tCtrl+S', SnipMenu_Handler)
 
-; OCR submenu — see SnipOCR.ahk (included at the bottom of this file) for setup.
-OcrMenu := Menu()
-OcrMenu.Add('Copy Text (Windows)',    SnipMenu_Handler)  ; fast, no engine to install
-OcrMenu.Add('Copy Text (PaddleOCR)',  SnipMenu_Handler)  ; slower, more accurate
-OcrMenu.Add('Copy Table (PaddleOCR)', SnipMenu_Handler)  ; rebuilds a grid as TSV
-SnipMenu.Add('OCR', OcrMenu)
+; OCR submenu — assembled from whichever text-extraction add-ons are present.
+; Both are opt-out on the same contract as Imgur below: delete the module (or
+; comment out its #Include at the bottom of this file) and its config class
+; never comes into existence, so these tests skip its items.  Class objects are
+; created before the auto-execute section runs, which is why IsSet() can see one
+; declared in a file that is #Include'd 2,500 lines further down.
+;
+; The whole submenu is omitted when neither module is present, rather than
+; leaving an empty 'OCR' entry on the menu.
+haveOcr := IsSet(OcrCfg)        ; SnipOCR.ahk    — Windows.Media.Ocr + PaddleOCR
+haveAi  := IsSet(SnipAiCfg)     ; SnipAI.ahk     — AI vision model (paid, online)
+if (haveOcr || haveAi) {
+    OcrMenu := Menu()
+    if haveOcr {
+        OcrMenu.Add('Copy Text (Windows)',    SnipMenu_Handler)  ; fast, no engine to install
+        OcrMenu.Add('Copy Text (PaddleOCR)',  SnipMenu_Handler)  ; slower, more accurate
+        OcrMenu.Add('Copy Table (PaddleOCR)', SnipMenu_Handler)  ; rebuilds a grid as TSV
+    }
+    if haveAi {
+        if haveOcr
+            OcrMenu.Add()       ; separator: below it, the image leaves this PC
+        OcrMenu.Add('Copy Text (AI)',      SnipMenu_Handler)  ; better on odd layouts
+        OcrMenu.Add('Copy Table (AI)',     SnipMenu_Handler)  ; reads the ruling lines
+        OcrMenu.Add('Ask AI About Snip…',  SnipMenu_Handler)  ; free-form question
+    }
+    SnipMenu.Add('OCR', OcrMenu)
+}
 
 ; Imgur submenu — see SnipImgur.ahk (optionally included at the bottom of this
 ; file).  The whole feature is opt-out: delete SnipImgur.ahk, or comment out its
@@ -617,12 +758,18 @@ OnMessage(DllCall('RegisterWindowMessage', 'Str', 'AHK_ScreenSnip_FreezeCapture'
 ; The flow is deliberately ordered:
 ;
 ;   1. hook fires  →  2. BitBlt the whole virtual screen  →  3. show backdrop
-;   →  4. show hint  →  5. wait for RButton  →  6. hide hint, run the NORMAL
-;   SelectScreenRegion drag  →  7. hide backdrop  →  8. SnipArea() from the
-;   frozen bitmap instead of the live screen.
+;   →  4. show hint  →  5. start window highlighting (optional module)
+;   →  6. wait for RButton or LButton  →  7. stop highlighting, hide hint, and
+;   EITHER take the highlighted window's rect (LButton) OR run the NORMAL
+;   SelectScreenRegion drag (RButton)  →  8. hide backdrop  →  9. SnipArea()
+;   from the frozen bitmap instead of the live screen.
 ;
 ; Steps 2 and 3 must not be swapped: creating any window first steals activation
 ; and the menu we're trying to capture is gone before the BitBlt happens.
+;
+; Step 5 must come AFTER step 3 for a different reason: among topmost windows the
+; most recently raised one wins, so the highlight bars have to be created after
+; the backdrop or they end up behind it and are never seen.
 
 ; (The trigger key and the cross-script message are REGISTERED up in the
 ; WM-handler block, above the first hotkey definition, so they're guaranteed to
@@ -702,8 +849,26 @@ FreezeCapture() {
         ; SelectScreenRegion's own overlay then shows on top of BOTH.
         hint := ShowFreezeHint ? ShowFreezeHintGui(backdrop.Hwnd) : 0
 
-        ; ── 4) Wait for the selection to start ───────────────────────────────
+        ; ── 3b) Window highlighting — optional, see Resources\SnipWinDetect.ahk
+        ; Called through the %name%() dynamic form because a DIRECT call to a
+        ; function that might not exist is a LOAD-TIME error in v2 (same reason
+        ; ImgurBuildMenu is invoked that way up in the menu-building block).
+        ; Shown after the backdrop so the outline lands on top of it.
+        detecting := false
+        if IsSet(WinDetectCfg) {
+            fnBegin   := 'WinDetect_Begin'
+            detecting := %fnBegin%()
+            if detecting
+                FreezeDetectWheel(true)
+        }
+
+        ; ── 4) Wait for the gesture that ends the wait ───────────────────────
+        ; RButton  → freehand region drag, exactly as before.
+        ; LButton  → grab the highlighted window whole (only when detecting).
+        ; The frozen backdrop is NOT click-through, so a left-click here lands
+        ; harmlessly on it and can never leak to the app underneath.
         aborted := false
+        picked  := 0
         while true {
             if GetKeyState('Escape', 'P') {
                 aborted := true
@@ -711,20 +876,58 @@ FreezeCapture() {
             }
             if GetKeyState('RButton', 'P')
                 break
+            if (detecting && GetKeyState('LButton', 'P')) {
+                fnGetRect := 'WinDetect_GetRect'
+                if %fnGetRect%(&wdX, &wdY, &wdW, &wdH)
+                    picked := { X: wdX, Y: wdY, W: wdW, H: wdH }
+                ; Swallow the rest of the click so the button-up can't land on
+                ; whatever the backdrop uncovers when it comes down.
+                ;
+                ; Bounded, and with an Esc check, for the UIPI reason
+                ; SelectScreenRegion documents at its own exit test: if the
+                ; release happens over an ELEVATED window while ScreenSnip is
+                ; not elevated, Windows hides that event from the hook and the
+                ; state reads "down" indefinitely. An unbounded wait here would
+                ; strand a full-screen topmost backdrop with no way out at all,
+                ; which is a worse place for that failure than the drag loop.
+                waitStart := A_TickCount
+                while (GetKeyState('LButton', 'P') && A_TickCount - waitStart < 3000) {
+                    if GetKeyState('Escape', 'P') {
+                        aborted := true
+                        picked  := 0
+                        break
+                    }
+                    Sleep 10
+                }
+                break
+            }
             Sleep 10
         }
         if aborted
             return
+
+        ; Highlighting is done either way: on the LButton path the rect is
+        ; already captured, and on the RButton path the outline would only
+        ; compete with the selection rectangle.
+        if detecting {
+            FreezeDetectWheel(false)
+            fnEnd := 'WinDetect_End'
+            %fnEnd%()
+            detecting := false
+        }
 
         ; The hint has said what it needed to; drop it now that the drag is
         ; starting, so it doesn't compete with the W×H dimension labels.
         if hint
             HideFreezeHintGui(&hint)
 
-        ; ── 5) Normal selection drag, unmodified ─────────────────────────────
+        ; ── 5) Either the picked window, or the normal selection drag ────────
         ; SelectScreenRegion only reads mouse coordinates and returns a rect —
         ; it neither knows nor cares that the pixels beneath it are frozen.
-        Area := SelectScreenRegion('RButton', SelectionColor)
+        if picked
+            Area := FreezeClampArea(picked, vx, vy, vw, vh)
+        else
+            Area := SelectScreenRegion('RButton', SelectionColor)
 
         ; ── 6) Drop the backdrop BEFORE creating the snip ────────────────────
         ; The live desktop comes back immediately, and the new snip window can't
@@ -743,6 +946,15 @@ FreezeCapture() {
         ; throw part-way through. Each helper clears the reference it frees, so
         ; the second call here is a no-op rather than a double-free, and one
         ; failure can't strand a full-screen topmost window on the desktop.
+        ; Detection teardown belongs here too, and unconditionally: an Esc abort
+        ; or a throw part-way through would otherwise strand four topmost outline
+        ; bars on the desktop with no window left to dismiss them. Both calls are
+        ; no-ops when detection was never started or has already been stopped.
+        if IsSet(WinDetectCfg) {
+            try FreezeDetectWheel(false)
+            fnEndFinal := 'WinDetect_End'
+            try %fnEndFinal%()
+        }
         if (IsSet(hint) && hint)
             try HideFreezeHintGui(&hint)
         DestroyFreezeBackdrop(&backdrop, &backdropPic, &hbm)
@@ -750,6 +962,49 @@ FreezeCapture() {
             try GDIp.DisposeImage(frozen)
         FreezeActive := false
     }
+}
+
+; Turn the wheel-to-cycle hotkeys on for the duration of a freeze, off after.
+;
+; Registered at RUNTIME rather than as static hotkeys so that ScreenSnip carries
+; no wheel binding at all outside a freeze — a permanently registered WheelUp
+; would put this script in the mouse-hook chain for every scroll on the machine.
+;
+; SUPPRESSING (no '~') on purpose: the screen is frozen, so letting the wheel
+; through would scroll the real window underneath while the backdrop kept showing
+; the old pixels, and the snip you finally cut would not match what you saw.
+FreezeDetectWheel(turnOn) {
+    state := turnOn ? 'On' : 'Off'
+    try Hotkey('WheelUp',   FreezeDetectCycleUp,   state)
+    try Hotkey('WheelDown', FreezeDetectCycleDown, state)
+}
+
+FreezeDetectCycleUp(*)   => FreezeDetectCycle(1)
+FreezeDetectCycleDown(*) => FreezeDetectCycle(-1)
+
+FreezeDetectCycle(delta) {
+    if !IsSet(WinDetectCfg)
+        return
+    fn := 'WinDetect_Cycle'
+    try %fn%(delta)
+}
+
+; Clamp a window rectangle to the virtual screen.
+;
+; A window can legitimately extend past the desktop edge — dragged half off, or
+; a shadow-less frame sitting at a negative coordinate — and the frozen bitmap
+; only covers the virtual screen. SnipArea does clamp defensively, but it clamps
+; the CROP after computing a master area from the raw rect, so feeding it
+; out-of-range values shifts the result rather than trimming it. Trim here.
+FreezeClampArea(rect, vx, vy, vw, vh) {
+    L := Max(rect.X,            vx)
+    T := Max(rect.Y,            vy)
+    R := Min(rect.X + rect.W,   vx + vw)
+    B := Min(rect.Y + rect.H,   vy + vh)
+    W := Max(0, R - L)
+    H := Max(0, B - T)
+    ; Same shape SelectScreenRegion returns, so SnipArea can't tell them apart.
+    return { X: L, Y: T, W: W, H: H, X2: L + W, Y2: T + H }
 }
 
 ; Tear down the frozen backdrop and release its bitmap, clearing every reference
@@ -787,16 +1042,22 @@ DestroyFreezeBackdrop(&backdrop, &pic, &hbm) {
 ; on the whole pill has no such problem, and the solid backing is what makes the
 ; text readable over a busy desktop in the first place.
 ShowFreezeHintGui(ownerHwnd) {
-    global FreezeHintText, FreezeHintFontSize, FreezeHintFontName
+    global FreezeHintText, FreezeHintTextWinDetect, FreezeHintFontSize, FreezeHintFontName
     global FreezeHintTextColor, FreezeHintBackColor, FreezeHintAlpha
     global FreezeHintCornerRadius
+
+    ; Advertise the click-a-window gesture only when the module that provides it
+    ; is actually loaded AND switched on.
+    txt := FreezeHintText
+    if (IsSet(WinDetectCfg) && WinDetectCfg.Enabled)
+        txt := FreezeHintTextWinDetect
 
     hint := Gui('-Caption +AlwaysOnTop +ToolWindow -DPIScale +E0x08000020', 'SnipperFreezeHint')
     hint.Opt('+Owner' ownerHwnd)
     hint.MarginX := 22, hint.MarginY := 16
     hint.BackColor := FreezeHintBackColor
     hint.SetFont('s' FreezeHintFontSize ' c' FreezeHintTextColor, FreezeHintFontName)
-    hint.Add('Text', 'Center', FreezeHintText)
+    hint.Add('Text', 'Center', txt)
 
     ; Create it hidden so we can measure the auto-sized result, then place it
     ; centered on whichever monitor the cursor is on (NOT the primary — on a
@@ -923,12 +1184,34 @@ SnipUnderCursor() {
 ; STM_SETIMAGE) so live dragging stays smooth instead of rebuilding the window.
 SnipRightButton() {
     global guiSnips, PanDragDivisor, PanClickSlop
-    MouseGetPos(&startX, &startY, &win)
+
+    ; MouseGetPos honours CoordMode 'Mouse', which in v2 defaults to CLIENT —
+    ; coordinates relative to whichever window is ACTIVE at the moment of the
+    ; call.  This function activates the snip partway through, so without this
+    ; line the origin would MOVE between the anchor reading and the loop's
+    ; readings, and the first delta would be the distance between two unrelated
+    ; origins.  That produced a violent jump on the first right-click of a snip
+    ; and none afterwards — because once the snip is active, WinActivate is a
+    ; no-op and both readings happen to share an origin again.
+    ;
+    ; Set per-thread rather than at script startup, matching what
+    ; ShowFreezeHintGui and SelectScreenRegion already do, so nothing that
+    ; relies on the client-relative default is disturbed.
+    CoordMode('Mouse', 'Screen')
+
+    MouseGetPos(, , &win)
     if !guiSnips.Has(win)
         return
     snip := guiSnips[win]
     WinActivate('ahk_id ' win)         ; focus so keyboard adjusts work after, and
                                         ; any stray DragTools keystrokes land here
+
+    ; Anchor AFTER the activation, never before.  WinActivate can take a
+    ; noticeable moment, and any pointer travel during it belongs to neither the
+    ; click nor the drag — reading it as the first frame of a drag would nudge
+    ; the region before the gesture has really begun.
+    MouseGetPos(&startX, &startY)
+
     divisor := Max(1, PanDragDivisor)
     accX := 0.0, accY := 0.0
     lastX := startX, lastY := startY
@@ -1729,9 +2012,19 @@ SnipMenu_Handler(ItemName, ItemPos, *) {
     switch base {
         case 'Copy to Clipboard':       SnipToClipboard(TargetHwnd)
         case 'Save Image As…':          SaveSnipAs(TargetHwnd)
-        case 'Copy Text (Windows)':     SnipOcrWindowsText(TargetHwnd)
-        case 'Copy Text (PaddleOCR)':   SnipOcrPaddleText(TargetHwnd)
-        case 'Copy Table (PaddleOCR)':  SnipOcrPaddleTable(TargetHwnd)
+        ; Add-on entry points are called through the %name%() dynamic form on
+        ; purpose.  A DIRECT call to a function that might not exist is a
+        ; LOAD-TIME error in v2, which would defeat the opt-out arrangement —
+        ; deleting SnipOCR.ahk or SnipAI.ahk would stop the whole script from
+        ; loading instead of just dropping the menu items.  Nothing can reach
+        ; these cases when the module is absent anyway, because the items are
+        ; only added when the module's config class exists.
+        case 'Copy Text (Windows)':     addOnFn := 'SnipOcrWindowsText', %addOnFn%(TargetHwnd)
+        case 'Copy Text (PaddleOCR)':   addOnFn := 'SnipOcrPaddleText',  %addOnFn%(TargetHwnd)
+        case 'Copy Table (PaddleOCR)':  addOnFn := 'SnipOcrPaddleTable', %addOnFn%(TargetHwnd)
+        case 'Copy Text (AI)':          addOnFn := 'SnipAiCopyText',     %addOnFn%(TargetHwnd)
+        case 'Copy Table (AI)':         addOnFn := 'SnipAiCopyTable',    %addOnFn%(TargetHwnd)
+        case 'Ask AI About Snip…':      addOnFn := 'SnipAiAsk',          %addOnFn%(TargetHwnd)
         case 'Rotate 90° CW':           RotateSnip(TargetHwnd, +90)
         case 'Rotate 180°':             RotateSnip(TargetHwnd, 180)
         case 'Rotate 90° CCW':          RotateSnip(TargetHwnd, -90)
@@ -2992,20 +3285,52 @@ Class GDIp {
     }
 }
 
-; ── OCR add-on ────────────────────────────────────────────────────────────────
-; Provides SnipOcrWindowsText / SnipOcrPaddleText / SnipOcrPaddleTable, called
-; from SnipMenu_Handler above.  Contains no top-level executable code, so it is
-; safe to include here at the end of the file.
-#Include SnipOCR.ahk
-
-; ── Imgur upload add-on (optional) ────────────────────────────────────────────
-; Provides the Imgur class plus ImgurBuildMenu / ImgurUploadSnipBBCode /
-; ShowImgurGui, called from the Imgur submenu above.  Contains no top-level
-; executable code, so it is safe to include here at the end of the file.
+; ══════════════════════════════════════════════════════════════════════════════
+; OPTIONAL ADD-ON MODULES
+; ══════════════════════════════════════════════════════════════════════════════
 ;
-; The *i flag means "include only if the file exists" — so ScreenSnip still runs
-; with SnipImgur.ahk deleted, and the Imgur submenu is simply left off (see the
-; IsSet(Imgur) test where SnipMenu is built).  Commenting out this line has the
-; same effect.  Requires a free imgur.com account; setup is documented in the
-; header of SnipImgur.ahk and in its "Client ID…" dialog.
-#Include *i SnipImgur.ahk
+; All three follow one contract:
+;
+;   - They live in  Resources\  and are included with the *i flag, which means
+;     "include only if the file exists".  Delete any of them (or comment out its
+;     line here) and ScreenSnip still runs; the feature's menu items are simply
+;     left off.
+;   - Each declares a config class that acts as the presence sentinel, tested
+;     with IsSet() where it's needed: OcrCfg, SnipAiCfg, Imgur, WinDetectCfg.
+;   - Each is reached through the %name%() dynamic-call form, because a direct
+;     call to a function that might not exist is a LOAD-TIME error in v2.
+;   - None contains top-level executable code that needs to RUN, so including
+;     them here at the very end of the file is safe.  Note what that actually
+;     means: this point is past the end of the auto-execute section, so any
+;     top-level statement in an included file is simply never reached.  That is
+;     why every one of these modules keeps its state in class statics (which
+;     initialise at load time, wherever the class is declared) rather than in
+;     top-level assignments — SnipWinDetect.ahk has a WinDetectState class for
+;     exactly this reason, and relies on the same rule to keep its standalone
+;     self-test inert when included.
+;
+; In v2 a relative #Include resolves against the folder of the file containing
+; the directive — NOT the working directory — so SnipOCR.ahk's own
+; "#Include OCR.ahk" finds Descolada's library beside it in Resources\ with no
+; path of its own.
+
+; OCR — Windows.Media.Ocr and PaddleOCR-json.  Provides OcrCfg plus
+; SnipOcrWindowsText / SnipOcrPaddleText / SnipOcrPaddleTable.  Needs
+; Resources\OCR.ahk and/or Resources\PaddleOCR-json\; see its header.
+#Include *i Resources\SnipOCR.ahk
+
+; AI vision — provides SnipAiCfg plus SnipAiCopyText / SnipAiAsk.  Sends the
+; image to OpenAI and costs money per use; needs an API key in Data\ApiKeys.ini.
+; Setup is in its header and in the dialog shown when no key is configured.
+#Include *i Resources\SnipAI.ahk
+
+; Imgur upload — provides the Imgur class plus ImgurBuildMenu /
+; ImgurUploadSnipBBCode / ShowImgurGui.  Needs a free imgur.com account and a
+; Client ID in Data\ApiKeys.ini; setup is documented in its header and in its
+; "Client ID…" dialog.
+#Include *i Resources\SnipImgur.ahk
+
+; Window highlighting during Freeze Capture — provides WinDetectCfg plus
+; WinDetect_Begin / _End / _GetRect / _Cycle, all called from FreezeCapture().
+; No dependencies and nothing to configure; settings live in its own header.
+#Include *i Resources\SnipWinDetect.ahk

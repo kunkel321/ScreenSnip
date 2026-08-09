@@ -4,7 +4,7 @@
 ;
 ;  Optional Imgur-upload add-on for ScreenSnip.ahk.
 ;  Made by kunkel321 / Claude.
-;  Version Date: 7-30-2026
+;  Version Date: 8-4-2026
 ;
 ;  This file is OPTIONAL.  ScreenSnip.ahk includes it with `#Include *i`, and
 ;  builds its context-menu submenu only `if IsSet(Imgur)` — so deleting this
@@ -81,10 +81,47 @@
 ;  ---------------------------------------------------------------------------
 ;    - Rate limit is roughly 1,250 uploads / 12,500 requests per day per
 ;      Client ID.  Remaining credits show in the Uploader's status line.
-;    - Imgur's size cap is 10 MB for still images, 20 MB for animated.
-;    - If ScreenSnip is running elevated (admin), drag-and-drop onto the
-;      Uploader from a non-elevated Explorer is silently blocked by UIPI.
-;      Use Browse… in that case.
+;    - Drag-and-drop works even when ScreenSnip is running elevated.  It
+;      doesn't by default — UIPI blocks messages from non-elevated Explorer —
+;      so ImgurAllowDropsWhenElevated() whitelists the three drop-related
+;      messages on the Uploader's window alone.  See the comment there.
+;
+;  ---------------------------------------------------------------------------
+;  SIZE LIMIT  —  10 MB, and it is the API's limit, not the website's
+;  ---------------------------------------------------------------------------
+;    Imgur's WEBSITE takes 20 MB for stills and 200 MB for animated files.
+;    The JSON API this file posts to does not: it caps out around 10 MB, and
+;    base64 encoding inflates the payload by roughly a third on top of that,
+;    so treat 10 MB on disc as the real ceiling.
+;
+;    ShareX and friends get past it by posting multipart/form-data with raw
+;    bytes instead of a base64 form field.  That was deliberately not done
+;    here — it would mean hand-rolling a MIME body and a VT_UI1 SafeArray for
+;    a case that a smaller GIF solves just as well.
+;
+;    For an oversized GIF the practical fix is to shrink it: drop frames,
+;    reduce dimensions, or run a lossy pass (gifsicle -O3 --lossy=80 is
+;    startlingly effective).
+;
+;  ---------------------------------------------------------------------------
+;  ANIMATED GIFs  —  they work, but Imgur rewrites them
+;  ---------------------------------------------------------------------------
+;    Imgur re-encodes any GIF over roughly 2 MB to GIFV (an MP4 in a wrapper,
+;    audio stripped) and then reports the STORED type back as video/mp4.
+;    Building the direct link from `type` alone therefore yields
+;    i.imgur.com/ID.mp4 — which renders as a BROKEN IMAGE inside an [img] tag
+;    on every forum there is.  That is the whole reason an animated upload can
+;    look like it "didn't work" when in fact it uploaded fine.
+;
+;    Upload() detects the conversion (via the response's `animated` flag) and
+;    keeps a .gif URL as the primary link, since Imgur goes on serving the GIF
+;    alongside the video.  The mp4 and gifv URLs are still available from the
+;    Uploader's "Copy as:" dropdown for anywhere that can play video.
+;
+;    One consequence worth knowing: Imgur's thumbnails of an animated image are
+;    STILL frames, so "BBCode thumbnail linked" gives a motionless preview that
+;    links through to the moving version.  Usually what you want in a forum
+;    thread; occasionally not.
 ; ==============================================================================
 
 
@@ -128,7 +165,7 @@ class Imgur {
 
     ; Holds the Client ID and nothing else — hence the blunt file name, which
     ; is meant to make "add this to .gitignore" an obvious thought.
-    static IniFile => A_ScriptDir '\ImgurClientID.ini'
+    static IniFile => A_ScriptDir '\Data\ApiKeys.ini'
 
     ; Sentinel put in Error.Extra when the user cancels, so callers can tell a
     ; deliberate abort from a real failure without parsing message text.
@@ -136,12 +173,17 @@ class Imgur {
 
     ; Offered in the Uploader's "Copy as:" dropdown.  Item 2 (BBCode [img]) is
     ; both the dropdown default and what the one-click menu item always emits.
+    ; The last two only mean anything for an animated upload; on a still image
+    ; FormatLink() quietly falls back to the direct link rather than handing
+    ; back a URL to a video that doesn't exist.
     static FormatNames := ['Direct link'
                          , 'BBCode [img]'
                          , 'BBCode thumbnail linked'
                          , 'Markdown'
                          , 'HTML img tag'
-                         , 'Page link']
+                         , 'Page link'
+                         , 'Direct MP4  (animated only)'
+                         , 'HTML5 video tag  (animated only)']
 
     ; ── Client ID storage ─────────────────────────────────────────────────────
     ; IniRead with a 4th arg returns that default rather than throwing when the
@@ -262,11 +304,45 @@ class Imgur {
                              : RegExReplace(link, '^https?://i\.imgur\.com/([A-Za-z0-9]+)\..*$'
                                                 , 'https://imgur.com/$1')
 
+        ; ── Animated handling ────────────────────────────────────────────────
+        ; `animated` is an unquoted JSON boolean, so JsonStr can't see it — hence
+        ; JsonRaw.  The MIME test is a belt-and-braces second opinion: when Imgur
+        ; converts a GIF to GIFV it reports the stored type as video/mp4, and a
+        ; response that says video/mp4 is animated whether or not it also
+        ; bothered to set the flag.
+        animated := (Imgur.JsonRaw(resp, 'animated') = 'true')
+                 || (StrLower(Trim(mime)) = 'video/mp4')
+
+        ; Imgur hands back mp4/gifv URLs of its own for converted files; build
+        ; them from the id when it doesn't, which happens for GIFs small enough
+        ; to escape conversion.
+        gifv := Imgur.JsonStr(resp, 'gifv')
+        mp4  := Imgur.JsonStr(resp, 'mp4')
+        gif  := ''
+        if animated && (id != '') {
+            gif := 'https://i.imgur.com/' id '.gif'
+            if (mp4  = '')
+                mp4  := 'https://i.imgur.com/' id '.mp4'
+            if (gifv = '')
+                gifv := 'https://i.imgur.com/' id '.gifv'
+            ; THE important line.  Left alone, `direct` would be the .mp4 that
+            ; MimeToExt produced from video/mp4, and every [img]/Markdown/<img>
+            ; format built on top of it would be a broken image.  Imgur keeps
+            ; serving the .gif next to the video, so that's what the image
+            ; formats should point at.  The mp4 stays reachable via its own two
+            ; dropdown entries.
+            direct := gif
+        }
+
         return Map('direct',     direct
                  , 'page',       page
                  , 'link',       link
                  , 'id',         id
                  , 'mime',       mime
+                 , 'animated',   animated
+                 , 'gif',        gif
+                 , 'mp4',        mp4
+                 , 'gifv',       gifv
                  , 'deletehash', Imgur.JsonStr(resp, 'deletehash')
                  , 'remaining',  remaining)
     }
@@ -321,9 +397,15 @@ class Imgur {
 
     ; ── Link formatting ───────────────────────────────────────────────────────
     ; Wrap an upload result in whatever markup the destination wants.
+    ; For an animated upload `direct` is already the .gif (see Upload), so the
+    ; five image formats below need no special-casing — they inherit the right
+    ; URL.  Only the two video formats have to reach past it.
     Static FormatLink(res, fmt) {
         direct := res['direct']
         page   := res['page']
+        ; .Has guards against a result Map built by an older copy of this file
+        ; still sitting in ImgurLastResult after an edit-and-Reload.
+        mp4    := res.Has('mp4') ? res['mp4'] : ''
 
         switch fmt {
             case 'Direct link':
@@ -338,11 +420,24 @@ class Imgur {
                 return '<img src="' direct '" alt="">'
             case 'Page link':
                 return page
+            case 'Direct MP4  (animated only)':
+                ; A still image has no video to point at; the direct link is a
+                ; more useful answer than an empty box or a URL that 404s.
+                return (mp4 != '') ? mp4 : direct
+            case 'HTML5 video tag  (animated only)':
+                ; muted + playsinline are what make browsers honour autoplay;
+                ; without them a lot of them just show a frozen first frame.
+                return (mp4 != '')
+                     ? '<video autoplay loop muted playsinline src="' mp4 '"></video>'
+                     : '<img src="' direct '" alt="">'
         }
         return direct
     }
 
     ; https://i.imgur.com/7Wqu8C8.png  ->  https://i.imgur.com/7Wqu8C8l.png
+    ; Works on an animated .gif too, but Imgur's thumbnails are STILL frames —
+    ; so "BBCode thumbnail linked" on a GIF gives a motionless preview that
+    ; links through to the moving version.  Usually the polite thing to post.
     Static ThumbLink(directUrl, sizeChar := 'l') {
         if RegExMatch(directUrl, '^(.*/[^/.]+)(\.[A-Za-z0-9]+)$', &m)
             return m[1] sizeChar m[2]
@@ -419,6 +514,16 @@ class Imgur {
             v := StrReplace(v, '\"', '"')
             return v
         }
+        return ''
+    }
+
+    ; Companion to JsonStr for UNQUOTED values — booleans and numbers.  Needed
+    ; because Imgur's `animated` field is a bare true/false, which JsonStr's
+    ; pattern (which requires surrounding quotes) can never match.  Returns the
+    ; literal text: 'true', 'false', a number, or '' if the key isn't there.
+    Static JsonRaw(json, key) {
+        if RegExMatch(json, 'i)"' key '"\s*:\s*(true|false|null|-?\d+(?:\.\d+)?)', &m)
+            return m[1]
         return ''
     }
 }
@@ -698,7 +803,8 @@ ImgurBuildGui(s) {
     g.Add('Button', 'x+6 w120 h30', 'Client ID…').OnEvent('Click', ImgurGui_ClientID)
 
     g.Add('Text', 'xm y+14 section', 'Copy as:')
-    s.ddl := g.Add('DropDownList', 'x+6 yp-4 w230 Choose2', Imgur.FormatNames)
+    ; w300 rather than w230 — "HTML5 video tag  (animated only)" needs the room.
+    s.ddl := g.Add('DropDownList', 'x+6 yp-4 w300 Choose2', Imgur.FormatNames)
     s.ddl.OnEvent('Change', ImgurGui_FormatChange)
 
     s.link := g.Add('Edit', 'xm y+6 w526 ReadOnly')
@@ -713,6 +819,56 @@ ImgurBuildGui(s) {
     g.OnEvent('Close',  ImgurGui_Close)
     g.OnEvent('Escape', ImgurGui_Close)
     s.g := g
+
+    ; Must come AFTER the window exists, which it does by now — Gui() creates it
+    ; (hidden) up front, so g.Hwnd is already a real handle.  Filtering only the
+    ; Gui's own hwnd is enough: WS_EX_ACCEPTFILES lives on the Gui, not the
+    ; controls, so WM_DROPFILES is posted there no matter which control the file
+    ; was actually dropped on.  (AHK works out the Ctrl parameter afterwards,
+    ; from the drop coordinates.)
+    ImgurAllowDropsWhenElevated(g.Hwnd)
+}
+
+; ── UIPI: let file drops through when running elevated ────────────────────────
+; User Interface Privilege Isolation silently discards window messages sent from
+; a lower-integrity process to a higher one.  Explorer runs at medium integrity;
+; ScreenSnip launched via StartupLauncher's Task Scheduler entry (/RL HIGHEST)
+; runs at high.  So dragging a file from the Desktop onto this dialog does
+; nothing whatsoever — no error, no beep, no cursor change, no hint that Windows
+; ate the message.  It is a genuinely baffling failure the first time.
+;
+; ChangeWindowMessageFilterEx whitelists specific messages for ONE window.  That
+; per-window scope is the whole reason this is acceptable: only the Uploader
+; dialog, and only the three messages a file drop needs, become reachable from
+; medium integrity.  (Its predecessor, ChangeWindowMessageFilter, relaxed the
+; filter process-wide — don't use that one.)
+;
+; Three messages, because a drop is not a single message:
+;   WM_DROPFILES       0x233  the notification itself
+;   WM_COPYDATA        0x04A  how some drag sources hand over their payload
+;   WM_COPYGLOBALDATA  0x049  undocumented, and the one everyone forgets.  The
+;                             HDROP is a handle into global memory; without this
+;                             the notification arrives carrying nothing, which
+;                             looks like a drop that "half worked".
+;
+; Unelevated, this is a no-op with a success return: there was no filter to
+; relax.  Calling unconditionally beats branching on A_IsAdmin and letting the
+; two paths drift apart.  The try is because the API is Win7+ and this is a
+; convenience — if it fails, Browse… still works exactly as before.
+ImgurAllowDropsWhenElevated(hwnd) {
+    static MSGFLT_ALLOW := 1
+    static msgs := [0x0233, 0x004A, 0x0049]
+    try {
+        for _, msg in msgs
+            DllCall('user32\ChangeWindowMessageFilterEx'
+                  , 'Ptr',  hwnd
+                  , 'UInt', msg
+                  , 'UInt', MSGFLT_ALLOW
+                  , 'Ptr',  0            ; optional CHANGEFILTERSTRUCT — not needed
+                  , 'Int')
+    } catch {
+        ; Pre-Win7 or refused.  Browse… remains the way in.
+    }
 }
 
 ImgurSetStatus(s, msg) {
@@ -759,11 +915,21 @@ ImgurGui_Upload(*) {
         return
     }
 
+    ; The cap being warned about is the API's, not Imgur's — the website would
+    ; happily take this file.  Worth spelling out, because "but I uploaded a
+    ; bigger one through the browser yesterday" is the obvious objection.
     sizeMB := FileGetSize(path) / 1048576
     if (sizeMB > 10) {
-        msg := Format("That file is {:.1f} MB. Imgur's limit for still images is 10 MB."
-                    . "`n`nTry anyway?", sizeMB)
-        if (MsgBox(msg, 'Large file', 'YesNo Icon! 4096') = 'No')
+        msg := Format("That file is {:.1f} MB.`n`n"
+                    . "Imgur's website accepts far more than this — 20 MB for stills, "
+                    . "200 MB for animated — but the JSON API this uploader posts to "
+                    . "caps out around 10 MB, and base64 encoding adds roughly a third "
+                    . "on top of whatever is on disc.`n`n"
+                    . "For an oversized GIF the practical fix is to shrink it first: "
+                    . "drop frames, reduce the dimensions, or run a lossy pass "
+                    . "(gifsicle -O3 --lossy=80 is startlingly effective).`n`n"
+                    . "Try anyway?", sizeMB)
+        if (MsgBox(msg, 'Larger than the API allows', 'YesNo Icon! 4096') = 'No')
             return
     }
 
@@ -784,7 +950,14 @@ ImgurGui_Upload(*) {
     ImgurLastResult(res)
     s.link.Value := Imgur.FormatLink(res, s.ddl.Text)
     A_Clipboard := s.link.Value
-    ImgurSetStatus(s, 'Uploaded and copied to clipboard.'
+
+    ; Say plainly when the animated path was taken.  Otherwise the link just
+    ; silently says .gif when the file went up as a GIFV, and the next question
+    ; is always "did the animation survive?"  (It did — Imgur serves both.)
+    note := res['animated']
+          ? 'Uploaded — animated, so links use the .gif.  MP4 formats are in the dropdown.'
+          : 'Uploaded and copied to clipboard.'
+    ImgurSetStatus(s, note
                     . (res['remaining'] != '' ? '   Credits left today: ' res['remaining'] : ''))
 }
 
