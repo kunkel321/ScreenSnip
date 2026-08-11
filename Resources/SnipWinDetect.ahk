@@ -1,7 +1,7 @@
 #Requires AutoHotkey v2
 ; ==============================================================================
 ;                 SnipWinDetect.ahk   —  add-on module for ScreenSnip.ahk
-; Version Date: 8-9-2026 
+; Version Date: 8-11-2026 
 ; ==============================================================================
 ; Hover-to-highlight window detection for FREEZE CAPTURE, in the style of
 ; SnagIt: move the mouse over the frozen screen and the window beneath the
@@ -64,36 +64,36 @@ class WinDetectCfg {
 
     ; Master switch.  false = the module stays loaded but never highlights
     ; anything, and freeze capture behaves exactly as it did before.
-    static Enabled := true
+    static Enabled := SnipCfg('SnipWinDetect', 'WinDetectEnabled', true)
 
     ; Outline colour, hex RRGGBB.  Wants to read clearly against an arbitrary
     ; screenshot; a saturated blue does that better than red or green, both of
     ; which disappear into common window chrome.
-    static Color := '1E90FF'
+    static Color := SnipCfg('SnipWinDetect', 'WinDetectColor', '1E90FF')
 
     ; Outline thickness in px.  Automatically thinned for windows too small to
     ; fit it, so a tiny tooltip still shows an outline rather than a solid block.
-    static Thickness := 3
+    static Thickness := SnipCfg('SnipWinDetect', 'WinDetectThickness', 3)
 
     ; Cursor poll interval in ms.  The hit test itself is a memory scan, so this
     ; is cheap; 40 is about 25 fps and feels immediate.  Below 10 is clamped.
-    static PollMs := 40
+    static PollMs := SnipCfg('SnipWinDetect', 'WinDetectPollMs', 40)
 
     ; Ignore windows smaller than this in either dimension, px.  Filters the
     ; 1x1 and 0x0 message-only oddities that a lot of apps leave lying around.
-    static MinSize := 16
+    static MinSize := SnipCfg('SnipWinDetect', 'WinDetectMinSize', 16)
 
     ; Show the floating title / class / size readout beside the cursor?
-    static ShowInfo := true
+    static ShowInfo := SnipCfg('SnipWinDetect', 'WinDetectShowInfo', true)
 
     ; ToolTip slot for that readout.  ScreenSnip itself uses no ToolTips, so
     ; this only matters if another add-on starts to.
-    static TipIndex := 18
+    static TipIndex := SnipCfg('SnipWinDetect', 'WinDetectTipIndex', 18)
 
     ; Treat the desktop itself (Progman / WorkerW) as a capture target?  Off by
     ; default — it is screen-sized, sits under everything, and having it match
     ; means the highlight never goes away over empty desktop.
-    static IncludeDesktop := false
+    static IncludeDesktop := SnipCfg('SnipWinDetect', 'WinDetectIncludeDesktop', false)
 
     ; Offer each MONITOR as a capture target as well?  These are appended AFTER
     ; the windows, so they sit at the bottom of the Z-ordered candidate list: a
@@ -101,7 +101,7 @@ class WinDetectCfg {
     ; wheel-step past the last window, and empty desktop still has something to
     ; highlight — all without switching IncludeDesktop on and letting Progman
     ; swallow every hit test.  Full monitor bounds, taskbar included.
-    static IncludeMonitors := true
+    static IncludeMonitors := SnipCfg('SnipWinDetect', 'WinDetectIncludeMonitors', true)
 }
 
 

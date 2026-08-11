@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 8-9-2026 
+; Version date: 8-11-2026 
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -32,6 +32,8 @@ SetWinDelay(0)
 ;   SnipImgur.ahk     One-click upload to imgur.com.
 ;   SnipWinDetect.ahk Hover-highlight a whole window during Freeze Capture and
 ;                     grab it with one left-click (SnagIt-style).
+;   ToolTipOptions.ahk  just me's tooltip styling library — makes the status
+;                     tooltips the modules above raise bigger and easier to see.
 ; See each file's own header for setup.  Credentials and anything else written
 ; at runtime go in  Data\  — add that folder to .gitignore.
 ;
@@ -105,7 +107,7 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   TRANSPARENCY
   Alt + Up / Down              Adjust ± 25
   Alt + Wheel                  Adjust ± 10
-  --------------------------------------------------
+{SettingsHelp}  --------------------------------------------------
 )"
 
 ; ── Globals ────────────────────────────────────────────────────────────────────
@@ -117,238 +119,220 @@ global SnipVisible := true
 global FreezeActive := false
 
 ; ══════════════════════════════════════════════════════════════════════════════
-; USER SETTINGS — adjust these to taste
+; USER SETTINGS
+; ══════════════════════════════════════════════════════════════════════════════
+; Every knob below now lives in  Data\snipSettings.ini  and is edited with
+; Resources\SettingsManager.exe, which takes its labels, help text, types and
+; ranges from  Data\snipSettingsMetadata.json.
+;
+; The long explanatory notes that used to fill this block moved into that JSON,
+; where SettingsManager shows them in its help pane AS YOU EDIT.  That is the
+; whole point of the move: the guidance is now in front of the person changing
+; the setting, instead of in a source file they may never open.  If you want to
+; know what one of these does, select it in SettingsManager and read the pane.
+;
+; The literal after each SnipCfg() call is the FALLBACK, used when the INI is
+; missing, unreadable, or has no such key.  So deleting Data\snipSettings.ini is
+; a safe factory reset, and a corrupt one degrades to these values instead of
+; stopping the script.  Keep them in step with the "default" fields in the JSON.
+;
+; SETTINGS ARE READ ONCE, AT LOAD.  Nothing re-reads the file, so a change needs
+; a restart — which is why every key in the metadata carries a "restart"
+; property.  Note that restarting ScreenSnip closes any open snips.
 ; ══════════════════════════════════════════════════════════════════════════════
 
-; Color of the semi-transparent selection overlay while dragging.
-; Any AHK color name or hex value (e.g. 'Lime', 'Teal', '0xFF8800').
-SelectionColor := 'b58500'
+; ── Capture ───────────────────────────────────────────────────────────────────
+SelectionColor        := SnipCfg('Capture', 'SelectionColor', 'b58500')
+SelectionOverlayAlpha := SnipCfg('Capture', 'SelectionOverlayAlpha', 80)
+CaptureAdjustMargin   := SnipCfg('Capture', 'CaptureAdjustMargin', 250)
 
-; Extra pixels captured AROUND your selection into a frozen "master"
-; snapshot, so the capture region can be nudged/resized after the fact
-; (see the ADJUST CAPTURE REGION hotkeys). This is the maximum you can
-; pan or grow in any direction before hitting the edge of the snapshot.
-; Larger = more adjustment headroom, but more memory per snip (a 32-bit
-; bitmap is width * height * 4 bytes).
-;   0      = no headroom; region is fixed at the exact selection.
-;   150    = a comfortable default for fixing small clipped edges.
-;   99999  = effectively snapshots the WHOLE desktop into every snip.
-; The value is always clamped to the virtual desktop bounds, so oversized
-; numbers are safe (they just capture everything and use more RAM — they
-; won't crash or read off-screen).
-CaptureAdjustMargin := 250
+; ── Dimension labels ──────────────────────────────────────────────────────────
+ShowDimensionLabels := SnipCfg('DimensionLabels', 'ShowDimensionLabels', true)
+InfoFontSize        := SnipCfg('DimensionLabels', 'InfoFontSize', 10)
+InfoWHOffsetRight   := SnipCfg('DimensionLabels', 'InfoWHOffsetRight', 38)
+InfoWHOffsetBottom  := SnipCfg('DimensionLabels', 'InfoWHOffsetBottom', 25)
+InfoWMinWidth       := SnipCfg('DimensionLabels', 'InfoWMinWidth', 75)
+InfoHMinHeight      := SnipCfg('DimensionLabels', 'InfoHMinHeight', 55)
 
-; ── FREEZE CAPTURE ────────────────────────────────────────────────────────────
-; Problem this solves: the normal Ctrl+RButton drag can't capture a context
-; menu, tooltip, or drop-down, because pressing a mouse button dismisses them.
-; Freeze Capture fixes that with a KEYBOARD trigger: the instant you press it,
-; the entire virtual desktop is BitBlt'd into memory, and a full-screen backdrop
-; showing that frozen image is put up. The real menu is then free to close — we
-; already have its pixels. You select a region on the frozen image with the same
-; RButton drag as always, and the snip is cut from the bitmap, not the screen.
-;
-; Because the crop reads from the frozen bitmap, ANY UI floated over the backdrop
-; (the hint message below, the W×H labels, the selection rectangle) is invisible
-; to the capture by construction. The one rule that keeps this true: never
-; re-grab from the screen after the initial freeze.
-;
-; Key to trigger Freeze Capture. Any single key AHK understands: 'ScrollLock',
-; 'PrintScreen', 'CapsLock', 'Pause', 'F12', etc. Set to '' to disable the
-; built-in trigger entirely (the cross-script message trigger below still works).
-;   ScrollLock  — the default. Almost nothing else uses it, it has a status LED,
-;                 and no app fights you for it.
-;   PrintScreen — the conventional choice, BUT SnagIt and Win11's Snipping Tool
-;                 both grab it; only use it if nothing else on your box has it.
-;   CapsLock    — fine IF no other script already claims CapsLock. Each AHK
-;                 script installs its own keyboard hook, and a consuming
-;                 CapsLock hotkey in an earlier hook means this one never sees
-;                 the key. (kunkel321: PersonalHotstrings.ahk nullifies CapsLock,
-;                 so use the message trigger from there instead — see below.)
-FreezeCaptureKey := 'CapsLock'
+; ── Freeze capture ────────────────────────────────────────────────────────────
+; Blank FreezeCaptureKey disables the built-in trigger; the cross-script
+; RegisterWindowMessage trigger further down still works.
+FreezeCaptureKey      := SnipCfg('FreezeCapture', 'FreezeCaptureKey', 'CapsLock')
+FreezeDoublePress     := SnipCfg('FreezeCapture', 'FreezeDoublePress', true)
+FreezeDoublePressTime := SnipCfg('FreezeCapture', 'FreezeDoublePressTime', 400)
+FreezeNullifyCapsLock := SnipCfg('FreezeCapture', 'FreezeNullifyCapsLock', true)
 
-; Require a DOUBLE press of FreezeCaptureKey (true) or fire on a single press
-; (false)? Double-press is recommended for keys that have a normal function or a
-; toggle state: the hotkey is registered with '~' (pass-through), so two presses
-; of a toggle key like CapsLock or ScrollLock turn it on then straight back off,
-; leaving the lock state exactly as it was.
-FreezeDoublePress     := true
-; Maximum gap, in milliseconds, between the two presses.
-FreezeDoublePressTime := 400
+; ── Freeze hint ───────────────────────────────────────────────────────────────
+; The two hint strings are separate on purpose: deleting SnipWinDetect.ahk has
+; to leave the hint truthful, rather than advertising a click that does nothing.
+; `n in the INI value becomes a real line break — SnipCfg() unescapes it.
+ShowFreezeHint          := SnipCfg('FreezeHint', 'ShowFreezeHint', true)
+FreezeHintText          := SnipCfg('FreezeHint', 'FreezeHintText'
+    , 'ScreenSnip has frozen the screen.`nRight-click-drag to select a region.'
+    . '`n`nThe new snip will "float" above the screen.`n`nEsc cancels.')
+FreezeHintTextWinDetect := SnipCfg('FreezeHint', 'FreezeHintTextWinDetect'
+    , 'ScreenSnip has frozen the screen.`nLeft-click a highlighted window to grab it whole,'
+    . '`nor right-click-drag to select any region.'
+    . '`n`nThe new snip will "float" above the screen.`n`nEsc cancels.')
+FreezeHintFontName      := SnipCfg('FreezeHint', 'FreezeHintFontName', 'Segoe UI')
+FreezeHintFontSize      := SnipCfg('FreezeHint', 'FreezeHintFontSize', 15)
+FreezeHintTextColor     := SnipCfg('FreezeHint', 'FreezeHintTextColor', 'FFFFFF')   ; hex RRGGBB
+FreezeHintBackColor     := SnipCfg('FreezeHint', 'FreezeHintBackColor', '1E1E1E')   ; hex RRGGBB
+FreezeHintAlpha         := SnipCfg('FreezeHint', 'FreezeHintAlpha', 215)
+FreezeHintCornerRadius  := SnipCfg('FreezeHint', 'FreezeHintCornerRadius', 16)
 
-; Nullify a CapsLock SINGLE press while ScreenSnip is running?
-; Only has any effect when FreezeCaptureKey is 'CapsLock' — it's ignored for
-; every other key, so it can't surprise someone who never chose CapsLock.
-;
-; Why it exists: the trigger is registered with '~' (pass-through), so a DOUBLE
-; press toggles CapsLock on then straight back off and nets out. A single stray
-; press has nothing to cancel it, and leaves CapsLock on. If you're one of the
-; many people who never use CapsLock deliberately and would rather it did
-; nothing at all, set this true and ScreenSnip will switch it back off after
-; every press — single or double.
-;
-; Default is FALSE. Turning a key off on someone's keyboard is not a decision an
-; app should make for them, and plenty of people do use CapsLock.
-;
-; Note this does NOT block other scripts: the hotkey is non-suppressing, so any
-; other app's CapsLock binding still fires. It only resets the LOCK STATE
-; afterwards. If you have another script that USES the caps state (rather than
-; just hotkeying on the key), leave this false.
-FreezeNullifyCapsLock := true
+; ── Snip window: border, bevel, transparency key ──────────────────────────────
+; BorderColor falls back to SelectionColor rather than to a literal, so the
+; "selection tint and finished snip match" relationship survives someone
+; changing SelectionColor with no snipSettings.ini present.
+ShowSnipBorder  := SnipCfg('SnipWindow', 'ShowSnipBorder', true)
+BorderColor     := SnipCfg('SnipWindow', 'BorderColor', SelectionColor)
+BorderThickness := SnipCfg('SnipWindow', 'BorderThickness', 2)
+Bevel3D                       := SnipCfg('SnipWindow', 'Bevel3D', true)
+Bevel3DMaxThickness           := SnipCfg('SnipWindow', 'Bevel3DMaxThickness', 3)
+Bevel3DStrength               := SnipCfg('SnipWindow', 'Bevel3DStrength', 0.55)
+Bevel3DInactiveStrength       := SnipCfg('SnipWindow', 'Bevel3DInactiveStrength', 0.55)
+Bevel3DInactiveDarknessFactor := SnipCfg('SnipWindow', 'Bevel3DInactiveDarknessFactor', 0.2)
+; Numeric 0xRRGGBB — SnipCfgHex() strips any 0x/# and validates the 6 hex digits.
+TransColor := SnipCfgHex('SnipWindow', 'TransColor', 0xFF00FF)
 
-; Hint message shown over the frozen backdrop. It floats ABOVE the frozen image
-; and is never included in the snip, so it can be large and central without
-; obscuring anything. Use `n for a line break.
-FreezeHintText := 'ScreenSnip has frozen the screen.'
-                . '`nRight-click-drag to select a region.'
-                . '`n`nThe new snip will `"float`" above the screen.'
-                . '`n`nEsc cancels.'
-; Shown INSTEAD of FreezeHintText when SnipWinDetect.ahk is present, because the
-; gesture set is genuinely different then. Kept as a separate string rather than
-; a line appended to the one above so that deleting the module leaves the hint
-; truthful — it would otherwise advertise a click that does nothing.
-FreezeHintTextWinDetect := 'ScreenSnip has frozen the screen.'
-                . '`nLeft-click a highlighted window to grab it whole,'
-                . '`nor right-click-drag to select any region.'
-                . '`n`nThe new snip will `"float`" above the screen.'
-                . '`n`nEsc cancels.'
-; Set false for no hint at all (you'll get a silently frozen screen — only do
-; this once the gesture is deep muscle memory).
-ShowFreezeHint     := true
-FreezeHintFontSize := 15
-FreezeHintFontName := 'Segoe UI'
-FreezeHintTextColor := 'FFFFFF'    ; hex RRGGBB
-FreezeHintBackColor := '1E1E1E'    ; hex RRGGBB
-; Overall opacity of the hint pill, 0 (invisible) - 255 (solid). Semi-transparent
-; so anything directly under it is still readable while you aim the selection.
-FreezeHintAlpha    := 215
-; Corner rounding, in px, of the hint pill. 0 = square corners.
-FreezeHintCornerRadius := 16
+; ── Snip shadow ───────────────────────────────────────────────────────────────
+ShowSnipShadow       := SnipCfg('SnipShadow', 'ShowSnipShadow', true)
+ShadowColor          := SnipCfgHex('SnipShadow', 'ShadowColor', 0x000000)
+ShadowOffset         := SnipCfg('SnipShadow', 'ShadowOffset', 7)
+ShadowOffsetInactive := SnipCfg('SnipShadow', 'ShadowOffsetInactive', 4)
+ShadowBlur           := SnipCfg('SnipShadow', 'ShadowBlur', 6)
+ShadowAlpha          := SnipCfg('SnipShadow', 'ShadowAlpha', 105)
 
-; Right-drag pan sensitivity: how many pixels of right-mouse drag map to ONE
-; pixel of region pan (hand-tool style — the image follows the cursor). Higher
-; = finer/slower, which suits nudging an edge into place; 1 = 1:1 tracking.
-; The fractional remainder is carried between frames, so even a slow drag moves
-; smoothly instead of stair-stepping. (The first few px of any drag are a dead
-; zone that distinguishes a pan from a plain right-click; see PanClickSlop.)
-PanDragDivisor := 3
-; Total right-drag travel (screen px) below which the gesture is treated as a
-; right-CLICK and opens the context menu instead of panning.
-PanClickSlop := 5
+; ── Gestures ──────────────────────────────────────────────────────────────────
+PanDragDivisor := SnipCfg('Gestures', 'PanDragDivisor', 3)
+PanClickSlop   := SnipCfg('Gestures', 'PanClickSlop', 5)
+EdgeGrabZone   := SnipCfg('Gestures', 'EdgeGrabZone', 6)
 
-; Edge-drag resize: hold Alt and drag a snip's edge/corner to grow or shrink the
-; capture region (the opposite edge stays put). EdgeGrabZone is how far inward,
-; in px, the grabbable band reaches from each edge; it's automatically widened to
-; at least the border thickness so a thick border is still fully grabbable. Only
-; active on upright snips (Angle 0) — a rotated snip's edges don't map cleanly to
-; the capture rectangle, so it's suppressed there (same rule as the border).
-EdgeGrabZone := 6
+; ── Straighten ────────────────────────────────────────────────────────────────
+StraightenStep     := SnipCfg('Straighten', 'StraightenStep', 1)
+StraightenFineStep := SnipCfg('Straighten', 'StraightenFineStep', 0.5)
+StraightenMaxAngle := SnipCfg('Straighten', 'StraightenMaxAngle', 15)
 
-; Straighten (deskew) — rotate the IMAGE inside a fixed rectangular frame,
-; e.g. to square up a skewed table before OCR. Unlike Rotation (which turns
-; the whole snip, frame and all), Straighten leaves the frame axis-aligned
-; and only tilts the content within it; you then trim the exposed corners
-; with a Resize. The content pivots about the centre of the crop AS IT WAS when
-; you began straightening, and that pivot is then held fixed until you return to
-; level — so panning slides the frame over one stable rotated image (no swirl),
-; while the tilt still turns about what you're actually looking at. The
-; surrounding CaptureAdjustMargin supplies the extra pixels the tilt pulls
-; in — a larger margin allows a larger clean straighten before the corners
-; run past the snapshot edge.
-StraightenStep     := 1      ; degrees per Alt+, / Alt+.
-StraightenFineStep := 0.5    ; degrees per Shift+Alt+, / Shift+Alt+.
-StraightenMaxAngle := 15     ; hard clamp (the practical limit is the margin)
+; ── Saving ────────────────────────────────────────────────────────────────────
+; SaveDefaultFolder is only the FIRST folder offered in a session; after that
+; the last folder actually saved to wins.  SnipCfgPath() expands %USERPROFILE%.
+SaveDefaultFolder := SnipCfgPath('Saving', 'SaveDefaultFolder', '%USERPROFILE%\Pictures')
+SaveDefaultExt    := SnipCfg('Saving', 'SaveDefaultExt', 'png')
 
-; Show a colored border around each floating snip?
-; true = show border,  false = no border (image only, fully borderless)
-ShowSnipBorder := true
-; Note: Border is not shown during rotations other than 90, 180, or 90 CCW. 
-
-; Border color for floating snips. Any AHK color name or hex value
-; (e.g. 'Lime', '0x2d2d55'). Automatically matches SelectionColor by
-; default so the UI feels cohesive — override to any color you like.
-BorderColor := SelectionColor
-
-; Border thickness in pixels (applied as Gui margin on each side).
-BorderThickness := 2
-
-; Give the snip border a 3D "floating" bevel look — top/left edges lighter,
-; bottom/right edges darker, both derived from the same border color.
-; Looks best with thin borders (1-2px); automatically disabled above
-; Bevel3DMaxThickness since thick beveled frames tend to look chunky/odd.
-Bevel3D           := true
-Bevel3DMaxThickness := 3
-; How much lighter/darker the bevel edges are, 0.0-1.0 (fraction blended
-; toward white for the light edges, toward black for the dark edges).
-; Active and inactive snips use the same bevel strength/contrast — the
-; difference between them comes from Bevel3DInactiveDarknessFactor below.
-Bevel3DStrength         := 0.55
-Bevel3DInactiveStrength := 0.55
-; How much darker BOTH bevel edges (light and dark) get on an inactive
-; (unfocused) snip, 0.0-1.0. E.g. 0.2 = both edges are 20% darker than
-; they'd be on the active snip — same contrast/shape, just dimmed overall,
-; which gives a focus cue without needing a second border color.
-Bevel3DInactiveDarknessFactor := 0.2
-
-; Drop shadow: cast a soft translucent shadow to the bottom/right of each snip.
-; This is a separate, click-through window that sits just behind the snip and is
-; kept glued to it via WM_WINDOWPOSCHANGED — the snip window itself is never
-; touched. It's painted per-pixel with UpdateLayeredWindow (real feathered
-; alpha); ShadowBlur softens the edges via a downscale/upscale pass. Suppressed
-; (hidden) at non-cardinal / skewed angles (a rectangle wouldn't match a tilted
-; snip), and whenever the snip isn't 100% opaque (a shadow behind a see-through
-; snip looks wrong). true = show shadow (default for new snips), false = none.
-; Toggle per-snip at runtime via the right-click "Shadow" menu item.
-ShowSnipShadow := true
-; Shadow color as a hex value, 0xRRGGBB (e.g. 0x000000 black, 0x203040 slate).
-; Hex only here — the GDI+ fill needs a numeric RGB, not an AHK colour name.
-ShadowColor := "0x000000"
-; How far, in logical px, the shadow is offset down/right (DPI-scaled like the
-; rest of the snip geometry). Keep this >= ShadowBlur for a clean bottom/right
-; drop; if blur exceeds offset you get a soft all-around halo/glow instead.
-ShadowOffset := 7
-; Offset used when the snip ISN'T the focused window. Making it smaller than
-; ShadowOffset lets an inactive snip cast a shorter shadow (reads as sitting
-; closer to the desktop), so the focused snip visually lifts forward — the same
-; trick the Bevel3D active/inactive strengths use. Set equal to ShadowOffset for
-; no active/inactive difference.
-ShadowOffsetInactive := 4
-; Edge softness in logical px. 0 = crisp rectangle; 5-8 = a gentle feathered
-; drop shadow; larger = softer/wider. Softening is done with plain GDI+ bilinear
-; scaling (no effects API, no machine code), so it works everywhere.
-ShadowBlur := 6
-; Peak shadow opacity at the core, 0 (invisible) - 255 (solid). The feather fades
-; below this. ~90-120 ≈ 35-47%, which reads as a shadow over most backdrops.
-ShadowAlpha := 105
-
-
-; Position of the W and H labels during selection.
-; InfoWHOffsetRight  — inset from the right edge for the H (height) label.
-; InfoWHOffsetBottom — inset from the bottom edge for the W (width) label.
-InfoWHOffsetRight  := 38
-InfoWHOffsetBottom := 25
-
-; Font size (points) for the W and H dimension labels during selection.
-InfoFontSize := 10
-
-; Minimum selection size (pixels) before each label appears.
-; InfoWMinWidth  — selection must be at least this wide to show the W label.
-; InfoHMinHeight — selection must be at least this tall to show the H label.
-InfoWMinWidth  := 75
-InfoHMinHeight := 55
-
-; Master switch for the on-screen dimension (W × H) labels. Set to false to
-; disable BOTH the capture-time labels (shown while Ctrl+RButton dragging) and
-; the post-capture resize labels (shown while Alt-dragging a snip's edge).
-ShowDimensionLabels := true
-
-; Transparent color key used to hide the corners of rotated snips.
-; Always magenta — chosen because it almost never appears naturally in
-; screen captures, avoiding accidental transparency within the image.
-TransColor := 0xFF00FF
-; Known issue: During rotation, at points other than 90, 180, or 90 CCW, 
-; an annoying magenta halo of pixels will appear around the edge of the snip.  
+; ── Tooltips ──────────────────────────────────────────────────────────────────
+; Handed to Resources\ToolTipOptions.ahk by InitToolTips() below, which
+; subclasses the tooltip window CLASS — so these reach every ToolTip any module
+; raises, with no change to a single ToolTip call anywhere.
+; TipBackColor/TipTextColor fall back to the freeze hint's colours so the hint
+; and the status tooltips stay one visual family by default.
+EnhanceToolTips := SnipCfg('Tooltips', 'EnhanceToolTips', true)
+TipFontName  := SnipCfg('Tooltips', 'TipFontName', 'Segoe UI')
+TipFontSize  := SnipCfg('Tooltips', 'TipFontSize', 12)
+TipFontStyle := SnipCfg('Tooltips', 'TipFontStyle', '')
+TipBackColor := SnipCfg('Tooltips', 'TipBackColor', FreezeHintBackColor)
+TipTextColor := SnipCfg('Tooltips', 'TipTextColor', FreezeHintTextColor)
+TipMarginL   := SnipCfg('Tooltips', 'TipMarginL', 10)
+TipMarginT   := SnipCfg('Tooltips', 'TipMarginT', 8)
+TipMarginR   := SnipCfg('Tooltips', 'TipMarginR', 10)
+TipMarginB   := SnipCfg('Tooltips', 'TipMarginB', 8)
+TipTitle     := SnipCfg('Tooltips', 'TipTitle', '')
+TipTitleIcon := SnipCfg('Tooltips', 'TipTitleIcon', 4)
 
 ; ══════════════════════════════════════════════════════════════════════════════
+; SETTINGS PLUMBING
+; ══════════════════════════════════════════════════════════════════════════════
+; Three things about these functions are load-order critical.
+;
+; 1. The cache is LAZY, filled by whoever calls first.  It has to be: the add-on
+;    modules are #Include'd at the BOTTOM of this file, and class static
+;    initialisers run BEFORE the auto-execute section — so OcrCfg and friends
+;    ask for their settings before the block above has run a single line.  A
+;    load routine called from up here would be far too late for them.
+;
+; 2. SnipCfgLoad() swallows everything.  A class static initialiser that throws
+;    is a LOAD-TIME failure, so a locked or malformed INI would stop ScreenSnip
+;    from starting at all.  Failing to an empty Map means every SnipCfg() call
+;    quietly returns its coded fallback and the app still runs.
+;
+; 3. The return type follows the FALLBACK's type, not the INI text.  Pass 250
+;    and you get an Integer back, pass 0.55 and you get a Float, pass 'x' and
+;    you get a String.  So callers never have to think about the fact that
+;    everything in an INI file is text.
+
+; Read one setting.  section/key match the INI; default is both the fallback
+; and the type template (see note 3 above).
+SnipCfg(section, key, default := '') {
+    static vals := ''
+    if !IsObject(vals)
+        vals := SnipCfgLoad()
+
+    k := section '.' key
+    if !vals.Has(k)
+        return default
+
+    v := Trim(vals[k])
+    if (v = '')                              ; key present but deliberately blank
+        return (default is Number) ? default : ''
+
+    try {
+        if (default is Float)
+            return Float(v)
+        if (default is Integer)               ; true/false are Integers here too
+            return Integer(v)
+    } catch {
+        return default                        ; e.g. 'abc' where a number belongs
+    }
+
+    ; Text.  INI values are a single line, so `n is the line-break escape.
+    return StrReplace(v, '``n', '`n')
+}
+
+; Slurp the whole INI into a Map keyed 'Section.Key'.  One pass, one file open,
+; rather than 100 separate IniRead calls at startup.
+SnipCfgLoad() {
+    m := Map()
+    m.CaseSense := false                      ; INI section/key names aren't case sensitive
+    try {
+        path := SnipDataPath('snipSettings.ini')
+        if !FileExist(path)
+            return m
+        ; IniRead with no section returns the section names; with a section and
+        ; no key, all of that section's key=value lines.
+        for sect in StrSplit(IniRead(path), '`n') {
+            if (sect = '')
+                continue
+            for line in StrSplit(IniRead(path, sect), '`n')
+                if (pos := InStr(line, '='))  ; first '=' only, so values may contain '='
+                    m[sect '.' SubStr(line, 1, pos - 1)] := SubStr(line, pos + 1)
+        }
+    }
+    return m
+}
+
+; A colour as a numeric 0xRRGGBB, for the values GDI+ and the layered-window
+; APIs need as a number rather than a name.  Anything that isn't 6 hex digits
+; (with an optional 0x or # in front) falls back rather than producing a
+; nonsense colour — a bad TransColor would punch holes in every snip.
+SnipCfgHex(section, key, default) {
+    v := SnipCfg(section, key, '')
+    if (v = '')
+        return default
+    v := RegExReplace(Trim(v), 'i)^(0x|#)', '')
+    return RegExMatch(v, '^[0-9A-Fa-f]{6}$') ? Integer('0x' v) : default
+}
+
+; A path setting.  Expands %USERPROFILE% and resolves anything relative against
+; A_ScriptDir, so the INI can ship a portable 'Resources\...' path while a user
+; who browses to a file with SettingsManager gets an absolute one that still
+; works.  Absolute means a drive letter or a UNC prefix.
+SnipCfgPath(section, key, default) {
+    v := Trim(SnipCfg(section, key, ''))
+    if (v = '')
+        v := default
+    v := StrReplace(v, '%USERPROFILE%', EnvGet('USERPROFILE'))
+    return RegExMatch(v, '^([A-Za-z]:|\\\\)') ? v : A_ScriptDir '\' v
+}
 
 ; HelpText is built at the very top of the script, ABOVE the settings, so its
 ; freeze trigger line is left as a {FreezeTrig} placeholder and filled in here —
@@ -361,8 +345,87 @@ HelpText := StrReplace(HelpText, '{FreezeTrig}'
         : Format('{:-29s}', (FreezeDoublePress ? 'Double-tap ' : 'Press ') FreezeCaptureKey)
           . 'Freeze the whole screen')
 
+; Same placeholder trick for the settings block: it only earns a place on the
+; cheat sheet when the menu items it describes actually exist, so it's filled
+; from the same SettingsManagerPath() test the two menus use.  The token sits
+; alone at the start of its line, so an absent SettingsManager substitutes to
+; nothing at all and leaves no gap behind.
+SettingsHelpBlock := "
+(
+
+SETTINGS
+Tray > Settings...           Edit every setting, with help for each
+Menu > Settings...           The same, from a snip's right-click menu
+Settings live in Data\snipSettings.ini and are read once, at
+launch, so a change needs a restart — which SettingsManager
+offers after you save.
+
+)"
+HelpText := StrReplace(HelpText, '{SettingsHelp}'
+    , SettingsManagerPath() = '' ? '' : SettingsHelpBlock)
+
 ; ── DPI awareness (helps on scaled displays) ───────────────────────────────────
 Try DllCall("SetThreadDpiAwarenessContext", "ptr", -3, "ptr")
+
+; ── Tooltip styling ───────────────────────────────────────────────────────────
+; Applied AFTER the DPI call above, because the point size is converted to
+; pixels through GetDeviceCaps(LOGPIXELSY) and that reading depends on the
+; thread's DPI awareness — set the font first and a 12pt tooltip comes out
+; noticeably small on a scaled display.
+InitToolTips()
+
+; Hand the TOOLTIP APPEARANCE settings to Resources\ToolTipOptions.ahk.
+;
+; Three things make this safe when the file has been deleted:
+;   - The whole body is behind IsSet(ToolTipOptions).  The class is the presence
+;     sentinel, exactly like OcrCfg / SnipAiCfg / Imgur / WinDetectCfg, and class
+;     objects come into existence before the auto-execute section runs, so this
+;     can see one declared 3,000 lines further down.
+;   - ToolTipOptions.Init() is a VARIABLE dereference followed by a method call,
+;     not a direct call to a named function, so an absent class is a runtime
+;     concern rather than the load-time error a bare SomeFunc() would be.  That's
+;     why this one needs no %name%() dynamic-call dance.
+;   - Nothing else in ScreenSnip depends on it.  Every ToolTip() call in every
+;     module is untouched, styled or not.
+;
+; Wrapped in try/catch because SetFont validates its options and throws on a
+; bad one (a typo'd style word, a size outside 1-255).  A misconfigured tooltip
+; is not worth taking the script down over, so it reports once and carries on
+; with plain system tooltips.
+InitToolTips() {
+    global EnhanceToolTips, TipFontSize, TipFontStyle, TipFontName
+    global TipBackColor, TipTextColor, TipTitle, TipTitleIcon
+    global TipMarginL, TipMarginT, TipMarginR, TipMarginB
+    ; NB: ToolTipOptions is deliberately NOT declared global here.  Declaring it
+    ; would CREATE the global variable at load time, and the class declaration
+    ; down in the included file would then fail with "This class declaration
+    ; conflicts with an existing global variable."  It doesn't need declaring:
+    ; the name is only ever read, never assigned, so it resolves to the global
+    ; class if one exists — the same way GDIp resolves in every function above,
+    ; even though the class is declared much further down the file.  If the file
+    ; was deleted, there's no global to resolve to and IsSet() returns false,
+    ; which is exactly the outcome the guard wants.
+
+    if !IsSet(ToolTipOptions) || !EnhanceToolTips
+        return
+
+    try {
+        ToolTipOptions.Init()
+        ToolTipOptions.SetFont(Trim('s' TipFontSize ' ' TipFontStyle), TipFontName)
+        ToolTipOptions.SetColors(TipBackColor, TipTextColor)
+        ToolTipOptions.SetMargins(TipMarginL, TipMarginT, TipMarginR, TipMarginB)
+        if (TipTitle != '')
+            ToolTipOptions.SetTitle(TipTitle, TipTitleIcon)
+    } catch as e {
+        ; Undo any half-applied styling so tooltips are consistently plain
+        ; rather than, say, huge but still pale yellow.
+        try ToolTipOptions.Reset()
+        MsgBox('Could not apply the tooltip settings.`n`n' e.Message
+             . '`n`nCheck the TOOLTIP APPEARANCE block at the top of the script.'
+             . '`nTooltips will use the plain Windows style for this session.'
+             , 'ScreenSnip', 4096)
+    }
+}
 
 ; ── GDI+ stays alive for the entire session ────────────────────────────────────
 GDIp.Startup()
@@ -464,6 +527,70 @@ CleanupOnExit(*) {
     try GDIp.Shutdown()
 }
 
+; ── SettingsManager (optional) ────────────────────────────────────────────────
+; Resources\SettingsManager.exe edits Data\snipSettings.ini, taking its labels,
+; help text, types and ranges from Data\snipSettingsMetadata.json.  Opt-out on
+; the same contract as the #Include'd add-ons: delete it and the two menu items
+; that call it simply never get added, rather than sitting there dead.
+;
+; Returns a ready-to-Run() command line, or '' when there's nothing to run.
+; Two launch shapes are recognised, in this order:
+;   1. SettingsManager.exe — the suite convention: a RENAMED copy of
+;      AutoHotkey64.exe, which runs the .ahk of the same name sitting beside it.
+;      Preferred because it needs no AutoHotkey installation on the machine.
+;   2. SettingsManager.ahk alone — covers a git clone that skipped the .exe
+;      (they're bulky, and often gitignored).  Only workable while ScreenSnip
+;      itself is running on an interpreter, hence the A_IsCompiled test.
+;
+; Resolved once and cached: the menus below are built during auto-execute and
+; both ask, and nobody drops a new .exe into Resources\ mid-session.
+SettingsManagerPath() {
+    static target := '', resolved := false
+    if resolved
+        return target
+    resolved := true
+
+    exe := A_ScriptDir '\Resources\SettingsManager.exe'
+    ahk := A_ScriptDir '\Resources\SettingsManager.ahk'
+
+    if FileExist(exe)
+        target := '"' exe '"'
+    else if (FileExist(ahk) && !A_IsCompiled && FileExist(A_AhkPath))
+        target := '"' A_AhkPath '" "' ahk '"'
+
+    return target
+}
+
+; Open SettingsManager, or raise the copy that's already open.
+;
+; The working directory argument is not decoration.  Each key in the metadata
+; JSON carries a "restart" path — '..\ScreenSnip.exe' — which SettingsManager
+; hands to Run() after a save, and a relative path there resolves against ITS
+; working directory.  A launched process inherits the launcher's, so without
+; this argument that path would be resolved against wherever ScreenSnip happens
+; to have been started from and the "Restart now?" prompt would fail.  Pinning
+; it to Resources\ makes it resolve exactly as it does when SettingsManager is
+; launched by double-clicking it, which is the case its paths were written for.
+;
+; Raising an existing window rather than just running it again is deliberate
+; too: SettingsManager is #SingleInstance Force, so a second launch would kill
+; the first and take any unsaved edits with it.
+LaunchSettingsManager(*) {
+    target := SettingsManagerPath()
+    if (target = '') {
+        MsgBox('SettingsManager was not found in the Resources folder.', 'ScreenSnip', 4096)
+        return
+    }
+    if (smHwnd := WinExist('ScreenSnip Settings Manager ahk_class AutoHotkeyGUI')) {
+        WinActivate('ahk_id ' smHwnd)
+        return
+    }
+    try
+        Run(target, A_ScriptDir '\Resources')
+    catch as e
+        MsgBox('Could not start SettingsManager.`n`n' e.Message, 'ScreenSnip', 4096)
+}
+
 ; ── Tray icon & menu ──────────────────────────────────────────────────────────
 TraySetIcon(A_WinDir '\system32\shell32.dll', 260)   ; scissors
 
@@ -496,6 +623,13 @@ if FileExist(A_Startup '\' appName '.lnk')
 if IsSet(Imgur) {
     trayMenu.Add()
     trayMenu.Add('Imgur Uploader…', TrayImgurUploader)
+}
+; Settings — same opt-out contract as the Imgur item above: no SettingsManager
+; in Resources\ means no item.  Given its own separator because it acts on the
+; whole app rather than on a snip.
+if SettingsManagerPath() {
+    trayMenu.Add()
+    trayMenu.Add('Settings…', LaunchSettingsManager)
 }
 trayMenu.Add()
 trayMenu.Add('ScreenSnip Help', (*) => ShowHelp())
@@ -649,6 +783,11 @@ SnipMenu.Add('')
 SnipMenu.Add('Close This Snip`tEsc', SnipMenu_Handler)
 SnipMenu.Add('Close All Snips',      SnipMenu_Handler)
 SnipMenu.Add('')
+; Grouped with Help rather than with the snip actions above, because neither
+; item does anything to the snip you right-clicked.  Present only when
+; SettingsManager is (see SettingsManagerPath).
+if SettingsManagerPath()
+    SnipMenu.Add('Settings…', SnipMenu_Handler)
 SnipMenu.Add('Help`tF1',        SnipMenu_Handler)
 
 ; Initialise the Border menu item to reflect the default ShowSnipBorder setting
@@ -1597,12 +1736,14 @@ SaveSnipAs(hwnd := 0) {
         return
     snip := guiSnips[hwnd]
 
+    global SaveDefaultFolder, SaveDefaultExt
+
     if (lastDir = '' || !DirExist(lastDir)) {
-        lastDir := EnvGet('USERPROFILE') '\Pictures'
+        lastDir := SaveDefaultFolder
         if !DirExist(lastDir)
             lastDir := A_MyDocuments
     }
-    default := lastDir '\ScreenSnip_' FormatTime(A_Now, 'yyyyMMdd_HHmmss') '.png'
+    default := lastDir '\ScreenSnip_' FormatTime(A_Now, 'yyyyMMdd_HHmmss') '.' SaveDefaultExt
 
     ; "S16" = Save-As dialog that prompts before overwriting an existing file.
     sel := FileSelect('S16', default, 'Save Snip As'
@@ -1612,8 +1753,8 @@ SaveSnipAs(hwnd := 0) {
 
     SplitPath(sel, , &outDir, &ext)
     ext := StrLower(ext)
-    if (ext = '') {                       ; no extension typed → default to PNG
-        sel .= '.png', ext := 'png'
+    if (ext = '') {                       ; no extension typed → use SaveDefaultExt
+        sel .= '.' SaveDefaultExt, ext := StrLower(SaveDefaultExt)
     }
     if (outDir != '')
         lastDir := outDir
@@ -2035,6 +2176,7 @@ SnipMenu_Handler(ItemName, ItemPos, *) {
         case 'Reset Straighten':        ResetStraighten(TargetHwnd)
         case 'Border':                  ToggleSnipBorder(TargetHwnd)
         case 'Shadow':                  ToggleSnipShadow(TargetHwnd)
+        case 'Settings…':               LaunchSettingsManager()
         case 'Help':                    ShowHelp()
         case 'Close This Snip':         CloseSnip(TargetHwnd)
         case 'Close All Snips':         CloseAllSnips()
@@ -2815,7 +2957,13 @@ ShowSnipMenuFor(Hwnd) {
 ; SelectScreenRegion  (from Fanatic Guru — lightly trimmed)
 ; ==============================================================================
 
-SelectScreenRegion(Key, Color := 'Lime', Transparent := 80) {
+; Transparent defaults to '' rather than a number so a caller can simply omit
+; it and get the user's SelectionOverlayAlpha, without that value having to be
+; repeated at every call site.
+SelectScreenRegion(Key, Color := 'Lime', Transparent := '') {
+    global SelectionOverlayAlpha
+    if (Transparent = '')
+        Transparent := SelectionOverlayAlpha
     static guiSSR
     if !IsSet(guiSSR) {
         guiSSR := Gui('+AlwaysOnTop -Caption +ToolWindow +LastFound -DPIScale', 'SnipperSelect')
@@ -3289,16 +3437,26 @@ Class GDIp {
 ; OPTIONAL ADD-ON MODULES
 ; ══════════════════════════════════════════════════════════════════════════════
 ;
-; All three follow one contract:
+; They all follow one contract:
 ;
 ;   - They live in  Resources\  and are included with the *i flag, which means
 ;     "include only if the file exists".  Delete any of them (or comment out its
 ;     line here) and ScreenSnip still runs; the feature's menu items are simply
 ;     left off.
-;   - Each declares a config class that acts as the presence sentinel, tested
-;     with IsSet() where it's needed: OcrCfg, SnipAiCfg, Imgur, WinDetectCfg.
+;   - Each declares a class that acts as the presence sentinel, tested with
+;     IsSet() where it's needed: OcrCfg, SnipAiCfg, Imgur, WinDetectCfg,
+;     ToolTipOptions.
 ;   - Each is reached through the %name%() dynamic-call form, because a direct
 ;     call to a function that might not exist is a LOAD-TIME error in v2.
+;     ToolTipOptions is the one exception, and only because everything it
+;     exposes is a METHOD on the sentinel class itself: ToolTipOptions.Init() is
+;     a variable dereference, and an unset variable is a runtime matter, not a
+;     load-time one.  The IsSet() guard is doing the same job either way.
+;     Do NOT "helpfully" add a `global ToolTipOptions` to InitToolTips() — a
+;     global declaration CREATES the variable at load time, and the class
+;     declaration in this file then dies with "This class declaration conflicts
+;     with an existing global variable."  Reading an undeclared name in an
+;     assume-local function already resolves to the global class when it exists.
 ;   - None contains top-level executable code that needs to RUN, so including
 ;     them here at the very end of the file is safe.  Note what that actually
 ;     means: this point is past the end of the auto-execute section, so any
@@ -3334,3 +3492,22 @@ Class GDIp {
 ; WinDetect_Begin / _End / _GetRect / _Cycle, all called from FreezeCapture().
 ; No dependencies and nothing to configure; settings live in its own header.
 #Include *i Resources\SnipWinDetect.ahk
+
+; Tooltip styling — bigger, colored, padded tooltips.  Unlike the four above,
+; this one isn't a ScreenSnip module at all: it's an unmodified copy of
+; ToolTipOptions.ahk by AHK forum member "just me", dropped in as-is so it can
+; be replaced wholesale whenever he posts an update.
+;   https://www.autohotkey.com/boards/viewtopic.php?t=113308
+;
+; It provides the ToolTipOptions class, which is its own presence sentinel;
+; InitToolTips() near the top of this file tests IsSet(ToolTipOptions) and feeds
+; it the TOOLTIP APPEARANCE settings.  Because it works by subclassing the
+; tooltip window class rather than by wrapping ToolTip(), NO CALL SITE ANYWHERE
+; CHANGES — every ToolTip() in every module, present and future, is styled or
+; not depending only on whether this file exists.  Delete it and they all fall
+; back to the plain Windows tooltip.
+;
+; One caveat worth knowing if the file is present but EnhanceToolTips is false:
+; merely loading it creates one hidden tooltip window (a class static), which is
+; harmless but not literally zero-cost.  Nothing is subclassed until Init() runs.
+#Include *i Resources\ToolTipOptions.ahk

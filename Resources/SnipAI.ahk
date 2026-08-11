@@ -2,7 +2,7 @@
 ;               SnipAI.ahk  —  AI vision add-on module for ScreenSnip.ahk
 ;
 ; Made by kunkel321 via Claude AI.
-; Version date: 8-9-2026
+; Version date: 8-11-2026
 ;
 ; Credit:  The idea of sending a screen snip to an AI vision model comes from
 ; one of Joe Glines' apps.  Joe's site — www.the-automator.com — is where a lot
@@ -49,9 +49,7 @@
 ;      [Imgur] section), so there is one credentials file to gitignore and one
 ;      to back up.  ADD THE Data FOLDER TO .gitignore.  ScreenSnip creates the
 ;      file on demand, and the menu items say so when no key is configured.
-;   3. To share one key with the rest of an AutoCorrect2 install instead, see
-;      the SnipAiCfg.IniFile comment below — it is a one-line change.
-;   4. Note that OpenAI prepaid credits EXPIRE after one year.  Buy a dollar or
+;   3. Note that OpenAI prepaid credits EXPIRE after one year.  Buy a dollar or
 ;      two at a time and set a budget alert.
 ;
 ; ── OPT-OUT CONTRACT ──────────────────────────────────────────────────────────
@@ -78,11 +76,11 @@ class SnipAiCfg {
     ; SnipImgur.ahk keeps its Client ID in, under an [Imgur] section.  The path
     ; comes from SnipKeysIni() in ScreenSnip.ahk so both modules stay in sync.
     ;
-    ; To share one key with the rest of an AutoCorrect2 install instead, change
-    ; this to point at AC2's file, which uses the same section and key names:
-    ;     static IniFile => '..\Data\PersonalApiKey.ini'
-    ; Note that '..\' there is relative to the WORKING directory, not the script
-    ; directory — that is how ChatGptWordLookup.ahk resolves it.
+    ; To read the key from somewhere else instead — a shared location, a
+    ; different tool's config — point this at that file.  Any ini with a
+    ; [SnipAiCfg.IniSection] heading and a SnipAiCfg.IniKey value will do; a
+    ; path starting '..\' is resolved against the WORKING directory, not the
+    ; script directory.
     static IniFile    => SnipKeysIni()
     static IniSection := 'OpenAI'
     static IniKey     := 'ApiKey'
@@ -93,23 +91,40 @@ class SnipAiCfg {
     ; error body is shown verbatim, so it is a one-line fix.  Cheaper "mini"
     ; tier models are markedly worse at dense small text; it is worth paying
     ; for the full model here.
-    static Model := 'gpt-5.6'
+    ; This is the DEFAULT.  A  Model=  line under [OpenAI] in Data\ApiKeys.ini
+    ; overrides it, so a model can be swapped without touching code — handy for
+    ; A/B testing quality against cost.  See SnipAiModel().
+    ;
+    ; Do NOT reflexively drop to a "mini" tier model here the way you might for
+    ; a text-only task.  Table extraction from a scan is dense small digits and
+    ; fine ruling lines, which is exactly where the cheap tiers degrade — and
+    ; they degrade into plausible-looking wrong numbers, not obvious errors.
+    ; Measure first: set ShowTokenUsage below and see where the money actually
+    ; goes before trading accuracy for it.
+    static Model := SnipCfg('SnipAI', 'AiModel', 'gpt-5.6')
 
     ; 'high' tiles the image and reads fine print; 'low' sends a single coarse
     ; thumbnail for about a tenth the cost.  For OCR you want 'high'.
-    static Detail := 'high'
+    static Detail := SnipCfg('SnipAI', 'AiDetail', 'high')
 
     ; ── Image handling ────────────────────────────────────────────────────────
     ; The API scales anything larger down before tiling, so sending a bigger
     ; image than this is pure upload with no accuracy gain.  Unlike the local
     ; OCR path there is no reason to UPSCALE — the model is not helped by it.
-    static MaxSide := 2048
+    static MaxSide := SnipCfg('SnipAI', 'AiMaxSide', 2048)
 
     ; ── Network ───────────────────────────────────────────────────────────────
     ; Vision calls are slow; the receive timeout in particular must be generous.
     ; Resolve, connect, send, receive — all milliseconds.
-    static Timeouts := [10000, 10000, 60000, 180000]
-    static WaitSecs := 180
+    ; Split into four INI keys rather than kept as an array: an array can't
+    ; round-trip through an INI file, and four named integers are easier to
+    ; reason about than positions in a list.  Order is still the one
+    ; WinHttp.SetTimeouts() wants: resolve, connect, send, receive.
+    static Timeouts := [ SnipCfg('SnipAI', 'AiResolveTimeout',  10000)
+                       , SnipCfg('SnipAI', 'AiConnectTimeout',  10000)
+                       , SnipCfg('SnipAI', 'AiSendTimeout',     60000)
+                       , SnipCfg('SnipAI', 'AiReceiveTimeout', 180000) ]
+    static WaitSecs := SnipCfg('SnipAI', 'AiWaitSecs', 180)
 
     ; ── Prompts ───────────────────────────────────────────────────────────────
     ; Transcription prompt.  Every clause here is load-bearing; the model's
@@ -190,18 +205,18 @@ OCR reading:
     ; table cells, so what lands in the clipboard pastes cleanly into a
     ; spreadsheet.  See SnipAiNormalizePunct().  Table cells only — Copy Text
     ; (AI) stays verbatim.
-    static NormalizeTablePunct := true
+    static NormalizeTablePunct := SnipCfg('SnipAI', 'AiNormalizeTablePunct', true)
 
     ; A cell whose entire content is a dash is a "no data" marker in most
     ; printed tables, not a value.  true blanks those cells, which keeps a
     ; numeric column numeric in Excel.  Off by default because it IS a content
     ; change, and in some tables a dash means something specific.
-    static DashCellToEmpty := false
+    static DashCellToEmpty := SnipCfg('SnipAI', 'AiDashCellToEmpty', false)
 
     ; Run PaddleOCR first and pass its text along as a spelling reference.
     ; Costs one extra engine run (a second or two, offline). Silently skipped if
     ; SnipOCR.ahk is absent or the engine isn't installed.
-    static GroundWithOcr := true
+    static GroundWithOcr := SnipCfg('SnipAI', 'AiGroundWithOcr', true)
     static AskPreamble := '
     (
 Answer the following question about this image. Be concise and concrete. If the answer depends on text in the image, quote that text exactly rather than paraphrasing it. If the image does not contain enough information to answer, say so plainly instead of speculating.
@@ -209,12 +224,25 @@ Answer the following question about this image. Be concise and concrete. If the 
 Question:
     )'
 
+    ; Append the token counts from the last call to the result tooltip.  Costs
+    ; nothing, and turns "roughly two cents a table" into a number you can
+    ; actually act on — in particular it separates image tokens from output
+    ; tokens from reasoning tokens, which are billed but otherwise invisible.
+    static ShowTokenUsage := SnipCfg('SnipAI', 'AiShowTokenUsage', false)
+
     ; ── Debugging ─────────────────────────────────────────────────────────────
     ; true = keep the temp PNG and write the raw request/response into the Data
     ; folder, so a failed call can be inspected.  The request dump does NOT
     ; contain the API key (that rides in a header, not the body), but it does
     ; contain the base64 image, so it will be large.
-    static Debug := false
+    static Debug := SnipCfg('SnipAI', 'AiDebug', false)
+}
+
+
+; Token counts from the most recent API call, as a short human-readable string.
+; Populated by SnipAiVisionRequest, consumed by the tooltips and the debug log.
+class SnipAiState {
+    static LastUsage := ''
 }
 
 
@@ -250,7 +278,8 @@ SnipAiCopyText(Hwnd) {
     }
 
     A_Clipboard := text
-    SnipAiToolTip('Copied ' SnipAiCountLines(text) ' line(s) to clipboard', 1600)
+    SnipAiToolTip('Copied ' SnipAiCountLines(text) ' line(s) to clipboard'
+                . SnipAiUsageSuffix(), 1600)
 }
 
 ; ── Table -> TSV on the clipboard ─────────────────────────────────────────────
@@ -297,7 +326,8 @@ SnipAiCopyTable(Hwnd) {
 
     A_Clipboard := SnipAiRowsToTsv(rows)
     SnipAiToolTip('Copied ' rows.Length ' row(s) x ' cols ' col(s) to clipboard'
-                . (warn != '' ? ' — ' warn : ''), warn != '' ? 3500 : 1600)
+                . (warn != '' ? ' — ' warn : '') SnipAiUsageSuffix()
+                , (warn != '') ? 3500 : 1600)
 }
 
 ; PaddleOCR text for the same snip, as a spelling reference.  Returns '' if
@@ -532,6 +562,25 @@ SnipAiResultSize(edit, btnCopy, btnClose, thisGui, MinMax, W, H) {
 ; API KEY / INI
 ; ══════════════════════════════════════════════════════════════════════════════
 
+; The model to call: the  Model=  key in the ini if present, else the documented
+; default in SnipAiCfg.  Resolved once and cached.
+;
+; This follows the settings pattern used across ScreenSnip — the class block is
+; the documentation AND the source of defaults; the ini holds overrides only.
+; A missing Model= line is not an error, it just means "use the default".
+SnipAiModel() {
+    static resolved := ''
+    if (resolved != '')
+        return resolved
+    m := ''
+    try
+        m := Trim(IniRead(SnipAiCfg.IniFile, SnipAiCfg.IniSection, 'Model', ''), ' `t')
+    catch
+        m := ''
+    resolved := (m != '') ? m : SnipAiCfg.Model
+    return resolved
+}
+
 ; Returns the key, or '' after having told the user what to do about it.
 SnipAiGetApiKey() {
     path := SnipAiCfg.IniFile
@@ -693,7 +742,7 @@ SnipAiVisionRequest(pngPath, prompt, apiKey, &errMsg) {
     ; No max_tokens / max_completion_tokens is sent: the two spellings are
     ; accepted by different model generations, and omitting the cap entirely
     ; works on all of them. Cost is bounded by actual output length anyway.
-    body := '{"model":"' SnipAiCfg.Model '","messages":[{"role":"user","content":['
+    body := '{"model":"' SnipAiModel() '","messages":[{"role":"user","content":['
           .   '{"type":"text","text":"' SnipAiEscapeJson(prompt) '"},'
           .   '{"type":"image_url","image_url":{'
           .     '"url":"data:image/png;base64,' b64 '",'
@@ -726,6 +775,9 @@ SnipAiVisionRequest(pngPath, prompt, apiKey, &errMsg) {
         dbg := SnipDataPath('SnipAI_debug_response.json')
         try FileDelete(dbg)
         try FileAppend(response, dbg, 'UTF-8')
+        try FileAppend('`n`n; model=' SnipAiModel() '  tokens: '
+                     . (SnipAiState.LastUsage != '' ? SnipAiState.LastUsage : 'n/a')
+                     , dbg, 'UTF-8')
     }
 
     ; Surface the API's own error text verbatim. A wrong model name, an expired
@@ -736,7 +788,10 @@ SnipAiVisionRequest(pngPath, prompt, apiKey, &errMsg) {
         return ''
     }
 
+    SnipAiState.LastUsage := ''
     data := SnipAiJsonParse(response)
+    if IsObject(data) && (data is Map) && data.Has('usage')
+        SnipAiState.LastUsage := SnipAiFormatUsage(data['usage'])
     if !IsObject(data) || !data.Has('choices') {
         errMsg := 'Unexpected response shape:`n`n' SubStr(response, 1, 800)
         return ''
@@ -776,6 +831,30 @@ SnipAiVisionRequest(pngPath, prompt, apiKey, &errMsg) {
 ;
 ; ResponseBody is the undecoded bytes as a SAFEARRAY, which we walk directly and
 ; hand to StrGet with the correct encoding.
+; Turn the API's usage object into something short enough for a tooltip.
+;
+; reasoning_tokens is the one worth watching: on models that think before
+; answering it can dwarf the visible output and is billed at the output rate,
+; which is the usual explanation for a bill that looks too big for the size of
+; the reply.  It is nested under completion_tokens_details, and is absent
+; entirely on models that don't reason.
+SnipAiFormatUsage(u) {
+    if !IsObject(u) || !(u is Map)
+        return ''
+    inTok  := u.Has('prompt_tokens')     ? u['prompt_tokens']     : 0
+    outTok := u.Has('completion_tokens') ? u['completion_tokens'] : 0
+    reason := 0
+    if u.Has('completion_tokens_details') {
+        d := u['completion_tokens_details']
+        if IsObject(d) && (d is Map) && d.Has('reasoning_tokens')
+            reason := d['reasoning_tokens']
+    }
+    out := 'in ' inTok ' / out ' outTok
+    if reason
+        out .= ' (incl. ' reason ' reasoning)'
+    return out
+}
+
 SnipAiResponseUtf8(req) {
     try {
         arr := req.ResponseBody
@@ -907,8 +986,8 @@ SnipAiJsonUnescape(s) {
     return out
 }
 
-; Minimal recursive-descent-ish JSON reader, adapted from the parser already in
-; AutoCorrect2's ChatGptWordLookup.ahk, with two corrections: the string
+; Minimal recursive-descent-ish JSON reader, adapted from a parser kunkel321
+; wrote for a separate project, with two corrections: the string
 ; terminator scan now counts trailing backslashes (an odd count means the quote
 ; was escaped, an even count means it was not — the original test misread any
 ; string ending in a literal backslash, e.g. a Windows path), and unescaping is
@@ -1001,6 +1080,13 @@ SnipAiToolTip(text := '', timeoutMs := 0) {
     ToolTip(text)
     if timeoutMs
         SetTimer(TimerFn, -timeoutMs)
+}
+
+; ' [in 1105 / out 1832]' when ShowTokenUsage is on, '' otherwise.
+SnipAiUsageSuffix() {
+    if !SnipAiCfg.ShowTokenUsage || (SnipAiState.LastUsage = '')
+        return ''
+    return ' [' SnipAiState.LastUsage ']'
 }
 
 SnipAiCountLines(text) {

@@ -11,21 +11,22 @@
 
 1. [What ScreenSnip is](#1-what-screensnip-is)
 2. [Installation](#2-installation)
-3. [Quick start](#3-quick-start)
-4. [Capturing](#4-capturing)
-5. [Freeze Capture](#5-freeze-capture)
-6. [Working with a snip](#6-working-with-a-snip)
-7. [Adjusting the capture after the fact](#7-adjusting-the-capture-after-the-fact)
-8. [Rotate, Straighten, Flip](#8-rotate-straighten-flip)
-9. [Exporting](#9-exporting)
-10. [Text extraction: the local engines](#10-text-extraction-the-local-engines)
-11. [Text extraction: the AI engine](#11-text-extraction-the-ai-engine)
-12. [Imgur uploads](#12-imgur-uploads)
-13. [Menu reference](#13-menu-reference)
-14. [Keyboard and mouse reference](#14-keyboard-and-mouse-reference)
-15. [Things that will bite you](#15-things-that-will-bite-you)
-16. [Tunables](#16-tunables)
-17. [Credits](#17-credits)
+3. [Settings](#3-settings)
+4. [Quick start](#4-quick-start)
+5. [Capturing](#5-capturing)
+6. [Freeze Capture](#6-freeze-capture)
+7. [Working with a snip](#7-working-with-a-snip)
+8. [Adjusting the capture after the fact](#8-adjusting-the-capture-after-the-fact)
+9. [Rotate, Straighten, Flip](#9-rotate-straighten-flip)
+10. [Exporting](#10-exporting)
+11. [Text extraction: the local engines](#11-text-extraction-the-local-engines)
+12. [Text extraction: the AI engine](#12-text-extraction-the-ai-engine)
+13. [Imgur uploads](#13-imgur-uploads)
+14. [Menu reference](#14-menu-reference)
+15. [Keyboard and mouse reference](#15-keyboard-and-mouse-reference)
+16. [Things that will bite you](#16-things-that-will-bite-you)
+17. [Settings reference](#17-settings-reference)
+18. [Credits](#18-credits)
 
 ---
 
@@ -55,7 +56,7 @@ A short animated demo lives beside this manual as [`ScreenSnipDemo.gif`](ScreenS
 
 ### The portable approach
 
-ScreenSnip is distributed as a script, not a compiled executable. The repository convention — shared across the whole AutoCorrect2 suite — is a **renamed copy of `AutoHotkey64.exe`** sitting next to the `.ahk` file.
+ScreenSnip is distributed as a script, not a compiled executable. The repository convention — shared across all of kunkel321's ahk apps — is a **renamed copy of `AutoHotkey64.exe`** sitting next to the `.ahk` file.
 
 Copy `AutoHotkey64.exe` into the ScreenSnip folder and rename it `ScreenSnip.exe`. When you run it, AutoHotkey looks for a script with its own name in its own folder and runs `ScreenSnip.ahk`. Nothing is compiled, so edits to the `.ahk` take effect on the next launch, and the whole folder stays portable — you can drop it on a flash drive and it works on a machine with no AutoHotkey installed.
 
@@ -70,16 +71,23 @@ ScreenSnip\
 ├─ ScreenSnip.ahk               the script
 ├─ ScreenSnip.exe               renamed copy of AutoHotkey64.exe
 │
-├─ Resources\                   shipped, never modified
+├─ Resources\                   shipped — ScreenSnip never writes here
 │   ├─ SnipOCR.ahk              local OCR module
 │   ├─ OCR.ahk                  Descolada's Windows OCR library
 │   ├─ PaddleOCR-json\          the offline OCR engine + its models
 │   ├─ SnipAI.ahk               AI vision module
 │   ├─ SnipImgur.ahk            Imgur upload module
-│   └─ SnipWinDetect.ahk        window highlighting for Freeze Capture
+│   ├─ SnipWinDetect.ahk        window highlighting for Freeze Capture
+│   ├─ ToolTipOptions.ahk       just me's tooltip styling library
+│   ├─ SettingsManager.ahk      the settings editor
+│   └─ SettingsManager.exe      renamed copy of AutoHotkey64.exe
 │
-├─ Data\                        written at runtime — GITIGNORE THIS
-│   └─ ApiKeys.ini              Imgur Client ID + OpenAI API key
+├─ Data\                        settings and everything written at runtime
+│   ├─ snipSettings.ini         every setting — see section 3
+│   ├─ snipSettingsMetadata.json  labels, help text, types and ranges
+│   ├─ ApiKeys.ini              Imgur Client ID + OpenAI API key — KEEP PRIVATE
+│   ├─ ScreenSnip_error.log     written only if something throws
+│   └─ (OCR / AI debug dumps)   only when a Debug setting is on
 │
 ├─ Documentation\
 │   ├─ ScreenSnip-Manual.md     this file
@@ -89,11 +97,15 @@ ScreenSnip\
 └─ SavedImages\                 a handy target for Save Image As…
 ```
 
-`Resources\` is inert: ScreenSnip reads from it and never writes to it. `Data\` is the opposite — the API keys file, the error log, and any OCR or AI debug dumps all land there. **That is the point of the split.** One folder to add to `.gitignore` beats remembering one filename, and if you ever want to reset ScreenSnip's state you can delete `Data\` wholesale and lose nothing but your keys.
+`Resources\` is inert: ScreenSnip reads from it and never writes to it. Everything that ScreenSnip or SettingsManager writes goes in `Data\` instead — your settings, your API keys, the error log, and any debug dumps.
+
+**The one file in there that must stay private is `ApiKeys.ini`.** Neither value in it is a password, but the Imgur Client ID is rate-limited against your account and the OpenAI key spends your prepaid credit. If ScreenSnip lives in a git repository, that is the file to add to `.gitignore`.
 
 `Data\` is created on first use. If the install folder is read-only, ScreenSnip falls back to writing beside the script rather than throwing an error on every OCR run.
 
-`SavedImages\` is purely a convention — Save Image As… defaults to your Pictures folder and then remembers wherever you last saved, so it will use this folder only if you point it there once.
+Deleting `Data\snipSettings.ini` is a safe factory reset — see [section 3](#3-settings) for why.
+
+`SavedImages\` is purely a convention. The first folder offered by Save Image As… comes from the `SaveDefaultFolder` setting (your Pictures folder as shipped), and after that the last folder you actually saved to wins for the rest of the session.
 
 Paths in this manual are given relative to the ScreenSnip folder. Note that in AHK v2 a relative `#Include` resolves against the folder of the *file containing the directive*, not the working directory — which is why `SnipOCR.ahk`'s own `#Include OCR.ahk` finds Descolada's library sitting beside it in `Resources\` with no path of its own.
 
@@ -106,6 +118,7 @@ Every add-on is optional and every one is included the same way, from the bottom
 #Include *i Resources\SnipAI.ahk
 #Include *i Resources\SnipImgur.ahk
 #Include *i Resources\SnipWinDetect.ahk
+#Include *i Resources\ToolTipOptions.ahk
 ```
 
 The `*i` flag means "include only if the file exists." Delete any module — or comment out its line — and ScreenSnip still runs; the feature's menu items are simply left off.
@@ -116,8 +129,13 @@ The `*i` flag means "include only if the file exists." Delete any module — or 
 | `SnipAI.ahk` | `SnipAiCfg` | OCR → Copy Text (AI) · Copy Table (AI) · Ask AI About Snip… | An OpenAI API key. **Paid, and the image leaves your machine** |
 | `SnipImgur.ahk` | `Imgur` | Imgur submenu + the Uploader dialog | A free Imgur account and Client ID |
 | `SnipWinDetect.ahk` | `WinDetectCfg` | Window highlighting during Freeze Capture | Nothing. No setup at all |
+| `ToolTipOptions.ahk` | `ToolTipOptions` | Readable tooltips — font, colors, padding | Nothing. No setup at all |
 
-The mechanism behind the "sentinel class" column is worth one paragraph, because it explains an oddity you'll notice in the source. Each module declares a config class, and ScreenSnip tests for it with `IsSet()` before building any menu that depends on it. Class objects are created at load time, *before* the auto-execute section runs, regardless of where in the file the class is declared — which is why `IsSet(OcrCfg)` up at line 553 can see a class declared in a file that isn't `#Include`d until line 3,320. Calls into the modules then go through the `%name%()` dynamic form, because a *direct* call to a function that might not exist is a load-time error in v2, which would defeat the whole arrangement.
+`SettingsManager` is optional on the same terms but isn't `#Include`d — it's a separate program that ScreenSnip launches. Absent from `Resources\`, the two **Settings…** menu items are simply never added. See [section 3](#3-settings).
+
+The mechanism behind the "sentinel class" column is worth one paragraph, because it explains an oddity you'll notice in the source. Each module declares a class, and ScreenSnip tests for it with `IsSet()` before building any menu or calling any function that depends on it. Class objects are created at load time, *before* the auto-execute section runs, regardless of where in the file the class is declared — which is why an `IsSet(OcrCfg)` test near the top of the script can see a class declared in a file that isn't `#Include`d until 3,000 lines further down. Calls into the modules then go through the `%name%()` dynamic form, because a *direct* call to a function that might not exist is a load-time error in v2, which would defeat the whole arrangement.
+
+`ToolTipOptions.ahk` is the one exception to that dynamic-call rule, and it's instructive rather than inconsistent: everything it exposes is a *method on the sentinel class itself*, so `ToolTipOptions.Init()` is a variable dereference followed by a method call. An unset variable is a runtime matter, not a load-time error, so no dance is needed.
 
 If **neither** `SnipOCR.ahk` nor `SnipAI.ahk` is present, the OCR submenu is omitted entirely rather than left on the menu empty.
 
@@ -133,11 +151,70 @@ Two options, and which one you want depends on whether you need to capture eleva
 
 **Tray menu → Start with Windows** creates a shortcut in your Startup folder. Simple, works fine, and ScreenSnip will run at normal integrity.
 
-**Task Scheduler with "Run with highest privileges"** is what you need if you want to snip elevated applications. See [section 15](#15-things-that-will-bite-you) for why. A Startup-folder shortcut to an elevation-requesting program is silently skipped by Windows at logon, so the Startup folder is not a route to running elevated — Task Scheduler is.
+**Task Scheduler with "Run with highest privileges"** is what you need if you want to snip elevated applications. See [section 16](#16-things-that-will-bite-you) for why. A Startup-folder shortcut to an elevation-requesting program is silently skipped by Windows at logon, so the Startup folder is not a route to running elevated — Task Scheduler is.
 
 ---
 
-## 3. Quick start
+## 3. Settings
+
+Every configurable value in ScreenSnip and its add-on modules lives in one file:
+
+```
+Data\snipSettings.ini
+```
+
+It's a plain INI, so any text editor will do. But the intended way in is **SettingsManager**, reachable from either menu:
+
+- **Tray menu → Settings…**
+- **Right-click a snip → Settings…**
+
+Both items are present only when `Resources\SettingsManager.exe` (or `SettingsManager.ahk`) exists. Delete it and they vanish rather than sitting there dead.
+
+### Why an editor rather than a config block
+
+ScreenSnip used to keep its settings in a long commented block at the top of the script, and each setting's explanation sat in a comment beside it. Those explanations have moved into `Data\snipSettingsMetadata.json`, which supplies SettingsManager's labels, help text, value types, and valid ranges.
+
+That is the entire point of the move: the guidance is now **in front of the person changing the setting**, in a help pane that updates as you select each item, instead of in a source file they may never open. If you want to know what something does, select it in SettingsManager and read the pane. This manual's [settings reference](#17-settings-reference) is a map of the file, not a replacement for that help text.
+
+### Three things to know about how it loads
+
+**Settings are read once, at launch.** Nothing re-reads the file, so a change takes effect on the next start. SettingsManager offers a restart after you save; take it. Note that restarting closes any snips you have open, so finish with them first.
+
+**Deleting `snipSettings.ini` is a safe factory reset.** Every setting is read through a helper that carries a coded fallback, so a missing file, a missing key, or a blank value all quietly produce the built-in default. The script starts normally and behaves as shipped.
+
+**A corrupt or locked file degrades rather than breaks.** The whole load is wrapped so that a malformed INI fails to an empty set of values, which means every setting falls back and ScreenSnip still runs. That matters more than it sounds: the add-on modules ask for their settings during class initialisation, which happens *before* the main script's first line executes, so an exception there would be a load-time failure — ScreenSnip simply wouldn't start.
+
+One consequence of that ordering is worth knowing if you go poking at the source. The settings cache is deliberately lazy, filled by whichever caller asks first, precisely because the modules at the bottom of the file ask before the settings block at the top has run.
+
+### File conventions
+
+| Convention | |
+|---|---|
+| Booleans | `1` = on, `0` = off |
+| Colors | Six hex digits, `RRGGBB`, no `0x` and no `#` |
+| Line breaks in text | `` `n `` — the script converts it to a real break |
+| Relative paths | Resolved against the ScreenSnip folder |
+| `%USERPROFILE%` | Expanded in path settings |
+
+A value's *type* follows its fallback rather than the file: a setting whose default is `250` comes back as an integer, one whose default is `0.55` comes back as a float, and one whose default is text comes back as text. Type something non-numeric where a number belongs and that key falls back rather than producing nonsense. The same is true of colors — anything that isn't six valid hex digits is rejected, which stops a typo'd `TransColor` from punching holes in every snip.
+
+### Tooltip appearance
+
+ScreenSnip reports OCR results, AI progress, upload status, and the Freeze Capture window readout through Windows tooltips. Left plain, those are small, pale yellow, and hard to read against a busy screenshot — which is a poor fit for a message you're meant to glance at and act on.
+
+`Resources\ToolTipOptions.ahk`, by AHK forum member **just me**, fixes that. It is an unmodified copy of his library, dropped in as-is so it can be replaced wholesale whenever he posts an update. The `[Tooltips]` section of the INI feeds it a font, a size and style, foreground and background colors, four margins, and an optional title with an icon.
+
+The clever part is *how* it applies: it subclasses the tooltip window class rather than wrapping the `ToolTip()` function. **No call site anywhere changes.** Every `ToolTip()` in every module, present and future, is styled or not depending only on whether that one file exists. Delete it and they all fall back to the plain Windows tooltip, with nothing else to undo.
+
+Two defaults are worth noticing. `TipBackColor` and `TipTextColor` fall back to the Freeze Capture hint's colors, so the hint pill and the status tooltips read as one visual family unless you deliberately separate them. And `EnhanceToolTips=0` turns the styling off while leaving the file in place, which is the setting to reach for if you'd rather have system-standard tooltips than delete anything.
+
+If a tooltip setting is invalid — a typo'd style word, a size outside 1–255 — ScreenSnip says so once, undoes any half-applied styling, and carries on with plain tooltips for that session. You get consistently plain rather than, say, huge but still pale yellow.
+
+The Freeze Capture hint pill is **not** a tooltip, incidentally. It's a window of its own, configured separately under `[FreezeHint]`.
+
+---
+
+## 4. Quick start
 
 1. Launch ScreenSnip. A scissors icon appears in the system tray.
 2. Hold **Ctrl** and **right-click-drag** a rectangle around something on screen.
@@ -147,11 +224,11 @@ Two options, and which one you want depends on whether you need to capture eleva
 
 That's the core loop. Everything else in this manual is refinement.
 
-Two shortcuts worth learning immediately: add **Shift** to the capture drag (`Ctrl+Shift+RButton`) to also copy the image to the clipboard, and double-tap **CapsLock** to start a [Freeze Capture](#5-freeze-capture).
+Two shortcuts worth learning immediately: add **Shift** to the capture drag (`Ctrl+Shift+RButton`) to also copy the image to the clipboard, and double-tap **CapsLock** to start a [Freeze Capture](#6-freeze-capture).
 
 ---
 
-## 4. Capturing
+## 5. Capturing
 
 ### The normal drag
 
@@ -175,7 +252,7 @@ The snips aren't closed, just hidden. Press it again and they all come back wher
 
 ---
 
-## 5. Freeze Capture
+## 6. Freeze Capture
 
 ### The problem
 
@@ -231,7 +308,7 @@ The tray menu also has a **Freeze Capture** item. It's a discoverable way in for
 
 ### Choosing a trigger key
 
-The trigger is set by `FreezeCaptureKey` near the top of the script. It ships as `CapsLock`, with `FreezeDoublePress := true`.
+The trigger is set by `FreezeCaptureKey` in the `[FreezeCapture]` section of the settings. It ships as `CapsLock`, with `FreezeDoublePress` on.
 
 The double-press default exists for a specific reason. The hotkey is registered with `~` (pass-through), so the key keeps doing its normal job. On a toggle key like CapsLock or ScrollLock, two presses turn the lock on and then straight back off — net effect zero, lock state untouched. A single-press trigger on the same key would leave CapsLock stuck on every time you used it.
 
@@ -272,7 +349,7 @@ The hotkey is non-suppressing either way, so other scripts' CapsLock bindings st
 
 ---
 
-## 6. Working with a snip
+## 7. Working with a snip
 
 A snip is an ordinary window as far as your mouse is concerned — click it to focus it, and the hotkeys in this section apply to whichever snip is focused.
 
@@ -322,7 +399,7 @@ Remember the shadow disappears below full opacity. That's intentional, not a bug
 
 ---
 
-## 7. Adjusting the capture after the fact
+## 8. Adjusting the capture after the fact
 
 This is ScreenSnip's most distinctive feature, and the one most worth understanding properly.
 
@@ -381,7 +458,7 @@ Nudging changes nothing about the image. Panning and resizing change what the im
 
 ---
 
-## 8. Rotate, Straighten, Flip
+## 9. Rotate, Straighten, Flip
 
 ### Rotate
 
@@ -395,7 +472,7 @@ Turns the **whole snip, frame and all**. The window itself becomes a rotated rec
 | `Shift+Alt+Left` / `Right` | Snap to the next 30° |
 | Menu → Rotate | 90° CW, 180°, 90° CCW |
 
-At angles other than 0/90/180/270 the border is suppressed and the corners are keyed out with magenta (`TransColor`, `0xFF00FF` — chosen because that exact value essentially never occurs in a real screenshot). See [section 15](#15-things-that-will-bite-you) for the known halo artifact.
+At angles other than 0/90/180/270 the border is suppressed and the corners are keyed out with magenta (`TransColor`, `0xFF00FF` — chosen because that exact value essentially never occurs in a real screenshot). See [section 16](#16-things-that-will-bite-you) for the known halo artifact.
 
 ### Straighten (deskew)
 
@@ -426,7 +503,7 @@ The pivot behaviour is subtle but deliberate: content rotates about the centre o
 
 ---
 
-## 9. Exporting
+## 10. Exporting
 
 ### Clipboard
 
@@ -445,15 +522,15 @@ Everything goes through the same rendering pipeline (`BuildSaveBitmap`), so savi
 
 ---
 
-## 10. Text extraction: the local engines
+## 11. Text extraction: the local engines
 
 The right-click menu's **OCR** submenu is assembled from whichever text-extraction modules are installed. With both present you get six items, split by a separator.
 
 ![The OCR submenu, showing the three local actions above the separator and the three AI actions below it](Images/SnipWithOcrSubMenuShowing.png)
 
-That separator is not decoration. **Below it, the image leaves your computer.** This section covers the three items above the line; [section 11](#11-text-extraction-the-ai-engine) covers the three below.
+That separator is not decoration. **Below it, the image leaves your computer.** This section covers the three items above the line; [section 12](#12-text-extraction-the-ai-engine) covers the three below.
 
-All six copy their result to the clipboard and report with a brief tooltip.
+All six copy their result to the clipboard and report with a brief tooltip. Those tooltips carry real information — a row and column count, a warning about shaky cells — so it's worth making them legible; see [tooltip appearance](#3-settings).
 
 ### The three local actions
 
@@ -480,7 +557,7 @@ The short version: reach for Windows OCR by default, PaddleOCR when it struggles
 
 ### Setting up Windows OCR
 
-Download `OCR.ahk` from **https://github.com/Descolada/OCR** and drop it in `Resources\`, beside `SnipOCR.ahk`. It is included by that file with a plain `#Include OCR.ahk` — no path needed, and no `*i` flag, which means the file must be there. See [section 15](#15-things-that-will-bite-you) if you'd rather not have it.
+Download `OCR.ahk` from **https://github.com/Descolada/OCR** and drop it in `Resources\`, beside `SnipOCR.ahk`. It is included by that file with a plain `#Include OCR.ahk` — no path needed, and no `*i` flag, which means the file must be there. See [section 16](#16-things-that-will-bite-you) if you'd rather not have it.
 
 If the library is present but Windows OCR itself is unavailable, the menu item reports as much and everything else keeps working.
 
@@ -488,8 +565,8 @@ If the library is present but Windows OCR itself is unavailable, the menu item r
 
 1. Download **PaddleOCR-json** (Windows x64) from https://github.com/hiroi-sora/PaddleOCR-json/releases/latest
 2. Unzip it into `Resources\`. You want the folder containing `PaddleOCR-json.exe` **and** its `models` subfolder — these must stay together, because the engine is launched with that folder as its working directory and that's how the language config resolves.
-3. If you put it elsewhere, point `OcrCfg.PaddleExe` at the `.exe`. The default expects `Resources\PaddleOCR-json\PaddleOCR-json.exe`.
-4. Leave `OcrCfg.LangConfig` at `models\config_en.txt` for English. **The engine defaults to Simplified Chinese if this is blank.** Other configs shipped in the release: `config_chinese_cht.txt`, `config_japan.txt`, `config_korean.txt`.
+3. If you put it elsewhere, point `OcrPaddleExe` at the `.exe`. The default expects `Resources\PaddleOCR-json\PaddleOCR-json.exe`.
+4. Leave `OcrLangConfig` at `models\config_en.txt` for English. **The engine defaults to Simplified Chinese if this is blank.** Other configs shipped in the release: `config_chinese_cht.txt`, `config_japan.txt`, `config_korean.txt`.
 
 Requires a CPU with AVX — any modern Core or Ryzen. If yours lacks it, RapidOCR-json is a drop-in substitute with the same JSON output.
 
@@ -534,15 +611,15 @@ Instead of dropping cells, Copy Table **counts** the shaky ones (confidence belo
 
 ### Upscaling
 
-Screen text is typically 10–14 px tall, right at the edge of what OCR engines handle well. `OcrCfg.Upscale` (default 3) bicubically enlarges the image before OCR, which makes a large accuracy difference for almost no cost.
+Screen text is typically 10–14 px tall, right at the edge of what OCR engines handle well. `OcrUpscale` (default 3) bicubically enlarges the image before OCR, which makes a large accuracy difference for almost no cost.
 
-There's a trap here worth knowing about. Paddle downsizes any image whose long edge exceeds `limit_side_len`, which would silently undo the upscaling. A 3× upscale of a modest snip lands around 5000 px, so a fixed limit of 2880 would shrink it straight back to an effective 1.7×. `OcrCfg.LimitSideLen := 0` means **auto** — size the limit to the image so no downscaling ever happens. That's what you want. `MaxSideLen` (6144) is the safety ceiling; if you're exceeding it, lower `Upscale` rather than raising the ceiling.
+There's a trap here worth knowing about. Paddle downsizes any image whose long edge exceeds `limit_side_len`, which would silently undo the upscaling. A 3× upscale of a modest snip lands around 5000 px, so a fixed limit of 2880 would shrink it straight back to an effective 1.7×. `OcrLimitSideLen = 0` means **auto** — size the limit to the image so no downscaling ever happens. That's what you want. `OcrMaxSideLen` (6144) is the safety ceiling; if you're exceeding it, lower `OcrUpscale` rather than raising the ceiling.
 
 Note that the AI path does *not* upscale, and shouldn't — see the next section.
 
 ### Debugging a bad table
 
-Set `OcrCfg.Debug := true` and three timestamped files appear in the `Data\` folder:
+Set `OcrDebug` to 1 and three timestamped files appear in the `Data\` folder:
 
 | File | Contents |
 |---|---|
@@ -556,7 +633,7 @@ Files are stamped per run. They used to use fixed names, which meant each OCR cl
 
 ---
 
-## 11. Text extraction: the AI engine
+## 12. Text extraction: the AI engine
 
 `SnipAI.ahk` adds three more items to the OCR submenu, below the separator:
 
@@ -566,7 +643,7 @@ Files are stamped per run. They used to use fixed names, which meant each OCR cl
 | Copy Table (AI) | The table as TSV, ready to paste into a spreadsheet |
 | Ask AI About Snip… | A free-form question; the answer opens in a window |
 
-**Read this part first.** Unlike the two local engines, this one sends the image **off your machine** to OpenAI, and it **costs money** — fractions of a cent per snip, but not zero. It's also slower: expect several seconds. In exchange it handles multi-column layouts, tables, handwriting, math, and low-resolution antialiased text far better than either local engine.  While experimenting with complex tables, I spent 14 cents USD doing seven snips, but most single snips sent to OpenAI cost less than one cent. 
+**Read this part first.** Unlike the two local engines, this one sends the image **off your machine** to OpenAI, and it **costs money** — fractions of a cent per snip, but not zero. It's also slower: expect several seconds. In exchange it handles multi-column layouts, tables, handwriting, math, and low-resolution antialiased text far better than either local engine.  While experimenting with complex tables, Fourteen cents USD were spent doing seven snips, but most single snips sent to OpenAI cost less than one cent. 
 
 ### Setup
 
@@ -582,8 +659,6 @@ Files are stamped per run. They used to use fixed names, which meant each OCR cl
 Until a key is present, the three menu items are still there and each one puts up a dialog telling you exactly this, with the full path to the ini file. Nothing fails silently.
 
 **Prepaid OpenAI credits expire after one year.** Buy a dollar or two at a time and set a budget alert.
-
-To share one key with the rest of an AutoCorrect2 install instead of keeping a separate one, point `SnipAiCfg.IniFile` at AC2's file — it uses the same section and key names. That's a one-line change, documented in the module's header.
 
 ### The caveat that matters most
 
@@ -603,7 +678,7 @@ Two other ideas carry weight in that prompt:
 
 **A declared column count.** The model states the column count up front, and every row it emits must match. This converts the dangerous silent failure — a dropped empty cell shifting an entire row leftward, producing a plausible and wrong table — into something ScreenSnip can detect and warn you about in the completion tooltip.
 
-**Grounding with local OCR.** When `SnipOCR.ahk` is present and `GroundWithOcr` is true (the default), PaddleOCR runs first and its text is sent along with the image as a *spelling* reference. The framing is deliberately lopsided: it grants the OCR authority over characters and explicitly strips it of any authority over layout. What gets sent is Paddle's reading-order lines, **not** its reconstructed grid — sending the grid would hand the model the very column mistake this feature exists to correct.
+**Grounding with local OCR.** When `SnipOCR.ahk` is present and `AiGroundWithOcr` is on (the default), PaddleOCR runs first and its text is sent along with the image as a *spelling* reference. The framing is deliberately lopsided: it grants the OCR authority over characters and explicitly strips it of any authority over layout. What gets sent is Paddle's reading-order lines, **not** its reconstructed grid — sending the grid would hand the model the very column mistake this feature exists to correct.
 
 Grounding costs one extra local engine run of a second or two, offline. It's silently skipped if `SnipOCR.ahk` is absent or the engine isn't installed. It is an enhancement, never a prerequisite.
 
@@ -615,19 +690,19 @@ Useful for the things transcription can't do: *what does this error message mean
 
 ### Image handling and cost
 
-`MaxSide` is 2048. The API scales anything larger down before tiling it, so sending a bigger image is pure upload time with no accuracy gain. **Unlike the local OCR path, there is no reason to upscale** — the model is not helped by it.
+`AiMaxSide` is 2048. The API scales anything larger down before tiling it, so sending a bigger image is pure upload time with no accuracy gain. **Unlike the local OCR path, there is no reason to upscale** — the model is not helped by it.
 
-`Detail` is `'high'`, which tiles the image and reads fine print. `'low'` sends a single coarse thumbnail for roughly a tenth the cost, which is fine for "what is this a picture of" and useless for OCR.
+`AiDetail` is `high`, which tiles the image and reads fine print. `low` sends a single coarse thumbnail for roughly a tenth the cost, which is fine for "what is this a picture of" and useless for OCR.
 
-`Model` ships as `gpt-5.6`. Any vision-capable chat model works. If the configured one isn't enabled on your account you'll get a clear "model not found" back — the error body is shown verbatim, so it's a one-line fix. Cheaper "mini"-tier models are markedly worse at dense small text; it's worth paying for the full model here.
+`AiModel` ships as `gpt-5.6`. Any vision-capable chat model works. If the configured one isn't enabled on your account you'll get a clear "model not found" back — the error body is shown verbatim, so it's a one-line fix. Cheaper "mini"-tier models are markedly worse at dense small text; it's worth paying for the full model here.
 
 ### Debugging
 
-`SnipAiCfg.Debug := true` keeps the temp PNG and writes the raw request and response into `Data\`. The request dump does **not** contain your API key — that rides in a header, not the body — but it does contain the base64-encoded image, so it will be large.
+`AiDebug` set to 1 keeps the temp PNG and writes the raw request and response into `Data\`. The request dump does **not** contain your API key — that rides in a header, not the body — but it does contain the base64-encoded image, so it will be large.
 
 ---
 
-## 12. Imgur uploads
+## 13. Imgur uploads
 
 Entirely optional. Delete `Resources\SnipImgur.ahk` and the feature vanishes cleanly — the `#Include` uses the `*i` flag and every menu is built behind an `IsSet(Imgur)` test.
 
@@ -698,7 +773,7 @@ An **anonymous upload isn't owned by your account** and doesn't appear in it. Th
 
 Delete while you still can via *Imgur Uploader… → Delete This Upload*, which acts on the most recent upload of the session.
 
-Because that's a lot of consequence for one menu click on a snip that might be showing an email or a password field, the one-click path asks for confirmation by default. Set `Imgur.ConfirmBeforeUpload := false` in `SnipImgur.ahk` once the flow feels familiar.
+Because that's a lot of consequence for one menu click on a snip that might be showing an email or a password field, the one-click path asks for confirmation by default. Turn `ImgurConfirmBeforeUpload` off once the flow feels familiar.
 
 ### Size limit
 
@@ -730,7 +805,7 @@ Exactly what you see: the snip's current crop, flips, rotation, and straighten, 
 
 ---
 
-## 13. Menu reference
+## 14. Menu reference
 
 ### Right-click menu (on a snip)
 
@@ -750,13 +825,14 @@ Exactly what you see: the snip's current crop, flips, rotation, and straighten, 
 | Shadow | Checkable toggle, per snip |
 | Close This Snip | `Esc` |
 | Close All Snips | |
+| Settings… | Opens SettingsManager *(only if it's in `Resources\`)* |
 | Help | `F1` |
 
 The OCR submenu disappears entirely if neither text-extraction module is installed. Everything below the separator inside it sends your image to a paid online service.
 
 Menu items that have a hotkey display it right-aligned as a reminder. The directional submenus use a 1 px step; hold Shift with the equivalent hotkey for 10 px. Greyed-out lines like "Hold Shift → ±10 px" are hints, not clickable items.
 
-The menu acts on the snip you right-clicked, which is not necessarily the focused one.
+The menu acts on the snip you right-clicked, which is not necessarily the focused one — with two exceptions grouped at the bottom next to Help, because neither Settings… nor Help does anything to a snip at all.
 
 ### Tray menu
 
@@ -769,13 +845,14 @@ The menu acts on the snip you right-clicked, which is not necessarily the focuse
 | Freeze Capture | Same as the trigger key. A discoverable way in, and a fallback when another script has won the race for the key |
 | Start with Windows | Checkable. Creates/removes a Startup folder shortcut |
 | Imgur Uploader… | *(only if `SnipImgur.ahk` is present)* |
+| Settings… | Opens SettingsManager *(only if it's in `Resources\`)* |
 | ScreenSnip Help | |
 
 The `(admin)` suffix on the title is worth glancing at whenever a capture mysteriously doesn't work — see the next section.
 
 ---
 
-## 14. Keyboard and mouse reference
+## 15. Keyboard and mouse reference
 
 Most snip hotkeys are context-sensitive: they only fire when a snip window is focused, so they don't interfere with anything else.
 
@@ -846,7 +923,7 @@ Most snip hotkeys are context-sensitive: they only fire when a snip window is fo
 
 ---
 
-## 15. Things that will bite you
+## 16. Things that will bite you
 
 ### You can't snip an elevated window unless ScreenSnip is also elevated
 
@@ -876,7 +953,7 @@ Two ways out: delete `Resources\SnipOCR.ahk` too (you lose the PaddleOCR items a
 
 ### The AI silently tidies your text
 
-Covered in [section 11](#11-text-extraction-the-ai-engine), and repeated here because it's the kind of thing you discover at the worst moment. A vision model transcribes what it believes the text *says*. It will normalize odd spacing and can quietly fix a typo that was really there. For a license key, a hash, or anything where the exact characters matter, use Copy Text (Windows) or Copy Text (PaddleOCR).
+Covered in [section 12](#12-text-extraction-the-ai-engine), and repeated here because it's the kind of thing you discover at the worst moment. A vision model transcribes what it believes the text *says*. It will normalize odd spacing and can quietly fix a typo that was really there. For a license key, a hash, or anything where the exact characters matter, use Copy Text (Windows) or Copy Text (PaddleOCR).
 
 ### Freeze Capture can't capture ScreenSnip's own menus
 
@@ -916,144 +993,207 @@ You'll get a prompt offering plain text instead. Take it. Forms and prose put ne
 
 Only PNG carries an alpha channel. Rotate a snip and save it as JPG and the corners come out filled, not transparent.
 
+### A setting you changed did nothing
+
+Settings are read once, at launch. Nothing re-reads the file, so a change needs a restart before it means anything. SettingsManager offers one after you save — take it. Restarting closes any snips you have open, so finish with them first.
+
+If a restart doesn't help either, check the value's *form*: a number where text belongs, a color with a `#` or `0x` in front, or six characters that aren't all hex digits will each be rejected in favour of the built-in default rather than applied. That's deliberate — a nonsense `TransColor` would punch holes in every snip — but it does mean an invalid value fails quietly.
+
+### Editing snipSettings.ini while SettingsManager has it open
+
+SettingsManager writes the whole file when you save, so a hand edit made in a text editor in the meantime is overwritten. Pick one or the other for a given sitting.
+
+Relatedly, launching SettingsManager from the menu when it's already running just raises the existing window rather than starting a second copy. It's `#SingleInstance Force`, so a second launch would kill the first and take any unsaved edits with it.
+
 ### Something threw and you want to know what
 
 Unhandled errors are appended to `Data\ScreenSnip_error.log` with a timestamp. If the `Data` folder can't be created, that falls back to the script folder.
 
 ---
 
-## 16. Tunables
+## 17. Settings reference
 
-All in the settings block near the top of `ScreenSnip.ahk` unless noted. Values shown are the shipped defaults.
+A map of `Data\snipSettings.ini`, section by section, in file order. Values shown are as shipped.
 
-### Capture
+This is a reference, not a tutorial. The full explanation of any given setting lives in `Data\snipSettingsMetadata.json` and is shown in SettingsManager's help pane while you edit it — see [section 3](#3-settings).
 
-| Setting | Default | Purpose |
+Two things apply throughout: every key falls back to a coded default if it's missing, blank, or invalid, and nothing is re-read after launch.
+
+### `[Capture]`
+
+| Key | Shipped | Purpose |
 |---|---|---|
-| `SelectionColor` | `'b58500'` | Selection overlay color while dragging |
+| `SelectionColor` | `B58500` | Selection overlay color while dragging |
+| `SelectionOverlayAlpha` | `80` | Opacity of that overlay, 0–255 |
 | `CaptureAdjustMargin` | `250` | Snapshot headroom in px, per side |
-| `ShowDimensionLabels` | `true` | Master switch for W×H labels |
-| `InfoFontSize` | `10` | Label font size |
-| `InfoWMinWidth` / `InfoHMinHeight` | `75` / `55` | Minimum selection size before each label shows |
-| `InfoWHOffsetRight` / `InfoWHOffsetBottom` | `38` / `25` | Label inset from the edges |
 
-### Freeze Capture
+### `[DimensionLabels]`
 
-| Setting | Default | Purpose |
+| Key | Shipped | Purpose |
 |---|---|---|
-| `FreezeCaptureKey` | `'CapsLock'` | Trigger key. `''` disables |
-| `FreezeDoublePress` | `true` | Require a double press |
+| `ShowDimensionLabels` | `1` | Master switch for the W×H labels |
+| `InfoFontSize` | `10` | Label font size |
+| `InfoWHOffsetRight` / `InfoWHOffsetBottom` | `38` / `25` | Label inset from the edges |
+| `InfoWMinWidth` / `InfoHMinHeight` | `75` / `55` | Minimum selection size before each label shows |
+
+### `[FreezeCapture]`
+
+| Key | Shipped | Purpose |
+|---|---|---|
+| `FreezeCaptureKey` | `CapsLock` | Trigger key. Blank disables the built-in trigger; the cross-script message trigger still works |
+| `FreezeDoublePress` | `1` | Require a double press |
 | `FreezeDoublePressTime` | `400` | Max ms between the two presses |
-| `FreezeNullifyCapsLock` | `true` | Force CapsLock off after every press. CapsLock only |
-| `ShowFreezeHint` | `true` | Show the hint pill over the backdrop |
-| `FreezeHintText` | *(see script)* | Hint wording. `` `n `` for line breaks |
-| `FreezeHintTextWinDetect` | *(see script)* | Used instead of the above when `SnipWinDetect.ahk` is loaded and enabled |
-| `FreezeHintFontSize` / `FontName` | `15` / `'Segoe UI'` | |
-| `FreezeHintTextColor` / `BackColor` | `'FFFFFF'` / `'1E1E1E'` | Hex RRGGBB |
-| `FreezeHintAlpha` | `215` | Pill opacity, 0–255 |
-| `FreezeHintCornerRadius` | `16` | Corner rounding in px |
+| `FreezeNullifyCapsLock` | `1` | Force CapsLock off after every press. Ignored unless the trigger key *is* CapsLock |
 
-### Interaction
+### `[FreezeHint]`
 
-| Setting | Default | Purpose |
+| Key | Shipped | Purpose |
+|---|---|---|
+| `ShowFreezeHint` | `1` | Show the hint pill over the frozen backdrop |
+| `FreezeHintText` | *(see file)* | Wording when window detection is off. `` `n `` for line breaks |
+| `FreezeHintTextWinDetect` | *(see file)* | Wording when `SnipWinDetect.ahk` is loaded and enabled |
+| `FreezeHintFontName` / `FreezeHintFontSize` | `Segoe UI` / `15` | |
+| `FreezeHintTextColor` / `FreezeHintBackColor` | `FFFFFF` / `1E1E1E` | Hex RRGGBB |
+| `FreezeHintAlpha` | `185` | Pill opacity, 0–255 |
+| `FreezeHintCornerRadius` | `70` | Corner rounding in px. `0` = square |
+
+The two hint strings are separate on purpose: deleting `SnipWinDetect.ahk` has to leave the hint truthful rather than advertising a click that does nothing.
+
+### `[SnipWindow]`
+
+| Key | Shipped | Purpose |
+|---|---|---|
+| `ShowSnipBorder` | `1` | |
+| `BorderColor` | `B58500` | Falls back to `SelectionColor` if absent, so the selection tint and the finished snip match by default |
+| `BorderThickness` | `2` | px |
+| `Bevel3D` | `1` | The 3D floating look |
+| `Bevel3DMaxThickness` | `3` | Bevel auto-disables above this |
+| `Bevel3DStrength` / `Bevel3DInactiveStrength` | `0.55` / `0.55` | Blend toward white/black, 0–1 |
+| `Bevel3DInactiveDarknessFactor` | `0.2` | How much both edges dim when unfocused |
+| `TransColor` | `FF00FF` | Magenta color key for rotated corners |
+
+### `[SnipShadow]`
+
+| Key | Shipped | Purpose |
+|---|---|---|
+| `ShowSnipShadow` | `1` | Default for new snips |
+| `ShadowColor` | `000000` | |
+| `ShadowOffset` / `ShadowOffsetInactive` | `7` / `4` | Down/right offset, logical px |
+| `ShadowBlur` | `6` | Edge softness. Keep ≤ `ShadowOffset` for a drop rather than a halo |
+| `ShadowAlpha` | `105` | Peak opacity, 0–255 |
+
+### `[Gestures]`
+
+| Key | Shipped | Purpose |
 |---|---|---|
 | `PanDragDivisor` | `3` | Mouse px per 1 px of pan. `1` = 1:1 |
-| `PanClickSlop` | `5` | Drag distance below which it's a right-click |
+| `PanClickSlop` | `5` | Drag distance below which it's a plain right-click |
 | `EdgeGrabZone` | `6` | Grabbable band inward from each edge |
 
-### Straighten
+### `[Straighten]`
 
-| Setting | Default | Purpose |
+| Key | Shipped | Purpose |
 |---|---|---|
 | `StraightenStep` | `1` | Degrees per `Alt+,` / `Alt+.` |
 | `StraightenFineStep` | `0.5` | Degrees per `Shift+Alt+,` / `.` |
 | `StraightenMaxAngle` | `15` | Hard clamp |
 
-### Appearance
+### `[Saving]`
 
-| Setting | Default | Purpose |
+| Key | Shipped | Purpose |
 |---|---|---|
-| `ShowSnipBorder` | `true` | |
-| `BorderColor` | `SelectionColor` | Matches the selection overlay by default |
-| `BorderThickness` | `2` | px |
-| `Bevel3D` | `true` | 3D floating look |
-| `Bevel3DMaxThickness` | `3` | Bevel auto-disables above this |
-| `Bevel3DStrength` / `InactiveStrength` | `0.55` / `0.55` | Blend toward white/black, 0–1 |
-| `Bevel3DInactiveDarknessFactor` | `0.2` | How much both edges dim when unfocused |
-| `ShowSnipShadow` | `true` | Default for new snips |
-| `ShadowColor` | `0x000000` | Hex only — GDI+ needs numeric RGB |
-| `ShadowOffset` / `ShadowOffsetInactive` | `7` / `4` | Down/right offset, logical px |
-| `ShadowBlur` | `6` | Edge softness. Keep ≤ `ShadowOffset` for a drop rather than a halo |
-| `ShadowAlpha` | `105` | Peak opacity, 0–255 |
-| `TransColor` | `0xFF00FF` | Magenta color key for rotated corners |
+| `SaveDefaultFolder` | `%USERPROFILE%\Pictures` | The *first* folder offered in a session. After that the last folder saved to wins |
+| `SaveDefaultExt` | `png` | Extension used when you type a filename without one |
 
-### Window detection (in `Resources\SnipWinDetect.ahk`, class `WinDetectCfg`)
+Point `SaveDefaultFolder` at `SavedImages` if you want ScreenSnip's own folder as the starting place. A relative path resolves against the ScreenSnip folder, so `SavedImages` on its own is enough.
 
-| Setting | Default | Purpose |
+### `[Tooltips]`
+
+Fed to `Resources\ToolTipOptions.ahk`. See [section 3](#3-settings) for what these reach and why no call site changes.
+
+| Key | Shipped | Purpose |
 |---|---|---|
-| `Enabled` | `true` | `false` keeps the module loaded but never highlights anything |
-| `Color` | `'1E90FF'` | Outline color. A saturated blue reads against arbitrary window chrome better than red or green |
-| `Thickness` | `3` | Outline px, auto-thinned for windows too small to fit it |
-| `PollMs` | `40` | Cursor poll interval, ~25 fps. Below 10 is clamped |
-| `MinSize` | `16` | Ignore windows smaller than this, filtering the 1×1 message-only oddities apps leave lying around |
-| `ShowInfo` | `true` | The title / class / size readout beside the cursor |
-| `TipIndex` | `18` | ToolTip slot for that readout |
-| `IncludeDesktop` | `false` | Treat Progman/WorkerW as a target. Off because it's screen-sized and would mean the highlight never goes away over empty desktop |
-| `IncludeMonitors` | `true` | Offer each monitor as a target, appended after the windows |
+| `EnhanceToolTips` | `1` | `0` = plain Windows tooltips, with the file left in place |
+| `TipFontName` / `TipFontSize` | `Segoe UI` / `12` | |
+| `TipFontStyle` | *(blank)* | Style words, e.g. `bold` or `italic` |
+| `TipBackColor` / `TipTextColor` | `1E1E1E` / `FFFFFF` | Hex RRGGBB. Fall back to the freeze hint's colors |
+| `TipMarginL` / `TipMarginT` / `TipMarginR` / `TipMarginB` | `10` / `8` / `10` / `8` | Padding inside the tooltip — left, top, right, bottom, px |
+| `TipTitle` | *(blank)* | A bold heading on every tooltip. Blank = none |
+| `TipTitleIcon` | `4` | Icon beside that title: `0` none, `1` info, `2` warning, `3` error, `4`–`6` the same three at large size. Only shows when `TipTitle` is set |
 
-### Local OCR (in `Resources\SnipOCR.ahk`, class `OcrCfg`)
+### `[SnipOCR]`
 
-| Setting | Default | Purpose |
+The local engines. Every key is prefixed `Ocr` in the file, so `OcrRowTol` here is `OcrCfg.RowTol` in the source.
+
+| Key | Shipped | Purpose |
 |---|---|---|
-| `PaddleExe` | `A_ScriptDir\Resources\PaddleOCR-json\PaddleOCR-json.exe` | Engine path |
-| `LangConfig` | `models\config_en.txt` | **Blank defaults to Chinese** |
-| `Upscale` | `3` | Pre-OCR enlargement |
-| `LimitSideLen` | `0` | `0` = auto, never downscale. Recommended |
-| `MaxSideLen` | `6144` | Safety ceiling for auto mode |
-| `RotateFill` | `0xFFFFFF` | Corner fill for rotated snips. `0x000000` for light-on-dark |
-| `MinScore` | `0.0` | Confidence filter. Keep at 0 for tables |
-| `MarkBelow` | `0.0` | Append `?` below this confidence |
-| `RowTol` / `ColTol` | `0.60` / `1.20` | Clustering tolerances, × median text height |
-| `Reflow` | `true` | Stitch wrapped cells back together |
-| `ReflowRatio` | `1.8` | Gap separation required before reflowing |
-| `ReflowAnchorCol` | `1` | Key column. `0` = gaps alone |
-| `ReflowGapFactor` | `1.8` | What counts as a "big" gap |
-| `NotATableWarn` | `0.60` | Single-column density that triggers the prose prompt |
-| `Debug` | `false` | Write the three diagnostic files to `Data\` |
+| `OcrPaddleExe` | `Resources\PaddleOCR-json\PaddleOCR-json.exe` | Engine path, relative to the ScreenSnip folder |
+| `OcrLangConfig` | `models\config_en.txt` | Relative to the engine folder. **Blank defaults to Chinese** |
+| `OcrUpscale` | `3` | Pre-OCR enlargement |
+| `OcrLimitSideLen` | `0` | `0` = auto, never downscale. Recommended |
+| `OcrMaxSideLen` | `6144` | Safety ceiling for auto mode |
+| `OcrRotateFill` | `FFFFFF` | Corner fill for rotated snips. `000000` for light-on-dark |
+| `OcrMinScore` | `0.0` | Confidence filter. Keep at 0 for tables |
+| `OcrMarkBelow` | `0.0` | Append `?` below this confidence |
+| `OcrRowTol` / `OcrColTol` | `0.60` / `1.20` | Clustering tolerances, × median text height |
+| `OcrReflow` | `1` | Stitch wrapped cells back together |
+| `OcrReflowRatio` | `1.8` | Gap separation required before reflowing |
+| `OcrReflowAnchorCol` | `1` | Key column. `0` = gaps alone |
+| `OcrReflowGapFactor` | `1.8` | What counts as a "big" gap |
+| `OcrNotATableWarn` | `0.60` | Single-column density that triggers the prose prompt |
+| `OcrDebug` | `0` | Write the three diagnostic files to `Data\` |
 
-### AI vision (in `Resources\SnipAI.ahk`, class `SnipAiCfg`)
+### `[SnipAI]`
 
-| Setting | Default | Purpose |
+The paid, online engine. Note that the API key itself is **not** here — it lives in `Data\ApiKeys.ini`, which is the file to keep out of a repository.
+
+| Key | Shipped | Purpose |
 |---|---|---|
-| `IniFile` | `SnipKeysIni()` → `Data\ApiKeys.ini` | Point elsewhere to share a key with an AC2 install |
-| `IniSection` / `IniKey` | `'OpenAI'` / `'ApiKey'` | Where in that file the key lives |
-| `Model` | `'gpt-5.6'` | Any vision-capable chat model |
-| `Detail` | `'high'` | `'low'` is ~10× cheaper and useless for OCR |
-| `MaxSide` | `2048` | Larger is pure upload with no accuracy gain. **Do not upscale** |
-| `Timeouts` | `[10000, 10000, 60000, 180000]` | Resolve, connect, send, receive — ms |
-| `WaitSecs` | `180` | Overall ceiling |
-| `TranscribePrompt` | *(see script)* | Every clause is load-bearing; the model's instinct is to tidy |
-| `TablePrompt` | *(see script)* | Ruling lines outrank alignment; declared column count |
-| `OcrHintPreamble` | *(see script)* | Frames the OCR text as a spelling reference only |
-| `GroundWithOcr` | `true` | Run PaddleOCR first and send its text along. Skipped silently if unavailable |
-| `AskPreamble` | *(see script)* | Framing for Ask AI About Snip… |
-| `Debug` | `false` | Keep the temp PNG and dump request/response to `Data\` |
+| `AiModel` | `gpt-5.6` | Any vision-capable chat model |
+| `AiDetail` | `high` | `low` is ~10× cheaper and useless for OCR |
+| `AiMaxSide` | `2048` | Larger is pure upload with no accuracy gain. **Do not upscale** |
+| `AiResolveTimeout` / `AiConnectTimeout` | `10000` / `10000` | ms |
+| `AiSendTimeout` / `AiReceiveTimeout` | `60000` / `180000` | ms. Receive must be generous — vision calls are slow |
+| `AiWaitSecs` | `180` | Overall ceiling |
+| `AiGroundWithOcr` | `1` | Run PaddleOCR first and send its text as a spelling reference. Skipped silently if unavailable |
+| `AiNormalizeTablePunct` | `1` | Tidy punctuation in returned table cells |
+| `AiDashCellToEmpty` | `0` | Treat a lone dash in a cell as an empty cell |
+| `AiShowTokenUsage` | `0` | Report tokens spent in the completion tooltip |
+| `AiDebug` | `0` | Keep the temp PNG and dump request/response to `Data\` |
 
-### Imgur (in `Resources\SnipImgur.ahk`, class `Imgur`)
+The prompts are not in the INI — they're long, multi-paragraph, and every clause in them is load-bearing. They stay in `Resources\SnipAI.ahk` where they can be read in full alongside the reasoning for each rule.
 
-| Setting | Default | Purpose |
+### `[SnipImgur]`
+
+| Key | Shipped | Purpose |
 |---|---|---|
-| `IniFile` | `A_ScriptDir\Data\ApiKeys.ini` | Client ID storage, `[Imgur]` section |
-| `ConfirmBeforeUpload` | `true` | Ask before the one-click upload |
-| `ProgressDelayMs` | `500` | Delay before the progress window appears |
-| `ResolveTimeout` | `8000` | DNS, ms |
-| `ConnectTimeout` | `10000` | ms |
-| `SendTimeout` | `30000` | ms |
-| `ReceiveTimeout` | `60000` | Real ceiling on a wedged upload |
+| `ImgurConfirmBeforeUpload` | `1` | Ask before the one-click upload. Read [section 13](#13-imgur-uploads) before turning this off |
+| `ImgurDefaultFormat` | `BBCode [img]` | Which "Copy as:" format the Uploader opens on |
+| `ImgurProgressDelayMs` | `500` | Delay before the progress window appears |
+| `ImgurResolveTimeout` | `8000` | DNS, ms |
+| `ImgurConnectTimeout` | `10000` | ms |
+| `ImgurSendTimeout` | `30000` | ms |
+| `ImgurReceiveTimeout` | `60000` | The real ceiling on a wedged upload |
+
+The Client ID is not here either — same file, `Data\ApiKeys.ini`, under `[Imgur]`.
+
+### `[SnipWinDetect]`
+
+| Key | Shipped | Purpose |
+|---|---|---|
+| `WinDetectEnabled` | `1` | `0` keeps the module loaded but never highlights anything |
+| `WinDetectColor` | `1E90FF` | Outline color. A saturated blue reads against arbitrary window chrome better than red or green |
+| `WinDetectThickness` | `5` | Outline px, auto-thinned for windows too small to fit it |
+| `WinDetectPollMs` | `40` | Cursor poll interval, ~25 fps. Below 10 is clamped |
+| `WinDetectMinSize` | `16` | Ignore windows smaller than this, filtering the 1×1 message-only oddities apps leave lying around |
+| `WinDetectShowInfo` | `1` | The title / class / size readout beside the cursor |
+| `WinDetectTipIndex` | `18` | Which tooltip slot that readout uses |
+| `WinDetectIncludeDesktop` | `0` | Treat Progman/WorkerW as a target. Off because it's screen-sized, and having it match means the highlight never goes away over empty desktop |
+| `WinDetectIncludeMonitors` | `1` | Offer each monitor as a target, appended after the windows |
 
 ---
 
-## 17. Credits
+## 18. Credits
 
 **ScreenSnip** is adapted by **kunkel321** with **Claude**, from **Snipper** by **FanaticGuru**.
 
@@ -1065,8 +1205,12 @@ The post-capture adjust-region idea — the frozen master snapshot that lets you
 
 The idea of sending a screen snip to an AI vision model comes from one of **Joe Glines'** apps. Joe's site — https://www.the-automator.com — is where a lot of us first saw AHK and LLM APIs wired together.  Specifically, he showcased his snip tool durrin an AHK Hero zoom meeting. `SnipAI.ahk` is an independent implementation of that idea, fitted to ScreenSnip's snip objects.
 
+**ToolTipOptions.ahk** is by AHK forum member **just me** — https://www.autohotkey.com/boards/viewtopic.php?t=113308 — and ships unmodified, so it can be swapped for a newer copy whenever he posts one.
+
+**SettingsManager** in `Resources\` began life as a tool in kunkel321's AutoCorrect2 suite, but the copy here is a separate build with its own metadata and no connection to that project. Nothing in the ScreenSnip package is part of AutoCorrect2 or depends on it.
+
 The window-highlighting behaviour in Freeze Capture is modelled on **SnagIt**'s.
 
 Bug reports and feature suggestions are welcome on the [AutoHotkey forum thread](https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140802) or the [GitHub repository](https://github.com/kunkel321/ScreenSnip).
 
-User Manual **version date**: Aug 9, 2026.
+User Manual **version date**: Aug 11, 2026.

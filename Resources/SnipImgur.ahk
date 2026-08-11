@@ -4,7 +4,7 @@
 ;
 ;  Optional Imgur-upload add-on for ScreenSnip.ahk.
 ;  Made by kunkel321 / Claude.
-;  Version Date: 8-4-2026
+;  Version Date: 8-11-2026
 ;
 ;  This file is OPTIONAL.  ScreenSnip.ahk includes it with `#Include *i`, and
 ;  builds its context-menu submenu only `if IsSet(Imgur)` — so deleting this
@@ -145,27 +145,29 @@ class Imgur {
     ; That's a lot of consequence for one menu click on a snip that might be
     ; showing an e-mail or a password field, so this defaults to true.
     ; Set false once the flow feels familiar.
-    static ConfirmBeforeUpload := true
+    static ConfirmBeforeUpload := SnipCfg('SnipImgur', 'ImgurConfirmBeforeUpload', true)
 
     ; Milliseconds an upload must run before the little progress/Cancel window
     ; appears.  Small uploads finish faster than this and never flash a dialog.
-    static ProgressDelayMs := 500
+    static ProgressDelayMs := SnipCfg('SnipImgur', 'ImgurProgressDelayMs', 500)
 
     ; WinHttp timeouts, in milliseconds: name resolution, connect, send, receive.
     ; These are deliberately much tighter than the POC's, because a stalled
     ; upload is more annoying here — see the async note in Upload() below.
     ; ReceiveTimeout is the real ceiling on how long a wedged upload can last
     ; if you don't hit Cancel.
-    static ResolveTimeout :=   8000
-    static ConnectTimeout :=  10000
-    static SendTimeout    :=  30000
-    static ReceiveTimeout :=  60000
+    static ResolveTimeout := SnipCfg('SnipImgur', 'ImgurResolveTimeout',  8000)
+    static ConnectTimeout := SnipCfg('SnipImgur', 'ImgurConnectTimeout', 10000)
+    static SendTimeout    := SnipCfg('SnipImgur', 'ImgurSendTimeout',    30000)
+    static ReceiveTimeout := SnipCfg('SnipImgur', 'ImgurReceiveTimeout', 60000)
 
     ; ══════════════════════════════════════════════════════════════════════════
 
     ; Holds the Client ID and nothing else — hence the blunt file name, which
     ; is meant to make "add this to .gitignore" an obvious thought.
-    static IniFile => A_ScriptDir '\Data\ApiKeys.ini'
+    ; Routed through SnipKeysIni() so both credential-using modules resolve the
+    ; same file, including its legacy ImgurClientID.ini migration.
+    static IniFile => SnipKeysIni()
 
     ; Sentinel put in Error.Extra when the user cancels, so callers can tell a
     ; deliberate abort from a real failure without parsing message text.
@@ -184,6 +186,22 @@ class Imgur {
                          , 'Page link'
                          , 'Direct MP4  (animated only)'
                          , 'HTML5 video tag  (animated only)']
+
+    ; Which of the above the one-click upload copies, and which the Uploader's
+    ; dropdown starts on.  Stored by NAME rather than by index so the INI stays
+    ; readable and survives the list being reordered.
+    static DefaultFormat := SnipCfg('SnipImgur', 'ImgurDefaultFormat', 'BBCode [img]')
+
+    ; 1-based position of DefaultFormat in FormatNames, for the DDL's Choose
+    ; option.  Falls back to 1 (Direct link) if the INI names a format that
+    ; isn't in the list -- which is also what FormatLink() does with an
+    ; unrecognised name, so the two stay consistent.
+    Static DefaultFormatIndex() {
+        for i, name in Imgur.FormatNames
+            if (name = Imgur.DefaultFormat)
+                return i
+        return 1
+    }
 
     ; ── Client ID storage ─────────────────────────────────────────────────────
     ; IniRead with a 4th arg returns that default rather than throwing when the
@@ -604,7 +622,7 @@ ImgurUploadSnipBBCode(hwnd := 0) {
     }
 
     ImgurLastResult(res)                    ; session memory, for Delete This Upload
-    tag := Imgur.FormatLink(res, 'BBCode [img]')
+    tag := Imgur.FormatLink(res, Imgur.DefaultFormat)
     A_Clipboard := tag
 
     ; Keep the Uploader's fields in step if it happens to be open.
@@ -804,7 +822,8 @@ ImgurBuildGui(s) {
 
     g.Add('Text', 'xm y+14 section', 'Copy as:')
     ; w300 rather than w230 — "HTML5 video tag  (animated only)" needs the room.
-    s.ddl := g.Add('DropDownList', 'x+6 yp-4 w300 Choose2', Imgur.FormatNames)
+    s.ddl := g.Add('DropDownList', 'x+6 yp-4 w300 Choose' Imgur.DefaultFormatIndex()
+                 , Imgur.FormatNames)
     s.ddl.OnEvent('Change', ImgurGui_FormatChange)
 
     s.link := g.Add('Edit', 'xm y+6 w526 ReadOnly')

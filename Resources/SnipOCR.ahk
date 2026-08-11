@@ -2,7 +2,7 @@
 ;               SnipOCR.ahk  —  OCR add-on module for ScreenSnip.ahk
 ;
 ; Made by kunkel321 via Claude AI.
-; Version date: 7-13-2026 
+; Version date: 8-11-2026
 ;
 ; Adds three context-menu actions to each floating snip:
 ;
@@ -59,20 +59,21 @@ class OcrCfg {
     ; Full path to PaddleOCR-json.exe.  The "models" folder must be its sibling.
     ; A_ScriptDir is the MAIN script's folder, not this file's, so this stays
     ; anchored to the top-level ScreenSnip folder wherever this module lives.
-    static PaddleExe := A_ScriptDir '\Resources\PaddleOCR-json\PaddleOCR-json.exe'
+    static PaddleExe := SnipCfgPath('SnipOCR', 'OcrPaddleExe'
+        , 'Resources\PaddleOCR-json\PaddleOCR-json.exe')
 
     ; Language config, RELATIVE to the engine folder.  The engine defaults to
     ; Simplified Chinese if this is blank, so leave it set for English.
     ; Others shipped in the release: config_chinese_cht.txt, config_japan.txt,
     ; config_korean.txt.
-    static LangConfig := 'models\config_en.txt'
+    static LangConfig := SnipCfg('SnipOCR', 'OcrLangConfig', 'models\config_en.txt')
 
     ; ── Image preprocessing ───────────────────────────────────────────────────
     ; Upscale factor before OCR.  Screen text is typically 10-14px tall, which
     ; is right at the edge of what OCR engines handle well.  Bicubic upscaling
     ; to 2-3x makes a large accuracy difference and costs almost nothing.
     ; 1 = disable.
-    static Upscale := 3
+    static Upscale := SnipCfg('SnipOCR', 'OcrUpscale', 3)
 
     ; Paddle DOWNSIZES any image whose long edge exceeds this — which silently
     ; undoes our upscaling and is a very easy way to sabotage yourself.  A 3x
@@ -81,19 +82,19 @@ class OcrCfg {
     ;
     ; 0 = AUTO: size the limit to the image so no downscaling ever happens.
     ; This is what you want.  Set a fixed number only to deliberately cap it.
-    static LimitSideLen := 0
+    static LimitSideLen := SnipCfg('SnipOCR', 'OcrLimitSideLen', 0)
 
     ; Safety ceiling for AUTO mode.  Detection cost scales with area, so a huge
     ; snip at 3x could get slow.  If the image exceeds this, Paddle will shrink
     ; it (and you should lower Upscale instead).
-    static MaxSideLen := 6144
+    static MaxSideLen := SnipCfg('SnipOCR', 'OcrMaxSideLen', 6144)
 
     ; If the snip has been fine-rotated (Alt+Left/Right, e.g. to deskew tilted
     ; scanned text), the rotation exposes triangular corners that have to be
     ; filled with something.  On screen that's the magenta color key; for OCR we
     ; use white, so the corners read as blank page instead of as content.
     ; Set to 0x000000 if you routinely OCR light-on-dark text.
-    static RotateFill := 0xFFFFFF
+    static RotateFill := SnipCfgHex('SnipOCR', 'OcrRotateFill', 0xFFFFFF)
 
     ; ── Result filtering ──────────────────────────────────────────────────────
     ; Discard text blocks whose confidence is below this (0.0-1.0).
@@ -107,12 +108,12 @@ class OcrCfg {
     ; cell.  On a real 21x20 table, MinScore 0.5 silently discarded 41% of it.
     ;
     ; Only raise this if you're OCRing prose and want to suppress noise.
-    static MinScore := 0.0
+    static MinScore := SnipCfg('SnipOCR', 'OcrMinScore', 0.0)
 
     ; If > 0, append '?' to any cell whose confidence is below this, so you can
     ; find the shaky ones in Excel with Ctrl+F.  Note this makes those cells
     ; text rather than numbers, so leave it at 0 for tables you'll compute on.
-    static MarkBelow := 0.0
+    static MarkBelow := SnipCfg('SnipOCR', 'OcrMarkBelow', 0.0)
 
     ; ── Table reconstruction tuning ───────────────────────────────────────────
     ; PaddleOCR returns loose text blocks with bounding boxes, NOT a table.  We
@@ -123,12 +124,12 @@ class OcrCfg {
     ; RowTol   — two blocks land in the same ROW if their vertical centers are
     ;            within (RowTol x medianHeight) of each other.  Raise if a single
     ;            visual row is being split in two; lower if two rows are merging.
-    static RowTol := 0.60
+    static RowTol := SnipCfg('SnipOCR', 'OcrRowTol', 0.60)
     ;
     ; ColTol   — two blocks land in the same COLUMN if their left edges are
     ;            within (ColTol x medianHeight) of each other.  Raise if one
     ;            column is being split; lower if two columns are merging.
-    static ColTol := 1.20
+    static ColTol := SnipCfg('SnipOCR', 'OcrColTol', 1.20)
 
     ; ── Wrapped-cell reflow ───────────────────────────────────────────────────
     ; A cell whose text wraps onto several lines arrives as several separate
@@ -143,12 +144,12 @@ class OcrCfg {
     ; groups and only reflow if the large group is clearly larger than the small
     ; one; otherwise every row is left alone.  On real tables the separation is
     ; obvious (ratio 2.3 for a wrapped rubric, 1.6 for an unwrapped number grid).
-    static Reflow := true
+    static Reflow := SnipCfg('SnipOCR', 'OcrReflow', true)
 
     ; How much bigger the "row border" gaps must be than the "line spacing" gaps
     ; before we believe the table has wrapped cells.  Lower = more eager to
     ; reflow.  Below about 1.6 you risk merging genuinely separate rows.
-    static ReflowRatio := 1.8
+    static ReflowRatio := SnipCfg('SnipOCR', 'OcrReflowRatio', 1.8)
 
     ; Anchor (key) column — the one that holds a label on every logical row, and
     ; is blank on wrapped continuation lines.  Column 1 in almost every table.
@@ -162,10 +163,10 @@ class OcrCfg {
     ;
     ; Set to 0 to use gaps alone.  Falls back to gaps automatically if the anchor
     ; column turns out to be too sparse to group by.
-    static ReflowAnchorCol := 1
+    static ReflowAnchorCol := SnipCfg('SnipOCR', 'OcrReflowAnchorCol', 1)
 
     ; A gap counts as "big" if it exceeds this multiple of the median row gap.
-    static ReflowGapFactor := 1.8
+    static ReflowGapFactor := SnipCfg('SnipOCR', 'OcrReflowGapFactor', 1.8)
 
     ; ── "This isn't a table" guard ────────────────────────────────────────────
     ; If more than this fraction of the text sits in one column, the snip is
@@ -173,7 +174,7 @@ class OcrCfg {
     ; better job than Copy Table.  Measured on real documents: a numeric grid ran
     ; 7%, a rubric 27%, a scanned service matrix 40%, but a one-column form with
     ; bullets hit 77%.  Set to 0 to disable the prompt.
-    static NotATableWarn := 0.60
+    static NotATableWarn := SnipCfg('SnipOCR', 'OcrNotATableWarn', 0.60)
 
     ; ── Debugging ─────────────────────────────────────────────────────────────
     ; true = write three files next to this script, stamped with the run time:
@@ -182,7 +183,7 @@ class OcrCfg {
     ;   SnipOCR_<stamp>_blocks.txt  how we clustered it (the useful one)
     ; The blocks dump tells you whether a wrong table is the ENGINE misreading
     ; the text or the CLUSTERING misplacing it — you can't tell from the TSV.
-    static Debug := False
+    static Debug := SnipCfg('SnipOCR', 'OcrDebug', false)
 }
 
 
