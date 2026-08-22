@@ -716,6 +716,18 @@ if IsSet(Imgur) {
     SnipMenu.Add('Imgur', %imgurMenuBuilder%())
 }
 
+; Sliding-tile puzzle — see Resources\SnipPuzzle.ahk (optionally included at the
+; bottom of this file).  Same opt-out contract, and the same reason for the
+; %name%() dynamic call as the Imgur block above: delete the module and the
+; PuzzleCfg class never exists, so this block is skipped and the menu is built
+; without it.  Note this belongs to SnipMenu, NOT to the tray menu further up —
+; PuzzleSnipMenu_Handler reads SnipMenu._targetHwnd to learn which snip to cut
+; up, and that is only set when a snip's context menu is opened.
+if IsSet(PuzzleCfg) {
+    puzzleMenuBuilder := 'PuzzleBuildMenu'
+    SnipMenu.Add('Puzzle', %puzzleMenuBuilder%())
+}
+
 SnipMenu.Add('')
 
 RotateMenu := Menu()
@@ -3492,6 +3504,13 @@ Class GDIp {
 ; WinDetect_Begin / _End / _GetRect / _Cycle, all called from FreezeCapture().
 ; No dependencies and nothing to configure; settings live in its own header.
 #Include *i Resources\SnipWinDetect.ahk
+
+; Sliding-tile puzzle — provides PuzzleCfg plus PuzzleBuildMenu / PuzzlePlay,
+; called from the "Puzzle" submenu added to SnipMenu above.  Cuts a snip into a
+; grid, removes one tile and shuffles the rest by legal slides (so the board is
+; always solvable).  No dependencies; its settings live in the [Puzzle] section
+; of Data\snipSettings.ini and fall back to coded defaults when absent.
+#Include *i Resources\SnipPuzzle.ahk
 
 ; Tooltip styling — bigger, colored, padded tooltips.  Unlike the four above,
 ; this one isn't a ScreenSnip module at all: it's an unmodified copy of
