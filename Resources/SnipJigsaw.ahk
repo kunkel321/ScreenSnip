@@ -3,7 +3,6 @@
 ;
 ;                             SnipJigsaw.ahk
 ;              A real jigsaw puzzle cut from any ScreenSnip
-;                        Version Date: 8-22-2026 
 ;
 ; An optional add-on module for ScreenSnip.ahk.  Lives in  Resources\  and is
 ; pulled in by the  #Include *i  block at the bottom of ScreenSnip.ahk, on the
@@ -62,7 +61,10 @@
 ;
 ;   [Jigsaw]                 type     default   what it does
 ;   PieceCount               int      48        default pieces (12-300)
-;   MaxBoardSize             int      520       longest side of the picture, px
+;   MaxBoardSize             int      0         0 = make the picture as large
+;                                                 as the screen allows once the
+;                                                 gutter is accounted for.  Set
+;                                                 px to cap the longest side.
 ;   MinBoardSize             int      280       small snips scale UP to this
 ;   CanvasScale              int      180       canvas as a % of the picture (110-280)
 ;   SnapPixels               int      0         0 = auto (a sixth of a piece)
@@ -97,7 +99,7 @@
 
 class JigCfg {
     static Pieces     := SnipCfg('Jigsaw', 'PieceCount',       48)
-    static MaxBoard   := SnipCfg('Jigsaw', 'MaxBoardSize',    520)
+    static MaxBoard   := SnipCfg('Jigsaw', 'MaxBoardSize',      0)
     static MinBoard   := SnipCfg('Jigsaw', 'MinBoardSize',    280)
     static Canvas     := SnipCfg('Jigsaw', 'CanvasScale',     180)
     static Snap       := SnipCfg('Jigsaw', 'SnapPixels',        0)
@@ -331,9 +333,13 @@ JigCreate(pOrig, want, x := '', y := '') {
     rows := Max(2, Round(want / cols))
 
     ; ── Board geometry ────────────────────────────────────────────────────────
+    ; MaxBoardSize defaults to 0, meaning "no cap of its own" — the screen does
+    ; the limiting, below.  Note the picture is NOT scaled up past its natural
+    ; size to fill the canvas: enlarging a screenshot just makes a blurry
+    ; puzzle.  MinBoardSize still rescues genuinely tiny snips.
     longest := Max(sw, sh)
     scale   := 1.0
-    if (longest > JigCfg.MaxBoard)
+    if (JigCfg.MaxBoard > 0 && longest > JigCfg.MaxBoard)
         scale := JigCfg.MaxBoard / longest
     else if (longest < JigCfg.MinBoard)
         scale := JigCfg.MinBoard / longest
@@ -348,8 +354,8 @@ JigCreate(pOrig, want, x := '', y := '') {
     ; WOULD be, and if it doesn't fit the work area, scale the picture down
     ; until it does.  The gutter keeps its proportion either way.
     MonitorGetWorkArea( , &wkL, &wkT, &wkR, &wkB)
-    availW := (wkR - wkL) - 80
-    availH := (wkB - wkT) - 170        ; title bar, margins and the button row
+    availW := (wkR - wkL) - 46         ; window border and GUI margins
+    availH := (wkB - wkT) - 128        ; title bar, margins and the button row
     prelimW := sw * scale * cscale
     prelimH := sh * scale * cscale
     if (prelimW > availW || prelimH > availH)
@@ -384,7 +390,8 @@ JigCreate(pOrig, want, x := '', y := '') {
     g := Gui(opts, 'Snip Jigsaw   ' (cols * rows) ' pieces')
     g.MarginX := 10, g.MarginY := 10
 
-    DllCall('gdiplus\GdipGraphicsClear', 'Ptr', gBack, 'UInt', 0xFF000000 | JigCfg.Felt)
+    DllCall('gdiplus\GdipGraphicsClear', 'Ptr', gBack
+          , 'UInt', 0xFF000000 | JigCfg.Felt)   ; J doesn't exist yet; seed only
     hbm0 := GDIp.CreateHBITMAPFromBitmap(pBack)
     if !hbm0 {
         DllCall('gdiplus\GdipDeleteGraphics', 'Ptr', gBack)
@@ -400,6 +407,9 @@ JigCreate(pOrig, want, x := '', y := '') {
     bScat := g.Add('Button', 'x+6 yp w70 h26', 'Scatter')
     bPeek := g.Add('Button', 'x+6 yp w52 h26', 'Peek')
     bHelp := g.Add('Button', 'x+6 yp w26 h26', '?')
+    g.Add('Text', 'x+14 yp+4 w28 h20', 'Felt')
+    felt0 := JigFeltStart(JigCfg.Felt)
+    fSlide := g.Add('Slider', 'x+2 yp-4 w130 h26 Range0-100 NoTicks ToolTip', felt0)
 
     J := { Gui: g, Hwnd: g.Hwnd, Pic: pic, Stats: stats, PeekBtn: bPeek
          , Want: want, Cols: cols, Rows: rows, TileW: tileW, TileH: tileH
@@ -412,6 +422,7 @@ JigCreate(pOrig, want, x := '', y := '') {
          , Groups: 0, StartTick: 0, Elapsed: 0
          , Solved: false, Busy: false, Peeking: false, PeekLock: false
          , Frame: JigCfg.Frame ? true : false
+         , Felt: felt0
          , Ticker: 0 }
 
     ; Tab overhang.  A knob on a vertical edge sticks out by a fraction of the
@@ -424,6 +435,10 @@ JigCreate(pOrig, want, x := '', y := '') {
     bScat.OnEvent('Click', (*) => JigScatterLoose(J))
     bPeek.OnEvent('Click', (*) => JigTogglePeek(J))
     bHelp.OnEvent('Click', (*) => JigShowHelp(J))
+    ; Change fires continuously while the thumb is dragged, so the felt updates
+    ; live.  A full repaint is only a canvas clear plus one blit per piece, so
+    ; it keeps up comfortably even at 150 pieces.
+    fSlide.OnEvent('Change', (Ctl, *) => JigSetFelt(J, Ctl.Value))
     g.OnEvent('Close',       (*) => JigConfirmClose(J))
     g.OnEvent('Escape',      (*) => JigConfirmClose(J))
     g.OnEvent('ContextMenu', JigShowMenu)
@@ -1060,6 +1075,13 @@ JigTogglePeek(J) {
     JigRender(J)
 }
 
+; Live from the toolbar slider.  Session-only: FeltColor in the INI sets the
+; hue and the starting position, and this does not write back to it.
+JigSetFelt(J, value) {
+    J.Felt := Max(0, Min(100, value))
+    JigRender(J)
+}
+
 JigToggleFrame(J) {
     J.Frame := !J.Frame
     JigRender(J)
@@ -1133,7 +1155,7 @@ JigRender(J) {
     if !gfx
         return
 
-    DllCall('gdiplus\GdipGraphicsClear', 'Ptr', gfx, 'UInt', 0xFF000000 | JigCfg.Felt)
+    DllCall('gdiplus\GdipGraphicsClear', 'Ptr', gfx, 'UInt', JigFeltArgb(J))
 
     if (J.Solved || J.Peeking || J.PeekLock) {
         JigDrawPart(gfx, J.Img, J.BoardX, J.BoardY, J.BoardW, J.BoardH
@@ -1148,8 +1170,11 @@ JigRender(J) {
 
     ; A faint frame showing where the picture belongs.  Not authentic, but a
     ; jigsaw with no box lid and no table edge is disorienting.
+    ; White-on-dark for the frame, flipping to black once the felt is light
+    ; enough that a white hairline would disappear into it.
     if J.Frame
-        JigDrawEdge(gfx, 0x30FFFFFF, J.BoardX, J.BoardY, J.BoardW, J.BoardH)
+        JigDrawEdge(gfx, (J.Felt > 55) ? 0x40000000 : 0x30FFFFFF
+                  , J.BoardX, J.BoardY, J.BoardW, J.BoardH)
 
     for id in J.Z {
         p := J.Pieces[id]
@@ -1334,6 +1359,43 @@ NumpadEnter::  return ; hide
 ; ══════════════════════════════════════════════════════════════════════════════
 ; Jig-prefixed copies rather than shared with SnipPuzzle.ahk, so either module
 ; can be deleted without taking the other with it.
+
+; The felt color for the current slider position.
+;
+; The slider is a LIGHTNESS dial, not a color picker: FeltColor from the INI
+; supplies the hue, and this walks that hue from black up to its own fully-lit
+; version.  Normalising by the brightest channel is what makes the top of the
+; range a bright version of the SAME color rather than a wash toward white.
+;
+; The curve is squared because the useful range is all down at the dark end —
+; linear would cram every color worth using into the first third of the track.
+; Squaring puts the configured default around 35% and gives fine control there.
+JigFeltArgb(J) {
+    base := JigCfg.Felt
+    r := (base >> 16) & 0xFF
+    g := (base >>  8) & 0xFF
+    b :=  base        & 0xFF
+    mx := Max(r, g, b)
+    if (mx < 1) {
+        r := 255, g := 255, b := 255   ; a black FeltColor still needs a ramp
+        mx := 255
+    }
+    t := J.Felt / 100.0
+    t := t * t
+    fr := Min(255, Round(r * 255 / mx * t))
+    fg := Min(255, Round(g * 255 / mx * t))
+    fb := Min(255, Round(b * 255 / mx * t))
+    return 0xFF000000 | (fr << 16) | (fg << 8) | fb
+}
+
+; Slider position matching a given color's own brightness — the inverse of the
+; squared curve above, so the dial starts exactly on the configured FeltColor.
+JigFeltStart(argb) {
+    mx := Max((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF)
+    if (mx < 1)
+        return 0
+    return Round(100 * Sqrt(mx / 255))
+}
 
 JigNewBitmap(w, h) {
     ; 0x26200A = PixelFormat32bppARGB, straight (non-premultiplied) alpha — the

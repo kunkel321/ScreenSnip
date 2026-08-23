@@ -310,10 +310,10 @@ SnipCfgLoad() {
     return m
 }
 
-; A colour as a numeric 0xRRGGBB, for the values GDI+ and the layered-window
+; A color as a numeric 0xRRGGBB, for the values GDI+ and the layered-window
 ; APIs need as a number rather than a name.  Anything that isn't 6 hex digits
 ; (with an optional 0x or # in front) falls back rather than producing a
-; nonsense colour — a bad TransColor would punch holes in every snip.
+; nonsense color — a bad TransColor would punch holes in every snip.
 SnipCfgHex(section, key, default) {
     v := SnipCfg(section, key, '')
     if (v = '')
@@ -2743,7 +2743,7 @@ PaintSnipShadow(sgHwnd, coreW, coreH, coreX, coreY, blur) {
     DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', cw, 'Int', ch
           , 'Int', 0, 'Int', ARGB, 'Ptr', 0, 'Ptr*', &pBmp := 0)
     DllCall('gdiplus\GdipGetImageGraphicsContext', 'Ptr', pBmp, 'Ptr*', &pGfx := 0)
-    ; Clear to the shadow colour at alpha 0 so blurring only feathers the ALPHA
+    ; Clear to the shadow color at alpha 0 so blurring only feathers the ALPHA
     ; channel — no dark fringe, even if ShadowColor isn't black.
     DllCall('gdiplus\GdipGraphicsClear', 'Ptr', pGfx, 'UInt', bg)
     DllCall('gdiplus\GdipCreateSolidFill', 'UInt', _ShadowArgb(), 'Ptr*', &pBrush := 0)

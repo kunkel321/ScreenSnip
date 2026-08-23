@@ -46,11 +46,11 @@
 ;                                                 screen.  Set a number of px to
 ;                                                 cap the longest side instead.
 ;   MinBoardSize             int      300       small snips scale UP to this
-;   TileGap                  int      2         px of board colour between tiles
+;   TileGap                  int      2         px of board color between tiles
 ;   ShowNumbers              bool     1         bake tile numbers into the tiles
 ;   SlideAnimMs              int      90        slide animation; 0 = instant
 ;   ShuffleMoves             int      0         0 = auto (25 x tile count)
-;   BoardColor               hex      1E1E1E    the gap/background colour
+;   BoardColor               hex      1E1E1E    the gap/background color
 ;   TileOutline              bool     1         hairline edge on each tile
 ;   CloseSnipOnStart         bool     0         1 = the snip becomes the puzzle
 ;   SoundOnSolve             bool     1         three-note fanfare on solving
@@ -1146,7 +1146,7 @@ PuzzleDestroy(P) {
 ; RENDERING
 ; ══════════════════════════════════════════════════════════════════════════════
 
-; One frame.  Clears the back buffer to the board colour, blits whichever tiles
+; One frame.  Clears the back buffer to the board color, blits whichever tiles
 ; are visible, then hands the result to the Picture control.  Peeking and solved
 ; both bypass the tiles entirely and draw the untouched board-sized image, which
 ; is why the grid appears to dissolve at the moment you win.

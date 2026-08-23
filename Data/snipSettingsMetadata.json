@@ -1,0 +1,1201 @@
+{
+  "_Comment": "Metadata for snipSettings.ini (ScreenSnip).  Every key carries restart:..\\ScreenSnip.exe because settings are read once at load: the SnipCfg() loader caches the whole INI on first read, and the add-on modules' class statics initialise before the auto-execute section.  NOTE: a restart closes all open snips.  Keys typed 'text' with a decimal validation regex are FLOATS awaiting a float type in SettingsManager; their intended ranges are stated in the help text.",
+  "Capture.SelectionColor": {
+    "label": "SelectionColor",
+    "help": "color of the semi-transparent overlay drawn while you drag out a selection.\n\nSix hex digits, RRGGBB, with no 0x or # prefix.\n\nBorderColor is set to this same value by default so the selection tint and the finished snip's frame read as one UI. If you change one and want them to keep matching, change both.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "b58500",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Capture.SelectionOverlayAlpha": {
+    "label": "SelectionOverlayAlpha",
+    "help": "Opacity of the selection overlay: 0 is invisible, 255 is solid.\n\n80 is light enough to see the content you are framing through the tint. Raise it if the overlay is hard to spot against busy screens; lower it if it obscures what you are trying to select.",
+    "type": "integer",
+    "min": 0,
+    "max": 255,
+    "default": "80",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Capture.CaptureAdjustMargin": {
+    "label": "CaptureAdjustMargin",
+    "help": "Extra pixels captured AROUND your selection into a frozen 'master' snapshot, so the capture region can be nudged, panned and resized after the fact (see the ADJUST CAPTURE REGION hotkeys). This is the maximum you can pan or grow in any direction before hitting the edge of the snapshot.\n\nLarger means more adjustment headroom but more memory per snip - a 32-bit bitmap costs width x height x 4 bytes.\n\n0 = no headroom; the region is fixed at the exact selection.\n150 = comfortable for fixing small clipped edges.\n99999 = effectively snapshots the WHOLE desktop into every snip.\n\nThe value is always clamped to the virtual desktop bounds, so oversized numbers are safe - they just capture everything and use more RAM. They will not crash or read off-screen.\n\nThis margin is also what supplies the extra pixels a Straighten pulls in, so a larger margin allows a larger clean deskew before the corners run past the snapshot edge.",
+    "type": "integer",
+    "min": 0,
+    "max": 99999,
+    "default": "250",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "DimensionLabels.ShowDimensionLabels": {
+    "label": "ShowDimensionLabels",
+    "help": "Master switch for the on-screen width and height readouts.\n\nDisabling turns off BOTH the capture-time labels (shown while Ctrl+RButton dragging) and the post-capture resize labels (shown while Alt-dragging a snip's edge).",
+    "type": "boolean",
+    "options": [
+      "0=Hide labels",
+      "1=Show labels"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "DimensionLabels.InfoFontSize": {
+    "label": "InfoFontSize",
+    "help": "Font size in points for the W and H dimension labels shown during a selection.\n\nThe labels are drawn in bold Courier New so the digits stay a fixed width and do not jitter as the numbers change.",
+    "type": "integer",
+    "min": 6,
+    "max": 72,
+    "default": "10",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "DimensionLabels.InfoWHOffsetRight": {
+    "label": "InfoWHOffsetRight",
+    "help": "Inset in pixels from the right edge of the selection for the H (height) label.\n\nIncrease to pull the label further inside the selection rectangle.",
+    "type": "integer",
+    "min": 0,
+    "max": 300,
+    "default": "38",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "DimensionLabels.InfoWHOffsetBottom": {
+    "label": "InfoWHOffsetBottom",
+    "help": "Inset in pixels from the bottom edge of the selection for the W (width) label.\n\nIncrease to pull the label further inside the selection rectangle.",
+    "type": "integer",
+    "min": 0,
+    "max": 300,
+    "default": "25",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "DimensionLabels.InfoWMinWidth": {
+    "label": "InfoWMinWidth",
+    "help": "The selection must be at least this many pixels WIDE before the W label appears.\n\nStops the label from overflowing a selection too small to hold it.",
+    "type": "integer",
+    "min": 0,
+    "max": 1000,
+    "default": "75",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "DimensionLabels.InfoHMinHeight": {
+    "label": "InfoHMinHeight",
+    "help": "The selection must be at least this many pixels TALL before the H label appears.\n\nStops the label from overflowing a selection too small to hold it.",
+    "type": "integer",
+    "min": 0,
+    "max": 1000,
+    "default": "55",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeCapture.FreezeCaptureKey": {
+    "label": "FreezeCaptureKey",
+    "help": "Key that triggers Freeze Capture. Any single key AHK understands: ScrollLock, PrintScreen, CapsLock, Pause, F12, and so on. Set to blank to disable the built-in trigger entirely - the cross-script message trigger still works.\n\nWhy Freeze Capture exists: a normal Ctrl+RButton drag cannot capture a context menu, tooltip or drop-down, because pressing a mouse button dismisses them. A KEYBOARD trigger fixes that. The instant you press it the entire virtual desktop is copied into memory and a full-screen backdrop showing that frozen image goes up, so the real menu is free to close - its pixels are already captured.\n\nChoosing a key:\nScrollLock - almost nothing else uses it, it has a status LED, and no app fights you for it.\nPrintScreen - the conventional choice, BUT SnagIt and Windows 11's Snipping Tool both grab it.\nCapsLock - fine IF no other script already claims CapsLock. Each AHK script installs its own keyboard hook, and a consuming CapsLock hotkey in an earlier hook means this one never sees the key.\n\nIf another script already owns the key you want, let it keep the key and have it broadcast the AHK_ScreenSnip_FreezeCapture window message instead. See the cross-script trigger comment in ScreenSnip.ahk.",
+    "type": "text",
+    "default": "CapsLock",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeCapture.FreezeDoublePress": {
+    "label": "FreezeDoublePress",
+    "help": "Require a DOUBLE press of FreezeCaptureKey, or fire on a single press?\n\nDouble-press is recommended for keys that have a normal function or a toggle state. The hotkey is registered with '~' (pass-through), so two presses of a toggle key like CapsLock or ScrollLock turn it on and then straight back off, leaving the lock state exactly as it was.",
+    "type": "boolean",
+    "options": [
+      "0=Single press",
+      "1=Double press"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeCapture.FreezeDoublePressTime": {
+    "label": "FreezeDoublePressTime",
+    "help": "Maximum gap in milliseconds between the two presses when FreezeDoublePress is on.\n\nToo short and the double-tap is hard to land; too long and a pair of unrelated presses can trigger a capture by accident.",
+    "type": "integer",
+    "min": 100,
+    "max": 2000,
+    "default": "400",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeCapture.FreezeNullifyCapsLock": {
+    "label": "FreezeNullifyCapsLock",
+    "help": "Nullify a CapsLock SINGLE press while ScreenSnip is running?\n\nThis only has any effect when FreezeCaptureKey is CapsLock. It is ignored for every other key, so it cannot surprise someone who never chose CapsLock.\n\nWhy it exists: the trigger is registered with '~' (pass-through), so a DOUBLE press toggles CapsLock on and then straight back off and nets out. A single stray press has nothing to cancel it and leaves CapsLock on. If you are one of the many people who never use CapsLock deliberately, switch this on and ScreenSnip will turn it back off after every press, single or double.\n\nThis does NOT block other scripts. The hotkey is non-suppressing, so any other app's CapsLock binding still fires - only the LOCK STATE is reset afterwards. If another script USES the caps state rather than just hotkeying on the key, leave this off.\n\nThe shipped ScreenSnip default is off, on the grounds that turning a key off on someone's keyboard is not a decision an app should make for them.",
+    "type": "boolean",
+    "options": [
+      "0=Leave CapsLock alone",
+      "1=Nullify CapsLock"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.ShowFreezeHint": {
+    "label": "ShowFreezeHint",
+    "help": "Show the hint message over the frozen backdrop during a Freeze Capture?\n\nTurn it off for a silently frozen screen - only worth doing once the gesture is deep muscle memory, since a frozen screen with no explanation is alarming.\n\nThe hint floats ABOVE the frozen image and is never included in the snip, so it costs you nothing in the capture.",
+    "type": "boolean",
+    "options": [
+      "0=No hint",
+      "1=Show hint"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintText": {
+    "label": "FreezeHintText",
+    "help": "Hint message shown over the frozen backdrop.\n\nUse `n (backtick n) for a line break.\n\nBecause the crop reads from the frozen bitmap rather than the screen, this text is invisible to the capture by construction - so it can be large and central without obscuring anything.\n\nThis version is used when SnipWinDetect.ahk is ABSENT. When that module is present, FreezeHintTextWinDetect is shown instead.",
+    "type": "text",
+    "default": "ScreenSnip has frozen the screen.`nRight-click-drag to select a region.`n`nThe new snip will \"float\" above the screen.`n`nEsc cancels.",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintTextWinDetect": {
+    "label": "FreezeHintTextWinDetect",
+    "help": "Hint message shown INSTEAD of FreezeHintText when SnipWinDetect.ahk is present, because the gesture set is genuinely different then - a left-click grabs a whole highlighted window.\n\nUse `n (backtick n) for a line break.\n\nKept as a separate string rather than a line appended to the other one so that deleting the module leaves the hint truthful. Otherwise it would advertise a click that does nothing.",
+    "type": "text",
+    "default": "ScreenSnip has frozen the screen.`nLeft-click a highlighted window to grab it whole,`nor right-click-drag to select any region.`n`nThe new snip will \"float\" above the screen.`n`nEsc cancels.",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintFontName": {
+    "label": "FreezeHintFontName",
+    "help": "Font family for the freeze hint pill. Any installed font name.",
+    "type": "text",
+    "default": "Segoe UI",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintFontSize": {
+    "label": "FreezeHintFontSize",
+    "help": "Point size for the freeze hint text.\n\nThe hint sits above the frozen image and never appears in the capture, so it can be generously large without any cost to the snip.",
+    "type": "integer",
+    "min": 6,
+    "max": 72,
+    "default": "15",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintTextColor": {
+    "label": "FreezeHintTextColor",
+    "help": "Text color of the freeze hint pill, six hex digits RRGGBB with no 0x prefix.\n\nTipTextColor is set to this same value by default so the hint and the status tooltips read as one UI.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "FFFFFF",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintBackColor": {
+    "label": "FreezeHintBackColor",
+    "help": "Background color of the freeze hint pill, six hex digits RRGGBB with no 0x prefix.\n\nTipBackColor is set to this same value by default so the hint and the status tooltips read as one UI.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "1E1E1E",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintAlpha": {
+    "label": "FreezeHintAlpha",
+    "help": "Overall opacity of the hint pill: 0 is invisible, 255 is solid.\n\nDeliberately semi-transparent so anything directly underneath it is still readable while you aim the selection.",
+    "type": "integer",
+    "min": 0,
+    "max": 255,
+    "default": "215",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "FreezeHint.FreezeHintCornerRadius": {
+    "label": "FreezeHintCornerRadius",
+    "help": "Corner rounding of the hint pill, in pixels. 0 gives square corners.",
+    "type": "integer",
+    "min": 0,
+    "max": 100,
+    "default": "16",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.ShowSnipBorder": {
+    "label": "ShowSnipBorder",
+    "help": "Show a coloured border around each floating snip?\n\nOff gives a fully borderless, image-only snip.\n\nNote that the border is suppressed during rotations other than 0, 90, 180 and 270 degrees, because a rectangular frame does not map cleanly onto a tilted snip.",
+    "type": "boolean",
+    "options": [
+      "0=No border",
+      "1=Show border"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.BorderColor": {
+    "label": "BorderColor",
+    "help": "Border color for floating snips, six hex digits RRGGBB with no 0x prefix.\n\nShipped matching SelectionColor so the selection overlay and the finished snip feel cohesive. Override it to any color you like - if you want the two to keep matching, change both.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "b58500",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.BorderThickness": {
+    "label": "BorderThickness",
+    "help": "Border thickness in pixels, applied as a Gui margin on each side.\n\nAlso sets the floor for EdgeGrabZone: the grabbable band is automatically widened to at least the border thickness so a thick border stays fully grabbable for Alt-drag resizing.",
+    "type": "integer",
+    "min": 0,
+    "max": 20,
+    "default": "2",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.Bevel3D": {
+    "label": "Bevel3D",
+    "help": "Give the snip border a 3D 'floating' bevel: top and left edges lighter, bottom and right edges darker, both derived from BorderColor.\n\nLooks best with thin borders of 1 to 2 px. Automatically disabled above Bevel3DMaxThickness, since thick beveled frames tend to look chunky.",
+    "type": "boolean",
+    "options": [
+      "0=Flat border",
+      "1=3D bevel"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.Bevel3DMaxThickness": {
+    "label": "Bevel3DMaxThickness",
+    "help": "Border thickness above which the 3D bevel is switched off automatically.\n\nA bevel reads as a bevel only while the frame is thin; past this width it just looks like a chunky coloured slab, so the effect is dropped rather than drawn badly.",
+    "type": "integer",
+    "min": 0,
+    "max": 20,
+    "default": "3",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.Bevel3DStrength": {
+    "label": "Bevel3DStrength",
+    "help": "How much lighter or darker the bevel edges are on the ACTIVE (focused) snip. A decimal from 0.0 to 1.0 - the fraction blended toward white for the light edges and toward black for the dark edges.\n\nActive and inactive snips use the same bevel strength and contrast. The visual difference between them comes from Bevel3DInactiveDarknessFactor instead.",
+    "type": "float",
+    "min": 0,
+    "max": 1,
+    "decimals": 2,
+    "default": "0.55",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.Bevel3DInactiveStrength": {
+    "label": "Bevel3DInactiveStrength",
+    "help": "The same bevel blend fraction as Bevel3DStrength, but for the INACTIVE (unfocused) snip. A decimal from 0.0 to 1.0.\n\nShipped equal to Bevel3DStrength on purpose: the active and inactive snips keep identical bevel contrast and shape, and the focus cue comes entirely from Bevel3DInactiveDarknessFactor dimming both edges together.",
+    "type": "float",
+    "min": 0,
+    "max": 1,
+    "decimals": 2,
+    "default": "0.55",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.Bevel3DInactiveDarknessFactor": {
+    "label": "Bevel3DInactiveDarknessFactor",
+    "help": "How much darker BOTH bevel edges - light and dark - get on an inactive, unfocused snip. A decimal from 0.0 to 1.0.\n\nFor example 0.2 means both edges are 20 percent darker than they would be on the active snip: the same contrast and shape, just dimmed overall. That gives a focus cue without needing a second border color.\n\nSet to 0.0 for no visual difference between focused and unfocused snips.",
+    "type": "float",
+    "min": 0,
+    "max": 1,
+    "decimals": 1,
+    "default": "0.2",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWindow.TransColor": {
+    "label": "TransColor",
+    "help": "Transparent color key used to hide the corners of rotated snips. Six hex digits RRGGBB with no 0x prefix.\n\nMagenta by default, chosen because it almost never appears naturally in screen captures - which avoids accidental see-through holes inside the image itself. Change it only if you routinely capture magenta content.\n\nKnown issue: during rotation, at angles other than 90, 180 and 270 degrees, a magenta halo of pixels can appear around the edge of the snip.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "FF00FF",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipShadow.ShowSnipShadow": {
+    "label": "ShowSnipShadow",
+    "help": "Cast a soft translucent drop shadow to the bottom-right of each snip? This is the default for NEW snips; each snip can be toggled at runtime from its right-click Shadow menu item.\n\nThe shadow is a separate click-through window sitting just behind the snip, kept glued to it via WM_WINDOWPOSCHANGED - the snip window itself is never touched. It is painted per-pixel with UpdateLayeredWindow for real feathered alpha.\n\nIt is suppressed automatically at skewed or non-cardinal angles, where a rectangle would not match a tilted snip, and whenever the snip is not fully opaque, since a shadow behind a see-through snip looks wrong.",
+    "type": "boolean",
+    "options": [
+      "0=No shadow",
+      "1=Show shadow"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipShadow.ShadowColor": {
+    "label": "ShadowColor",
+    "help": "Shadow color, six hex digits RRGGBB with no 0x prefix. For example 000000 for black or 203040 for slate.\n\nThe GDI+ fill needs a numeric RGB value, so an AHK color name will not work here - hex only.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "000000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipShadow.ShadowOffset": {
+    "label": "ShadowOffset",
+    "help": "How far in logical pixels the shadow is offset down and to the right. DPI-scaled like the rest of the snip geometry.\n\nKeep this at or above ShadowBlur for a clean bottom-right drop. If the blur exceeds the offset you get a soft all-around halo or glow instead of a directional shadow.",
+    "type": "integer",
+    "min": 0,
+    "max": 100,
+    "default": "7",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipShadow.ShadowOffsetInactive": {
+    "label": "ShadowOffsetInactive",
+    "help": "Shadow offset used when the snip is NOT the focused window.\n\nMaking it smaller than ShadowOffset lets an inactive snip cast a shorter shadow, which reads as sitting closer to the desktop - so the focused snip visually lifts forward. Same trick the Bevel3D active and inactive strengths use.\n\nSet equal to ShadowOffset for no active/inactive difference.",
+    "type": "integer",
+    "min": 0,
+    "max": 100,
+    "default": "4",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipShadow.ShadowBlur": {
+    "label": "ShadowBlur",
+    "help": "Edge softness in logical pixels. 0 gives a crisp rectangle, 5 to 8 gives a gentle feathered drop shadow, larger is softer and wider.\n\nSoftening is done with plain GDI+ bilinear scaling - a downscale and upscale pass, no effects API and no machine code - so it works everywhere.",
+    "type": "integer",
+    "min": 0,
+    "max": 50,
+    "default": "6",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipShadow.ShadowAlpha": {
+    "label": "ShadowAlpha",
+    "help": "Peak shadow opacity at the core: 0 is invisible, 255 is solid. The feather fades below this.\n\nRoughly 90 to 120 works out to 35 to 47 percent, which reads as a shadow over most backdrops without turning into a black smudge.",
+    "type": "integer",
+    "min": 0,
+    "max": 255,
+    "default": "105",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Gestures.PanDragDivisor": {
+    "label": "PanDragDivisor",
+    "help": "Right-drag pan sensitivity: how many pixels of right-mouse drag map to ONE pixel of region pan. Hand-tool style, so the image follows the cursor.\n\nHigher is finer and slower, which suits nudging an edge into place. 1 gives 1:1 tracking.\n\nThe fractional remainder is carried between frames, so even a slow drag moves smoothly instead of stair-stepping.",
+    "type": "integer",
+    "min": 1,
+    "max": 20,
+    "default": "3",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Gestures.PanClickSlop": {
+    "label": "PanClickSlop",
+    "help": "Total right-drag travel in screen pixels below which the gesture is treated as a right-CLICK and opens the context menu instead of panning.\n\nThis is the dead zone at the start of any right-drag that distinguishes a deliberate pan from a plain right-click. Raise it if the menu opens when you meant to pan; lower it if you have to travel too far before panning starts.",
+    "type": "integer",
+    "min": 0,
+    "max": 50,
+    "default": "5",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Gestures.EdgeGrabZone": {
+    "label": "EdgeGrabZone",
+    "help": "How far inward in pixels the grabbable band reaches from each edge of a snip, for Alt+drag edge resizing (grow or shrink the capture region, with the opposite edge staying put).\n\nAutomatically widened to at least BorderThickness so a thick border is still fully grabbable.\n\nOnly active on upright snips at 0 degrees. A rotated snip's edges do not map cleanly onto the capture rectangle, so edge resizing is suppressed there - the same rule the border follows.",
+    "type": "integer",
+    "min": 1,
+    "max": 30,
+    "default": "6",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Straighten.StraightenStep": {
+    "label": "StraightenStep",
+    "help": "Degrees of deskew per Alt+comma / Alt+period.\n\nStraighten rotates the IMAGE inside a fixed rectangular frame - for example to square up a skewed table before OCR. Unlike Rotate, which turns the whole snip frame and all, Straighten leaves the frame axis-aligned and only tilts the content within it. You then trim the exposed corners with an Alt+drag resize.\n\nThe content pivots about the centre of the crop AS IT WAS when you began straightening, and that pivot is held fixed until you return to level. So panning slides the frame over one stable rotated image with no swirl, while the tilt still turns about what you are actually looking at.",
+    "type": "integer",
+    "min": 1,
+    "max": 15,
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Straighten.StraightenFineStep": {
+    "label": "StraightenFineStep",
+    "help": "Degrees of deskew per Shift+Alt+comma / Shift+Alt+period - the fine, sub-degree step for the last bit of squaring up.",
+    "type": "float",
+    "min": 0,
+    "max": 5,
+    "decimals": 1,
+    "default": "0.5",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Straighten.StraightenMaxAngle": {
+    "label": "StraightenMaxAngle",
+    "help": "Hard clamp on total deskew, in degrees either side of level.\n\nThe practical limit is usually CaptureAdjustMargin rather than this number: the tilt pulls surrounding pixels in from the frozen master snapshot, so a larger margin allows a larger clean straighten before the corners run past the snapshot edge.",
+    "type": "integer",
+    "min": 1,
+    "max": 45,
+    "default": "15",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Saving.SaveDefaultFolder": {
+    "label": "SaveDefaultFolder",
+    "help": "Folder the Save Image As dialog opens in the first time you use it in a session. After that, the last folder you actually saved to is remembered for the rest of the session.\n\n%USERPROFILE% is expanded. If the folder does not exist, ScreenSnip falls back to My Documents.",
+    "type": "text",
+    "default": "%USERPROFILE%\\Pictures",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Saving.SaveDefaultExt": {
+    "label": "SaveDefaultExt",
+    "help": "Image format offered by default in the Save Image As dialog, and used when you type a filename with no extension.\n\nPNG gets clean transparent corners on tilted snips. JPG and BMP have no alpha channel, so they save exactly as displayed - including the magenta corner fill on a rotated snip.",
+    "type": "list",
+    "validation": "png|jpg|bmp",
+    "default": "png",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.EnhanceToolTips": {
+    "label": "EnhanceToolTips",
+    "help": "Master switch for the enhanced tooltip styling provided by Resources\\ToolTipOptions.ahk (by AHK forum member 'just me').\n\nSeveral add-ons report status with a plain ToolTip: the OCR 'Reading...' and result messages, the AI module's progress, the Imgur toast, and the window info that follows the cursor during a Freeze Capture. Windows' default tooltip is a small pale-yellow box in an 8pt system font - easy to miss on a busy screen and hard to read at a glance.\n\nToolTipOptions subclasses the tooltip window CLASS, so every setting in this section applies to every ToolTip the script raises, from any module, with no change to a single ToolTip call anywhere.\n\nSwitch this off to keep plain system tooltips without deleting the file - handy for an A/B look, or if a theming tool already styles tooltips. Deleting Resources\\ToolTipOptions.ahk has the same effect, since it is included with the *i flag.",
+    "type": "boolean",
+    "options": [
+      "0=Plain Windows tooltips",
+      "1=Enhanced tooltips"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipFontName": {
+    "label": "TipFontName",
+    "help": "Font family for tooltips. Any installed font name, or blank for the system default face.\n\nA monospaced face such as Consolas or Cascadia Mono is worth considering: the OCR modules dump captured TEXT into these tooltips, and columns from a table grab line up far better in a fixed-pitch font.",
+    "type": "text",
+    "default": "Segoe UI",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipFontSize": {
+    "label": "TipFontSize",
+    "help": "Tooltip point size. 11 to 13 is a comfortable step up from the roughly 8pt Windows default; the module accepts anything from 1 to 255, so go large if you want it unmissable.\n\nThe styling is applied AFTER ScreenSnip's DPI-awareness call, because point size is converted to pixels through GetDeviceCaps and that reading depends on the thread's DPI awareness. Set the font first and a 12pt tooltip comes out noticeably small on a scaled display.",
+    "type": "integer",
+    "min": 1,
+    "max": 255,
+    "default": "12",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipFontStyle": {
+    "label": "TipFontStyle",
+    "help": "Extra font styles, space separated, from: bold, italic, underline, strike, norm. Also accepts wNNN for weight (1 to 1000) and qN for quality (0 to 5). Leave blank for none.\n\nColour options such as cRED are ignored here - use TipTextColor instead.\n\nA bad style word or an out-of-range size makes SetFont throw. ScreenSnip catches that, resets tooltips to the plain Windows style for the session, and tells you once rather than taking the script down.",
+    "type": "text",
+    "default": "",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipBackColor": {
+    "label": "TipBackColor",
+    "help": "Tooltip background color: an AHK color name such as Yellow, or six hex digits RRGGBB with no 0x prefix.\n\nSet BOTH this and TipTextColor to blank to keep Windows' own tooltip colours while still changing the font and margins.\n\nShipped tracking FreezeHintBackColor so the freeze hint and the status tooltips read as one UI - the same reason BorderColor tracks SelectionColor.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "1E1E1E",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipTextColor": {
+    "label": "TipTextColor",
+    "help": "Tooltip text color: an AHK color name such as Black, or six hex digits RRGGBB with no 0x prefix.\n\nSet BOTH this and TipBackColor to blank to keep Windows' own tooltip colours while still changing the font and margins.\n\nShipped tracking FreezeHintTextColor so the freeze hint and the status tooltips read as one UI.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "FFFFFF",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipMarginL": {
+    "label": "TipMarginL",
+    "help": "Tooltip interior padding on the LEFT, in pixels.\n\nThe default Windows tooltip is cramped; a few pixels of breathing room helps legibility about as much as the bigger font does.\n\nSet all four margins to 0 to use Windows' own spacing.",
+    "type": "integer",
+    "min": 0,
+    "max": 50,
+    "default": "10",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipMarginT": {
+    "label": "TipMarginT",
+    "help": "Tooltip interior padding on the TOP, in pixels.\n\nSet all four margins to 0 to use Windows' own spacing.",
+    "type": "integer",
+    "min": 0,
+    "max": 50,
+    "default": "8",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipMarginR": {
+    "label": "TipMarginR",
+    "help": "Tooltip interior padding on the RIGHT, in pixels.\n\nSet all four margins to 0 to use Windows' own spacing.",
+    "type": "integer",
+    "min": 0,
+    "max": 50,
+    "default": "10",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipMarginB": {
+    "label": "TipMarginB",
+    "help": "Tooltip interior padding on the BOTTOM, in pixels.\n\nSet all four margins to 0 to use Windows' own spacing.",
+    "type": "integer",
+    "min": 0,
+    "max": 50,
+    "default": "8",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipTitle": {
+    "label": "TipTitle",
+    "help": "Optional bold title line shown above the tooltip text. Blank means no title bar at all.\n\nBlank is the default deliberately: a title is a lot of chrome for a two-word status message, and it would also appear on the cursor-following window info during a Freeze Capture, where it would just be in the way.",
+    "type": "text",
+    "default": "",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Tooltips.TipTitleIcon": {
+    "label": "TipTitleIcon",
+    "help": "Icon shown beside the tooltip title. Ignored entirely when TipTitle is blank.\n\n0 = none, 1 = info, 2 = warning, 3 = error. Add 3 for the large versions: 4 = large info, 5 = large warning, 6 = large error.",
+    "type": "integer",
+    "min": 0,
+    "max": 6,
+    "default": "4",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrPaddleExe": {
+    "label": "OcrPaddleExe",
+    "help": "Full path to PaddleOCR-json.exe. The 'models' folder MUST be its sibling - the engine is launched with that folder as its working directory, which is how OcrLangConfig resolves.\n\nA relative path is resolved against the ScreenSnip.ahk folder, so the shipped default points into Resources\\.\n\nSetup: download PaddleOCR-json (Windows x64) from https://github.com/hiroi-sora/PaddleOCR-json/releases/latest and unzip it into Resources\\. You want the folder containing PaddleOCR-json.exe AND the models subfolder; they must stay together.\n\nRequires a CPU with AVX (any modern Core or Ryzen). If yours lacks it, use RapidOCR-json instead - same JSON output, same code works.\n\nOnly the PaddleOCR menu items need this. Copy Text (Windows) uses Descolada's OCR.ahk and needs no engine install.",
+    "type": "file",
+    "filter": "Executables (*.exe)|*.exe",
+    "default": "Resources\\PaddleOCR-json\\PaddleOCR-json.exe",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrLangConfig": {
+    "label": "OcrLangConfig",
+    "help": "Language config file, RELATIVE to the PaddleOCR engine folder - not to ScreenSnip.\n\nThe engine defaults to Simplified Chinese if this is blank, so leave it set for English.\n\nOthers shipped in the release: models\\config_chinese_cht.txt, models\\config_japan.txt, models\\config_korean.txt.",
+    "type": "list",
+    "validation": "models\\config_en.txt|models\\config_chinese_cht.txt|models\\config_japan.txt|models\\config_korean.txt",
+    "default": "models\\config_en.txt",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrUpscale": {
+    "label": "OcrUpscale",
+    "help": "Bicubic upscale factor applied before OCR. 1 disables it.\n\nScreen text is typically 10 to 14 pixels tall, right at the edge of what OCR engines handle well. Upscaling to 2x or 3x makes a large accuracy difference and costs almost nothing.\n\nIf a large snip at 3x is getting slow, lower this rather than capping OcrMaxSideLen.",
+    "type": "integer",
+    "min": 1,
+    "max": 6,
+    "default": "3",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrLimitSideLen": {
+    "label": "OcrLimitSideLen",
+    "help": "Paddle DOWNSIZES any image whose long edge exceeds this - which silently undoes the upscaling above and is a very easy way to sabotage yourself. A 3x upscale of a modest snip lands around 5000px, so a fixed 2880 here would shrink it straight back to an effective 1.7x.\n\n0 = AUTO: size the limit to the image so no downscaling ever happens. This is what you want.\n\nSet a fixed number only to deliberately cap it.",
+    "type": "integer",
+    "min": 0,
+    "max": 16384,
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrMaxSideLen": {
+    "label": "OcrMaxSideLen",
+    "help": "Safety ceiling for AUTO mode (OcrLimitSideLen = 0).\n\nDetection cost scales with area, so a huge snip at 3x could get slow. If the image exceeds this, Paddle will shrink it - and the right response is usually to lower OcrUpscale instead of raising this.",
+    "type": "integer",
+    "min": 512,
+    "max": 16384,
+    "default": "6144",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrRotateFill": {
+    "label": "OcrRotateFill",
+    "help": "Fill color for the triangular corners exposed when a fine-rotated snip is sent to OCR. Six hex digits RRGGBB with no 0x prefix.\n\nOn screen those corners use the magenta color key, but for OCR we use white so they read as blank page rather than as content.\n\nSet to 000000 if you routinely OCR light-on-dark text.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "FFFFFF",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrMinScore": {
+    "label": "OcrMinScore",
+    "help": "Discard text blocks whose confidence is below this, from 0.0 to 1.0.\n\nThe default of 0 - keep everything - is deliberate. A confidence filter would earn its keep if a junk block could SHIFT your data, but it cannot: every block is snapped to a column anchor, so dropping one leaves a hole and moves nothing. Filtering therefore buys no safety and costs real cells.\n\nAnd a hole is worse than a typo. A misread value is visible and fixable; a dropped one just looks like a legitimately empty cell. On a real 21x20 table, a MinScore of 0.5 silently discarded 41 percent of it.\n\nOnly raise this if you are OCRing prose and want to suppress noise.",
+    "type": "float",
+    "min": 0,
+    "max": 1,
+    "decimals": 1,
+    "default": "0.0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrMarkBelow": {
+    "label": "OcrMarkBelow",
+    "help": "If above 0, append a question mark to any cell whose confidence is below this value (0.0 to 1.0), so you can find the shaky ones in Excel with Ctrl+F.\n\nNote this makes those cells TEXT rather than numbers, so leave it at 0 for tables you will compute on.",
+    "type": "float",
+    "min": 0,
+    "max": 1,
+    "decimals": 1,
+    "default": "0.0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrRowTol": {
+    "label": "OcrRowTol",
+    "help": "Row clustering tolerance. Two text blocks land in the same ROW if their vertical centres are within (OcrRowTol x median block height) of each other.\n\nPaddleOCR returns loose text blocks with bounding boxes, NOT a table - the grid is rebuilt by clustering those boxes. This tolerance is expressed as a fraction of the median text-block HEIGHT so it scales automatically with font size and with OcrUpscale.\n\nRaise it if a single visual row is being split in two; lower it if two rows are merging.",
+    "type": "float",
+    "min": 0,
+    "max": 3,
+    "decimals": 2,
+    "default": "0.60",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrColTol": {
+    "label": "OcrColTol",
+    "help": "Column clustering tolerance. Two text blocks land in the same COLUMN if their left edges are within (OcrColTol x median block height) of each other.\n\nLike OcrRowTol, expressed as a fraction of median text-block height so it scales with font size and OcrUpscale.\n\nRaise it if one column is being split in two; lower it if two columns are merging.",
+    "type": "float",
+    "min": 0,
+    "max": 5,
+    "decimals": 2,
+    "default": "1.20",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrReflow": {
+    "label": "OcrReflow",
+    "help": "Stitch wrapped cells back together?\n\nA cell whose text wraps onto several lines arrives as several separate blocks, so a 5-row table can come out as 31 rows. Reflow puts them back.\n\nHow it decides: it measures the WHITESPACE between consecutive rows, not centre-to-centre pitch, which is contaminated by text height. In a table with wrapped cells those gaps are strongly bimodal - small ones are line spacing inside a cell, large ones are actual row borders. In a table with no wrapping they are all the same size. So the gaps are split into two groups and reflow only happens if the large group is clearly larger than the small one; otherwise every row is left alone.\n\nOn real tables the separation is obvious: ratio 2.3 for a wrapped rubric, 1.6 for an unwrapped number grid.",
+    "type": "boolean",
+    "options": [
+      "0=Leave rows as detected",
+      "1=Reflow wrapped cells"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrReflowRatio": {
+    "label": "OcrReflowRatio",
+    "help": "How much bigger the 'row border' gaps must be than the 'line spacing' gaps before we believe the table has wrapped cells at all.\n\nLower is more eager to reflow. Below about 1.6 you risk merging genuinely separate rows.",
+    "type": "float",
+    "min": 0,
+    "max": 5,
+    "decimals": 1,
+    "default": "1.8",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrReflowAnchorCol": {
+    "label": "OcrReflowAnchorCol",
+    "help": "The anchor (key) column - the one holding a label on every logical row and blank on wrapped continuation lines. Column 1 in almost every table.\n\nThis exists because GAPS ALONE ARE NOT ENOUGH, and a real document proved it. On a scanned IEP service grid an 85px gap sat INSIDE a cell - a faint dash the engine never detected left a hole - while a genuine row border was only 39px. The geometry lied. But column 1, reading '1,2 / 2 / ALL / 3 / 4', did not. So a new logical row must satisfy BOTH tests: a big gap above it AND content in the anchor column.\n\nSet to 0 to use gaps alone. Falls back to gaps automatically if the anchor column turns out to be too sparse to group by.",
+    "type": "integer",
+    "min": 0,
+    "max": 10,
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrReflowGapFactor": {
+    "label": "OcrReflowGapFactor",
+    "help": "A gap counts as 'big' - that is, a candidate row border rather than in-cell line spacing - if it exceeds this multiple of the median row gap.",
+    "type": "float",
+    "min": 0,
+    "max": 5,
+    "decimals": 1,
+    "default": "1.8",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrNotATableWarn": {
+    "label": "OcrNotATableWarn",
+    "help": "The 'this is not a table' guard. If more than this fraction of the text sits in one column, the snip is almost certainly prose or a form rather than a grid - and Copy Text will do a far better job than Copy Table, so you get a prompt.\n\nMeasured on real documents: a numeric grid ran 7 percent, a rubric 27 percent, a scanned service matrix 40 percent, but a one-column form with bullets hit 77 percent.\n\nSet to 0 to disable the prompt.",
+    "type": "float",
+    "min": 0,
+    "max": 1,
+    "decimals": 2,
+    "default": "0.60",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipOCR.OcrDebug": {
+    "label": "OcrDebug",
+    "help": "Write three diagnostic files into the Data folder on every PaddleOCR run, stamped with the run time:\n\nSnipOCR_<stamp>_image.png - what the engine was actually fed\nSnipOCR_<stamp>_raw.json - what the engine returned\nSnipOCR_<stamp>_blocks.txt - how the blocks were clustered\n\nThe blocks dump is the useful one: it tells you whether a wrong table is the ENGINE misreading the text or the CLUSTERING misplacing it, which you cannot tell from the TSV alone.\n\nLeave off for normal use - these files accumulate.",
+    "type": "boolean",
+    "options": [
+      "0=Off",
+      "1=Write debug files"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiModel": {
+    "label": "AiModel",
+    "help": "Any vision-capable OpenAI chat model. If the one you name is not enabled on your account you get a clear 'model not found' back from the API - the error body is shown verbatim, so it is a one-line fix.\n\nThis is the DEFAULT. A Model= line under [OpenAI] in Data\\ApiKeys.ini overrides it, so a model can be swapped without touching this file - handy for A/B testing quality against cost.\n\nDo NOT reflexively drop to a 'mini' tier model the way you might for a text-only task. Table extraction from a scan is dense small digits and fine ruling lines, which is exactly where the cheap tiers degrade - and they degrade into plausible-looking WRONG NUMBERS, not obvious errors. Measure first: switch on AiShowTokenUsage and see where the money actually goes before trading accuracy for it.\n\nNote that this module sends the image OFF YOUR MACHINE and costs money - fractions of a cent per snip. OpenAI prepaid credits expire after one year.",
+    "type": "text",
+    "default": "gpt-5.6",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiDetail": {
+    "label": "AiDetail",
+    "help": "Image detail level sent to the vision model.\n\nhigh - tiles the image and reads fine print. This is what you want for OCR.\nlow - sends a single coarse thumbnail for about a tenth the cost.",
+    "type": "list",
+    "validation": "high|low",
+    "default": "high",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiMaxSide": {
+    "label": "AiMaxSide",
+    "help": "Longest edge in pixels the snip is scaled down to before upload.\n\nThe API scales anything larger down before tiling, so sending a bigger image than this is pure upload time with no accuracy gain.\n\nUnlike the local OCR path there is no reason to UPSCALE for the AI - the model is not helped by it.",
+    "type": "integer",
+    "min": 256,
+    "max": 4096,
+    "default": "2048",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiResolveTimeout": {
+    "label": "AiResolveTimeout",
+    "help": "WinHttp DNS name-resolution timeout in milliseconds.\n\nOne of four timeouts - resolve, connect, send, receive - that were a single Timeouts array in SnipAI.ahk and are split out here so each can be edited on its own.",
+    "type": "integer",
+    "min": 1000,
+    "max": 60000,
+    "default": "10000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiConnectTimeout": {
+    "label": "AiConnectTimeout",
+    "help": "WinHttp connection timeout in milliseconds - how long to wait to establish the connection to the API.",
+    "type": "integer",
+    "min": 1000,
+    "max": 60000,
+    "default": "10000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiSendTimeout": {
+    "label": "AiSendTimeout",
+    "help": "WinHttp send timeout in milliseconds - how long the request upload may take.\n\nThe payload is a base64-encoded PNG, so this scales with AiMaxSide. Raise it if you work on a slow uplink with large snips.",
+    "type": "integer",
+    "min": 5000,
+    "max": 300000,
+    "default": "60000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiReceiveTimeout": {
+    "label": "AiReceiveTimeout",
+    "help": "WinHttp receive timeout in milliseconds.\n\nThis one in particular must be generous: vision calls are slow, and a dense table can take a while to come back. This is the real ceiling on how long a wedged request can hang.",
+    "type": "integer",
+    "min": 10000,
+    "max": 600000,
+    "default": "180000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiWaitSecs": {
+    "label": "AiWaitSecs",
+    "help": "Seconds to wait for the complete response, passed to WaitForResponse.\n\nKeep this roughly in step with AiReceiveTimeout - expressed in seconds rather than milliseconds - so the two do not fight each other.",
+    "type": "integer",
+    "min": 10,
+    "max": 600,
+    "default": "180",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiGroundWithOcr": {
+    "label": "AiGroundWithOcr",
+    "help": "Run PaddleOCR first and pass its text to the model as a spelling reference?\n\nCosts one extra engine run - a second or two, offline. Silently skipped if SnipOCR.ahk is absent or the engine is not installed.\n\nWhat gets sent is Paddle's reading-order LINES, not its reconstructed grid. That is deliberate: sending the grid would hand the model the very column mistake this feature exists to correct. The accompanying preamble grants the OCR authority over CHARACTERS and explicitly strips it of any authority over LAYOUT.\n\nThe reason Copy Table (AI) beats Copy Table (Paddle) at all is that a vision model can see the table's RULING LINES, which no box-based OCR engine can.",
+    "type": "boolean",
+    "options": [
+      "0=Image only",
+      "1=Ground with PaddleOCR"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiNormalizeTablePunct": {
+    "label": "AiNormalizeTablePunct",
+    "help": "Fold en dashes, em dashes, curly quotes and non-breaking spaces down to plain ASCII in table cells, so what lands on the clipboard pastes cleanly into a spreadsheet.\n\nTable cells ONLY. Copy Text (AI) always stays verbatim.",
+    "type": "boolean",
+    "options": [
+      "0=Keep as transcribed",
+      "1=Normalize to ASCII"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiDashCellToEmpty": {
+    "label": "AiDashCellToEmpty",
+    "help": "Blank out any cell whose entire content is a dash.\n\nIn most printed tables a lone dash is a 'no data' marker rather than a value, and blanking it keeps a numeric column numeric in Excel.\n\nOff by default because it IS a content change, and in some tables a dash means something specific.",
+    "type": "boolean",
+    "options": [
+      "0=Keep the dash",
+      "1=Blank dash-only cells"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiShowTokenUsage": {
+    "label": "AiShowTokenUsage",
+    "help": "Append the token counts from the last call to the result tooltip.\n\nCosts nothing, and turns 'roughly two cents a table' into a number you can act on. In particular it separates image tokens from output tokens from reasoning tokens - the last of which are billed but otherwise invisible.\n\nWorth switching on before you decide whether a cheaper model is worth the accuracy loss.",
+    "type": "boolean",
+    "options": [
+      "0=Off",
+      "1=Show token counts"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiDebug": {
+    "label": "AiDebug",
+    "help": "Keep the temporary PNG and write the raw request and response into the Data folder, so a failed call can be inspected.\n\nThe request dump does NOT contain your API key - that rides in a header, not the body - but it DOES contain the base64 image, so the file will be large.\n\nLeave off for normal use.",
+    "type": "boolean",
+    "options": [
+      "0=Off",
+      "1=Write debug files"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipImgur.ImgurConfirmBeforeUpload": {
+    "label": "ImgurConfirmBeforeUpload",
+    "help": "Ask 'are you sure?' before the one-click Imgur > Upload menu item?\n\nAn upload is PUBLIC to anyone with the link, and an anonymous upload can only be deleted during the session that made it - once ScreenSnip exits it is effectively permanent. That is a lot of consequence for one menu click on a snip that might be showing an e-mail or a password field, so this defaults to on.\n\nSwitch it off once the flow feels familiar.",
+    "type": "boolean",
+    "options": [
+      "0=Upload immediately",
+      "1=Confirm first"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipImgur.ImgurDefaultFormat": {
+    "label": "ImgurDefaultFormat",
+    "help": "Link format placed on the clipboard by the one-click upload, and pre-selected in the Uploader's 'Copy as' dropdown.\n\nImgur's API returns a link to the image's PAGE, which carries a nav bar. Forum [img] tags and HTML img tags need the DIRECT file, which is derived from the response's id and type fields.\n\n'BBCode thumbnail linked' uses Imgur's 640x640 thumbnail so a big screenshot does not blow out a forum thread's layout. Note that Imgur's thumbnails of an animated image are STILL frames, so you get a motionless preview linking through to the moving version.\n\nThe last two options only mean anything for an animated upload. On a still image they quietly fall back to the direct link rather than handing back a URL to a video that does not exist.",
+    "type": "list",
+    "validation": "Direct link|BBCode [img]|BBCode thumbnail linked|Markdown|HTML img tag|Page link|Direct MP4  (animated only)|HTML5 video tag  (animated only)",
+    "default": "BBCode [img]",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipImgur.ImgurProgressDelayMs": {
+    "label": "ImgurProgressDelayMs",
+    "help": "Milliseconds an upload must run before the small progress and Cancel window appears.\n\nSmall uploads finish faster than this and never flash a dialog at you.",
+    "type": "integer",
+    "min": 0,
+    "max": 5000,
+    "default": "500",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipImgur.ImgurResolveTimeout": {
+    "label": "ImgurResolveTimeout",
+    "help": "WinHttp DNS name-resolution timeout in milliseconds.\n\nThe Imgur timeouts are deliberately much tighter than the AI ones: a stalled upload is more annoying than a slow vision call, and there is a Cancel button behind it.",
+    "type": "integer",
+    "min": 1000,
+    "max": 60000,
+    "default": "8000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipImgur.ImgurConnectTimeout": {
+    "label": "ImgurConnectTimeout",
+    "help": "WinHttp connection timeout in milliseconds - how long to wait to establish the connection to Imgur.",
+    "type": "integer",
+    "min": 1000,
+    "max": 60000,
+    "default": "10000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipImgur.ImgurSendTimeout": {
+    "label": "ImgurSendTimeout",
+    "help": "WinHttp send timeout in milliseconds - how long the upload itself may take.\n\nThe image is posted as a base64 form field, which inflates the payload by roughly a third. Raise this if you upload large animated GIFs over a slow uplink.\n\nThe API caps out around 10 MB on disc regardless - that is the JSON API's limit, not the website's 20 MB.",
+    "type": "integer",
+    "min": 5000,
+    "max": 300000,
+    "default": "30000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipImgur.ImgurReceiveTimeout": {
+    "label": "ImgurReceiveTimeout",
+    "help": "WinHttp receive timeout in milliseconds.\n\nThis is the real ceiling on how long a wedged upload can last if you do not hit Cancel.",
+    "type": "integer",
+    "min": 5000,
+    "max": 300000,
+    "default": "60000",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectEnabled": {
+    "label": "WinDetectEnabled",
+    "help": "Master switch for hover-to-highlight window detection during Freeze Capture, SnagIt style: move the mouse over the frozen screen and the window beneath the cursor is outlined; left-click captures it whole. Right-drag still does the normal freehand region selection, unchanged.\n\nOff means the module stays loaded but never highlights anything, and Freeze Capture behaves exactly as it did before.\n\nHow it works, and why it is not image analysis: the frozen backdrop is only a PICTURE laid over the desktop. The real windows are still sitting underneath at the same coordinates, so the window tree is simply queried - no edge detection on the bitmap required. Because the screen is frozen nothing can move, so the whole top-level window list is snapshotted ONCE when the freeze begins and every mouse-move is then just an in-memory rectangle test.\n\nScope is TOP-LEVEL WINDOWS only, plus each monitor. Child controls are not detected: modern apps such as Chrome, Electron, UWP and WPF draw everything inside a single HWND and would need UI Automation on top of per-control enumeration.",
+    "type": "boolean",
+    "options": [
+      "0=No window detection",
+      "1=Detect windows"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectColor": {
+    "label": "WinDetectColor",
+    "help": "color of the highlight outline drawn around the detected window. Six hex digits RRGGBB with no 0x prefix.\n\nThis needs to read clearly against an arbitrary screenshot. A saturated blue does that better than red or green, both of which disappear into common window chrome.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "1E90FF",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectThickness": {
+    "label": "WinDetectThickness",
+    "help": "Outline thickness in pixels.\n\nAutomatically thinned for windows too small to fit it, so a tiny tooltip still shows an outline rather than a solid block of color.",
+    "type": "integer",
+    "min": 1,
+    "max": 20,
+    "default": "3",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectPollMs": {
+    "label": "WinDetectPollMs",
+    "help": "Cursor poll interval in milliseconds.\n\nThe hit test itself is a memory scan against the snapshot taken when the freeze began, so this is cheap. 40 ms is about 25 fps and feels immediate. Values below 10 are clamped.",
+    "type": "integer",
+    "min": 10,
+    "max": 500,
+    "default": "40",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectMinSize": {
+    "label": "WinDetectMinSize",
+    "help": "Ignore windows smaller than this in either dimension, in pixels.\n\nFilters out the 1x1 and 0x0 message-only oddities that a lot of apps leave lying around, which would otherwise be highlightable targets.",
+    "type": "integer",
+    "min": 1,
+    "max": 200,
+    "default": "16",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectShowInfo": {
+    "label": "WinDetectShowInfo",
+    "help": "Show the floating title, class and size readout beside the cursor while hovering during a Freeze Capture?\n\nUseful for confirming you are about to grab the window you think you are, particularly when several are stacked.",
+    "type": "boolean",
+    "options": [
+      "0=No readout",
+      "1=Show readout"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectTipIndex": {
+    "label": "WinDetectTipIndex",
+    "help": "ToolTip slot number used for the cursor-following window readout.\n\nAHK supports 20 independent tooltip slots. ScreenSnip itself raises no ToolTips of its own, so this only matters if another add-on starts using the same slot and the two overwrite each other.",
+    "type": "integer",
+    "min": 1,
+    "max": 20,
+    "default": "18",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectIncludeDesktop": {
+    "label": "WinDetectIncludeDesktop",
+    "help": "Treat the desktop itself (the Progman and WorkerW windows) as a capture target?\n\nOff by default: the desktop is screen-sized and sits under everything, so including it means the highlight never goes away over empty desktop and Progman swallows hit tests that should have missed.\n\nIf you want a whole-screen target, use WinDetectIncludeMonitors instead - it gets you the same thing without the side effects.",
+    "type": "boolean",
+    "options": [
+      "0=Ignore the desktop",
+      "1=Desktop is a target"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipWinDetect.WinDetectIncludeMonitors": {
+    "label": "WinDetectIncludeMonitors",
+    "help": "Offer each MONITOR as a capture target as well as the windows?\n\nMonitors are appended AFTER the windows, so they sit at the bottom of the Z-ordered candidate list. That gives you three good properties at once: a real window under the cursor always wins, a whole screen is always one wheel-step past the last window, and empty desktop still has something to highlight - all without switching WinDetectIncludeDesktop on.\n\nCaptures full monitor bounds, taskbar included.",
+    "type": "boolean",
+    "options": [
+      "0=Windows only",
+      "1=Windows and monitors"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.GridCols": {
+    "label": "GridCols",
+    "help": "Columns the snip is cut into when a puzzle is started from the Play item at the top of the Slide Puzzle or Swap Puzzle submenu.\n\nThe explicit sizes on that submenu (3 x 3 through 6 x 6) ignore this, as does Custom Size. This is only the default the Play item uses, and the size a puzzle returns to if you have not chosen otherwise.\n\nClamped to 2 through 12 in code, whatever is typed here.",
+    "type": "integer",
+    "min": 2,
+    "max": 12,
+    "default": "4",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.GridRows": {
+    "label": "GridRows",
+    "help": "Rows the snip is cut into. See GridCols - the two are read together and the same notes apply.\n\nRows and columns are independent, so a wide snip can be cut 6 x 3 if that suits it better than a square grid. Clamped to 2 through 12.",
+    "type": "integer",
+    "min": 2,
+    "max": 12,
+    "default": "4",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.MaxBoardSize": {
+    "label": "MaxBoardSize",
+    "help": "Largest the board is allowed to be, measured on its longest side in pixels.\n\n0 means NO CAP, which is the default and almost certainly what you want: a tile puzzle is nothing but the picture, so shrinking it throws away the detail you are matching on. Unlike the jigsaw there is no scatter area to find room for, just a few pixels of window frame.\n\nThe screen is the real limit either way. The board is always fitted to the monitor work area, because an oversized puzzle window cannot be resized once it is open. Set a pixel value here only if you want puzzles smaller than your screen would allow.",
+    "type": "integer",
+    "min": 0,
+    "max": 2000,
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.MinBoardSize": {
+    "label": "MinBoardSize",
+    "help": "Smallest the board may be, on its longest side in pixels. A snip smaller than this is scaled UP to reach it.\n\nThis exists so that a tiny snip - a toolbar button, a few words of text - still produces tiles big enough to click. It costs sharpness, since the picture is being enlarged past its native size, but an unclickable puzzle is worse.\n\nOnly ever enlarges. Snips already larger than this are untouched.",
+    "type": "integer",
+    "min": 100,
+    "max": 1200,
+    "default": "300",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.TileGap": {
+    "label": "TileGap",
+    "help": "Pixels of board color showing between tiles, giving the grid its cut-apart look.\n\nThe gap is taken out of the tile image itself, like the kerf of a saw, so those pixels are not shown anywhere while the puzzle is unsolved. They reappear the moment it is solved, which is why the seams visibly heal at the end.\n\n0 puts the tiles flush together. On a very fine grid over a small snip the gap self-limits to 0 rather than eating the tile.",
+    "type": "integer",
+    "min": 0,
+    "max": 12,
+    "default": "2",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.ShowNumbers": {
+    "label": "ShowNumbers",
+    "help": "Number each tile in its top-left corner, showing where it belongs.\n\nMakes both puzzles markedly easier, and turns a picture puzzle into a logic one. Useful on a snip that is mostly flat color and hard to solve by image alone.\n\nNumbers are baked into the tile images rather than drawn each frame, so toggling this in game (the N key, or the right-click menu) rebuilds the tile set. That takes a few milliseconds and is not noticeable.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.SlideAnimMs": {
+    "label": "SlideAnimMs",
+    "help": "How long a tile takes to travel one cell, in milliseconds. Applies to both puzzles despite the name - it is also the duration of a swap crossover.\n\nAnything below 10 turns the animation off and moves become instant. Worth trying if a very large board feels sluggish: every animation frame rebuilds a bitmap the size of the whole board, so the cost grows with the picture.\n\nAround 90 reads as responsive. Above roughly 200 it starts to feel like the board is waiting for you.",
+    "type": "integer",
+    "min": 0,
+    "max": 400,
+    "default": "90",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.ShuffleMoves": {
+    "label": "ShuffleMoves",
+    "help": "How many slides to make when shuffling a SLIDE puzzle. 0 means auto, which is 25 times the tile count - 400 slides for a 4 x 4.\n\nThe shuffle is made of real, legal slides rather than a random rearrangement, and that is what guarantees the board can be solved. A randomly permuted sliding puzzle is solvable only half the time, because half of all arrangements are unreachable; walking the gap around at random can only ever reach positions it can walk back from.\n\nSetting this low (say 20) gives a nearly-solved board, which is the quickest way to test that the win detection and the fanfare still work.\n\nHas NO effect on the swap puzzle. Adjacent swaps can reach every arrangement, so that one is shuffled by a straight random deal with nothing to tune.",
+    "type": "integer",
+    "min": 0,
+    "max": 2000,
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.BoardColor": {
+    "label": "BoardColor",
+    "help": "color behind the tiles, seen through the gaps between them and in the empty cell of a slide puzzle.\n\nSix hex digits, RRGGBB, with no 0x or # prefix.\n\nA dark neutral works best. The tiles carry a screenshot, so a strong color here competes with the picture rather than framing it. Only visible at all if TileGap is above 0.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "1E1E1E",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.TileOutline": {
+    "label": "TileOutline",
+    "help": "Draw a hairline edge around each tile - a touch of dark on the outside and a touch of light just inside it, a cheap bevel.\n\nWorth keeping on. Without it, adjacent tiles showing similar parts of the picture merge into one another and the grid becomes hard to read, especially with TileGap at 0 or 1.\n\nBaked into the tile images, so this is read when the tiles are built.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.SelectColor": {
+    "label": "SelectColor",
+    "help": "color of the ring around the picked-up tile in the SWAP puzzle. Unused by the slide puzzle, which has no selection.\n\nSix hex digits, RRGGBB, with no 0x or # prefix.\n\nThe ring is drawn as four nested rectangles - a bright core with darker lines outside and inside it - so it stays visible over both pale and dark tiles. Keep whatever you choose saturated: a mid grey would vanish against half the snips you might play.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "FFC24B",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.CloseSnipOnStart": {
+    "label": "CloseSnipOnStart",
+    "help": "Close the snip when a puzzle is made from it, so the snip appears to turn into the puzzle.\n\nOff by default, and off is the kinder setting: the snip stays open beside the board as your reference picture. The puzzle window deliberately opens offset down and right so it does not cover it.\n\nTurning this on is not punishing - hold Space or use the Peek button to see the finished picture at any time - but the snip itself is gone for good.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.SoundOnSolve": {
+    "label": "SoundOnSolve",
+    "help": "Play a three-note fanfare when the puzzle is solved.\n\nUses SoundBeep, so it comes from the motherboard speaker path rather than the sound card and ignores your volume mixer. It fires on its own thread so the board is already repainted when it plays.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Puzzle.AlwaysOnTop": {
+    "label": "AlwaysOnTop",
+    "help": "Keep the puzzle window above other windows.\n\nOn by default, on the reasoning that a puzzle is something you dip into between other work and losing it behind a browser is annoying. Turn it off if you would rather it behaved like an ordinary window.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.PieceCount": {
+    "label": "PieceCount",
+    "help": "Default number of pieces, used by the Play item at the top of the Jigsaw submenu. The explicit counts on that submenu ignore this.\n\nThe number is a target, not a promise. It is turned into a grid that respects the snip's shape, so pieces come out roughly square instead of long slivers on a wide screenshot - ask for 48 on a landscape snip and you get 8 x 6, on a portrait one 6 x 8. The window title reports the count you actually got.\n\nClamped to 12 through 300.",
+    "type": "integer",
+    "min": 12,
+    "max": 300,
+    "default": "48",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.MaxBoardSize": {
+    "label": "MaxBoardSize",
+    "help": "Largest the assembled picture is allowed to be, on its longest side in pixels. This is the PICTURE, not the window - the table around it is set by CanvasScale.\n\n0 means no cap of its own, which is the default: the picture is made as large as the screen allows once the scatter area has been accounted for. The window is always fitted to the monitor work area, since an oversized jigsaw window cannot be resized once it is open.\n\nThe picture is never scaled UP beyond its native size to fill the canvas - enlarging a screenshot just makes a blurry puzzle. MinBoardSize still rescues genuinely tiny snips.",
+    "type": "integer",
+    "min": 0,
+    "max": 2000,
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.MinBoardSize": {
+    "label": "MinBoardSize",
+    "help": "Smallest the assembled picture may be, on its longest side in pixels. A snip smaller than this is scaled up to reach it.\n\nSame purpose as the tile puzzle's version: a tiny snip cut into 48 pieces would otherwise produce pieces too small to grab. Only ever enlarges.",
+    "type": "integer",
+    "min": 100,
+    "max": 1200,
+    "default": "280",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.CanvasScale": {
+    "label": "CanvasScale",
+    "help": "Size of the table, as a percentage of the assembled picture. At 180 the gutter around the picture is 40 percent of its width on each side.\n\nBecause the window is always fitted to the screen, this is now purely a dial trading table space against picture size: a bigger gutter means a smaller picture, and a smaller gutter means the picture can be larger. On a 1080p screen a landscape snip lands near 52 percent of its original size at 180, and near 67 percent at 140.\n\nYou need less dedicated storage than a physical jigsaw, because the opening scatter spreads pieces across the whole canvas including the assembly area rather than heaping them round the edge. 140 to 150 is a good starting point if you want more picture.\n\nClamped to 110 through 280.",
+    "type": "integer",
+    "min": 110,
+    "max": 280,
+    "default": "180",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.SnapPixels": {
+    "label": "SnapPixels",
+    "help": "How close two pieces must be, in pixels, before they snap together. 0 means auto, which is a sixth of a piece with a floor of 10.\n\nSnapping compares TRANSLATIONS, not absolute positions: every piece knows where it belongs in the finished picture, and two pieces are correctly placed relative to each other exactly when their offsets from home match. So the assembly can be built anywhere on the table and pieces never snap to the frame, only to each other.\n\nResist setting this very low. A few pixels reads as broken - you line something up by eye, let go, and nothing happens. Auto is deliberately generous enough to feel magnetic.",
+    "type": "integer",
+    "min": 0,
+    "max": 80,
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.KnobDepth": {
+    "label": "KnobDepth",
+    "help": "Height of the tab on a piece edge, as a percentage of that edge's length.\n\nAround 22 is the classic jigsaw look. Lower gives shallow, timid tabs that are hard to read; higher gives long-necked pieces that overlap their neighbours heavily when scattered.\n\nEvery interior edge also gets random jitter on the tab's direction, position and size, which is what stops every piece looking identical. Edges are generated once per puzzle and each is shared by the two pieces that meet along it, so a tab and its socket are literally the same curve and cannot disagree.\n\nClamped to 8 through 40. Also sets how much bigger than its cell a piece bitmap has to be, so very large values cost memory.",
+    "type": "integer",
+    "min": 8,
+    "max": 40,
+    "default": "22",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.PieceOutline": {
+    "label": "PieceOutline",
+    "help": "Stroke a hairline outline around each piece.\n\nWorth keeping on for a reason beyond looks: GDI+ clipping is not anti-aliased, so the cut edge of a piece comes out slightly jagged. Stroking the same path over it hides that, as well as separating pieces that overlap on the table.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.ShowBoardOutline": {
+    "label": "ShowBoardOutline",
+    "help": "Draw a faint frame on the table showing where the finished picture will sit.\n\nNot authentic - a real jigsaw has no such guide - but a table with no box lid and no edges is disorienting. Pieces do not snap to it and you are free to assemble anywhere; it is only a hint.\n\nCan be toggled in game with the F key. The frame switches from a white hairline to a black one when the felt is light, so it stays visible either way.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.FeltColor": {
+    "label": "FeltColor",
+    "help": "color of the table the pieces lie on.\n\nSix hex digits, RRGGBB, with no 0x or # prefix.\n\nThis sets the HUE and the starting position of the Felt slider on the puzzle's toolbar. That slider walks this same color from black up to its own fully-lit version, so a dark blue-grey here gives you a range of dark blue-greys rather than a wash toward white.\n\nThe slider is session-only and does not write back here. To keep a setting you like, read the color off it and enter it here - the slider's midpoint on the default hue is around 283440.\n\nSomething dark and desaturated works best. The pieces carry a screenshot, and a strong table color fights it.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "141A20",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.SoundOnSnap": {
+    "label": "SoundOnSnap",
+    "help": "Play a short click when pieces join.\n\nThe main feedback that a join actually took, since a correct snap can be a small visual movement. Uses SoundBeep, so it ignores your volume mixer - turn it off if that is intrusive.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.SoundOnSolve": {
+    "label": "SoundOnSolve",
+    "help": "Play a three-note fanfare when the last pieces join.\n\nSeparate from SoundOnSnap, so you can keep the completion sound while turning off the per-join click.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.AlwaysOnTop": {
+    "label": "AlwaysOnTop",
+    "help": "Keep the jigsaw window above other windows.\n\nOn by default. A jigsaw is a longer sitting than a tile puzzle, so this is the one most likely to be worth turning off if you want to park it behind something and come back to it.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Jigsaw.CloseSnipOnStart": {
+    "label": "CloseSnipOnStart",
+    "help": "Close the snip when a jigsaw is made from it.\n\nOff by default so the snip stays open as your reference picture, which matters more here than in the tile puzzles - a jigsaw has no grid to reason about, only the image. Hold Space or use the Peek button to see the finished picture at any time.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  }
+}

@@ -66,7 +66,7 @@ class WinDetectCfg {
     ; anything, and freeze capture behaves exactly as it did before.
     static Enabled := SnipCfg('SnipWinDetect', 'WinDetectEnabled', true)
 
-    ; Outline colour, hex RRGGBB.  Wants to read clearly against an arbitrary
+    ; Outline color, hex RRGGBB.  Wants to read clearly against an arbitrary
     ; screenshot; a saturated blue does that better than red or green, both of
     ; which disappear into common window chrome.
     static Color := SnipCfg('SnipWinDetect', 'WinDetectColor', '1E90FF')
