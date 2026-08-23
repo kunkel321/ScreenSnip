@@ -3,6 +3,7 @@
 ;
 ;                             SnipPuzzle.ahk
 ;               A sliding-tile puzzle made from any ScreenSnip
+;                        Version Date: 8-22-2026 
 ;
 ; An optional add-on module for ScreenSnip.ahk.  Lives in  Resources\  and is
 ; pulled in by the  #Include *i  block at the bottom of ScreenSnip.ahk, on the
@@ -40,7 +41,10 @@
 ;   [Puzzle]                 type     default   what it does
 ;   GridCols                 int      4         default columns (2-12)
 ;   GridRows                 int      4         default rows (2-12)
-;   MaxBoardSize             int      620       longest board side, px
+;   MaxBoardSize             int      0         0 = play at the snip's own
+;                                                 size, limited only by the
+;                                                 screen.  Set a number of px to
+;                                                 cap the longest side instead.
 ;   MinBoardSize             int      300       small snips scale UP to this
 ;   TileGap                  int      2         px of board colour between tiles
 ;   ShowNumbers              bool     1         bake tile numbers into the tiles
@@ -91,7 +95,7 @@
 class PuzzleCfg {
     static Cols       := SnipCfg('Puzzle', 'GridCols',         4)
     static Rows       := SnipCfg('Puzzle', 'GridRows',         4)
-    static MaxBoard   := SnipCfg('Puzzle', 'MaxBoardSize',   620)
+    static MaxBoard   := SnipCfg('Puzzle', 'MaxBoardSize',     0)
     static MinBoard   := SnipCfg('Puzzle', 'MinBoardSize',   300)
     static Gap        := SnipCfg('Puzzle', 'TileGap',          2)
     static Numbers    := SnipCfg('Puzzle', 'ShowNumbers',      1)
@@ -99,6 +103,7 @@ class PuzzleCfg {
     static Shuffle    := SnipCfg('Puzzle', 'ShuffleMoves',     0)
     static BoardColor := SnipCfgHex('Puzzle', 'BoardColor', 0x1E1E1E)
     static Outline    := SnipCfg('Puzzle', 'TileOutline',      1)
+    static SelColor   := SnipCfgHex('Puzzle', 'SelectColor', 0xFFC24B)
     static CloseSnip  := SnipCfg('Puzzle', 'CloseSnipOnStart', 0)
     static WinSound   := SnipCfg('Puzzle', 'SoundOnSolve',     1)
     static OnTop      := SnipCfg('Puzzle', 'AlwaysOnTop',      1)
@@ -118,41 +123,61 @@ class PuzzleState {
 ; MENU
 ; ══════════════════════════════════════════════════════════════════════════════
 
-; Builds the "Puzzle" submenu for the snip context menu.  Called by name from
-; ScreenSnip.ahk via the %name%() dynamic form, so a missing module is a
-; non-event rather than a load-time error.
-PuzzleBuildMenu() {
+; Builds the size submenu for the snip context menu.  There are two of these —
+; one per puzzle mode — and ScreenSnip calls each by name via the %name%() form,
+; so a missing module is a non-event rather than a load-time error.
+;
+; Both submenus are identical apart from which handler they carry, and the
+; handler is the only thing that knows the mode.  That keeps the mode out of the
+; item text, so the grid sizes stay comparable between the two.
+PuzzleBuildSlideMenu() {
+    return PuzzleBuildSizeMenu(PuzzleSlideMenu_Handler)
+}
+
+PuzzleBuildSwapMenu() {
+    return PuzzleBuildSizeMenu(PuzzleSwapMenu_Handler)
+}
+
+PuzzleBuildSizeMenu(handler) {
     m := Menu()
-    m.Add('Play  (' PuzzleCfg.Cols ' x ' PuzzleCfg.Rows ')', PuzzleSnipMenu_Handler)
+    m.Add('Play  (' PuzzleCfg.Cols ' x ' PuzzleCfg.Rows ')', handler)
     m.Add()
-    m.Add('3 x 3   easy',   PuzzleSnipMenu_Handler)
-    m.Add('4 x 4',          PuzzleSnipMenu_Handler)
-    m.Add('5 x 5',          PuzzleSnipMenu_Handler)
-    m.Add('6 x 6   hard',   PuzzleSnipMenu_Handler)
+    m.Add('3 x 3   easy',   handler)
+    m.Add('4 x 4',          handler)
+    m.Add('5 x 5',          handler)
+    m.Add('6 x 6   hard',   handler)
     m.Add()
-    m.Add('Custom Size…',   PuzzleSnipMenu_Handler)
+    m.Add('Custom Size…',   handler)
     return m
 }
 
-; Items on that submenu.  The snip to play is the one ScreenSnip stashed on the
-; menu object when it opened it — the same _targetHwnd every other snip-menu
+PuzzleSlideMenu_Handler(ItemName, *) {
+    PuzzleMenuPick(ItemName, 'slide')
+}
+
+PuzzleSwapMenu_Handler(ItemName, *) {
+    PuzzleMenuPick(ItemName, 'swap')
+}
+
+; Items on those submenus.  The snip to play is the one ScreenSnip stashed on
+; the menu object when it opened it — the same _targetHwnd every other snip-menu
 ; item reads.
-PuzzleSnipMenu_Handler(ItemName, *) {
+PuzzleMenuPick(ItemName, mode) {
     global SnipMenu
     hwnd := SnipMenu._targetHwnd
     base := StrSplit(ItemName, "`t")[1]
 
     if InStr(base, 'Custom') {
-        if !PuzzleAskSize(PuzzleCfg.Cols, PuzzleCfg.Rows, &c, &r)
+        if !PuzzleAskSize(PuzzleCfg.Cols, PuzzleCfg.Rows, &c, &r, PuzzleSnipGui(hwnd))
             return
-        PuzzlePlay(hwnd, c, r)
+        PuzzlePlay(hwnd, mode, c, r)
         return
     }
     ; "4 x 4", "6 x 6   hard", "Play  (4 x 4)" — all yield their two numbers.
     if RegExMatch(base, '(\d+)\D+(\d+)', &m)
-        PuzzlePlay(hwnd, Integer(m[1]), Integer(m[2]))
+        PuzzlePlay(hwnd, mode, Integer(m[1]), Integer(m[2]))
     else
-        PuzzlePlay(hwnd, PuzzleCfg.Cols, PuzzleCfg.Rows)
+        PuzzlePlay(hwnd, mode, PuzzleCfg.Cols, PuzzleCfg.Rows)
 }
 
 ; The puzzle window's own right-click menu.  One shared Menu with a _target
@@ -171,7 +196,9 @@ PuzzleLbl(key) {
       , 'numbers', 'Show Numbers`tN'
       , 'undo',    'Undo`tCtrl+Z'
       , 'help',    'Help`tF1'
-      , 'close',   'Close`tEsc')
+      , 'close',   'Close`tEsc'
+      , 'slide',   'Slide Puzzle'
+      , 'swap',    'Swap Puzzle')
     return L[key]
 }
 
@@ -188,16 +215,25 @@ PuzzleMenuObj() {
     sizes.Add()
     sizes.Add('Custom…', PuzzleCtxMenu_Handler)
 
+    ; Switching type mid-game rebuilds around the same picture and grid, so you
+    ; can bail out of a slide puzzle you've made a mess of without going back to
+    ; the snip and starting over.
+    types := Menu()
+    types.Add(PuzzleLbl('slide'), PuzzleCtxMenu_Handler)
+    types.Add(PuzzleLbl('swap'),  PuzzleCtxMenu_Handler)
+
     m := Menu()
     m.Add(PuzzleLbl('shuffle'), PuzzleCtxMenu_Handler)
     m.Add(PuzzleLbl('peek'),    PuzzleCtxMenu_Handler)   ; checkable
     m.Add(PuzzleLbl('numbers'), PuzzleCtxMenu_Handler)   ; checkable
     m.Add('Grid Size', sizes)
+    m.Add('Puzzle Type', types)
     m.Add()
     m.Add(PuzzleLbl('undo'),    PuzzleCtxMenu_Handler)
     m.Add()
     m.Add(PuzzleLbl('help'),    PuzzleCtxMenu_Handler)
     m.Add(PuzzleLbl('close'),   PuzzleCtxMenu_Handler)
+    m._types := types                    ; kept for the radio check on show
     return m
 }
 
@@ -214,14 +250,16 @@ PuzzleCtxMenu_Handler(ItemName, *) {
         case 'Show Numbers':     PuzzleToggleNumbers(P)
         case 'Undo':             PuzzleUndo(P)
         case 'Help':             PuzzleShowHelp(P)
-        case 'Close':            PuzzleDestroy(P)
-        case '3 x 3':            PuzzleResize(P, 3, 3)
-        case '4 x 4':            PuzzleResize(P, 4, 4)
-        case '5 x 5':            PuzzleResize(P, 5, 5)
-        case '6 x 6':            PuzzleResize(P, 6, 6)
+        case 'Close':            PuzzleConfirmClose(P)
+        case '3 x 3':            PuzzleRebuild(P, P.Mode, 3, 3)
+        case '4 x 4':            PuzzleRebuild(P, P.Mode, 4, 4)
+        case '5 x 5':            PuzzleRebuild(P, P.Mode, 5, 5)
+        case '6 x 6':            PuzzleRebuild(P, P.Mode, 6, 6)
+        case 'Slide Puzzle':     PuzzleRebuild(P, 'slide', P.Cols, P.Rows)
+        case 'Swap Puzzle':      PuzzleRebuild(P, 'swap',  P.Cols, P.Rows)
         case 'Custom…':
-            if PuzzleAskSize(P.Cols, P.Rows, &c, &r)
-                PuzzleResize(P, c, r)
+            if PuzzleAskSize(P.Cols, P.Rows, &c, &r, P.Gui)
+                PuzzleRebuild(P, P.Mode, c, r)
     }
 }
 
@@ -248,12 +286,30 @@ PuzzleShowMenu(GuiObj, *) {
         m.Enable(PuzzleLbl('undo'))
     else
         m.Disable(PuzzleLbl('undo'))
+
+    t := m._types
+    if (P.Mode = 'swap') {
+        t.Check(PuzzleLbl('swap'))
+        t.UnCheck(PuzzleLbl('slide'))
+    } else {
+        t.Check(PuzzleLbl('slide'))
+        t.UnCheck(PuzzleLbl('swap'))
+    }
     m.Show()
 }
 
 ; Ask for a grid size.  Accepts "4x3", "4 x 3", "4,3" or a bare "5" (square).
 ; Returns false when cancelled or unparseable, leaving the outputs untouched.
-PuzzleAskSize(defCols, defRows, &cols, &rows) {
+; Own the dialog, or it opens BEHIND the snip.
+;
+; +OwnDialogs is per-THREAD, not per-Gui: setting it in the Gui() options only
+; affects the thread that created the window.  A menu handler is a new thread,
+; so it has to be asked for again here — otherwise the InputBox is unowned,
+; and an unowned dialog loses to the snip's +AlwaysOnTop and hides behind it.
+PuzzleAskSize(defCols, defRows, &cols, &rows, owner := 0) {
+    if IsObject(owner) {
+        try owner.Opt('+OwnDialogs')
+    }
     ib := InputBox('Grid size, as  columns x rows.'
                  . '`n`nEach side 2 to 12.  A single number makes it square.'
                  , 'Snip Puzzle', 'w320 h150', defCols 'x' defRows)
@@ -282,7 +338,17 @@ PuzzleAskSize(defCols, defRows, &cols, &rows) {
 ; showing — so what you play is what you were looking at.  That copy is OURS
 ; from here on: the snip can be closed, panned, resized or rotated afterwards
 ; without disturbing a game in progress.
-PuzzlePlay(snipHwnd, cols := 0, rows := 0) {
+; The Gui object behind a snip window, for use as a dialog owner.  Returns 0
+; when the snip has gone, which the callers treat as "no owner".
+PuzzleSnipGui(snipHwnd) {
+    global guiSnips
+    if !guiSnips.Has(snipHwnd)
+        return 0
+    try return guiSnips[snipHwnd].GuiObj
+    return 0
+}
+
+PuzzlePlay(snipHwnd, mode := 'slide', cols := 0, rows := 0) {
     global guiSnips
     if !guiSnips.Has(snipHwnd)
         return
@@ -293,6 +359,9 @@ PuzzlePlay(snipHwnd, cols := 0, rows := 0) {
 
     orig := BuildDisplayBitmap(snip)     ; caller owns and must dispose
     if !orig {
+        if (og := PuzzleSnipGui(snipHwnd)) {
+            try og.Opt('+OwnDialogs')
+        }
         MsgBox('Could not read the snip image.', 'Snip Puzzle', 4096)
         return
     }
@@ -309,13 +378,13 @@ PuzzlePlay(snipHwnd, cols := 0, rows := 0) {
     if PuzzleCfg.CloseSnip
         CloseSnip(snipHwnd)
 
-    PuzzleCreate(orig, cols, rows, x, y)
+    PuzzleCreate(orig, mode, cols, rows, x, y)
 }
 
 ; Build a whole game around an image.  TAKES OWNERSHIP of pOrig — it is disposed
 ; with the game, and every derived bitmap is rebuilt from it, which is what
 ; makes a mid-game grid change possible without going back to the snip.
-PuzzleCreate(pOrig, cols, rows, x := '', y := '') {
+PuzzleCreate(pOrig, mode, cols, rows, x := '', y := '') {
     PuzzleHookOnce()
 
     DllCall('gdiplus\GdipGetImageWidth',  'Ptr', pOrig, 'UInt*', &sw := 0)
@@ -331,12 +400,28 @@ PuzzleCreate(pOrig, cols, rows, x := '', y := '') {
     ; something clickable.  Then FLOOR the tile size and derive the board from
     ; it, rather than the other way round — integer tiles mean no half-pixel
     ; seams and no rounding drift across a 6-wide grid.
+    ; The board wants to be the snip's OWN size.  A tile puzzle is nothing but
+    ; the picture, so shrinking it throws away the detail you are matching on —
+    ; and unlike the jigsaw there is no gutter to find room for, just a few
+    ; pixels of window frame.  So MaxBoardSize defaults to 0, meaning "no cap",
+    ; and the screen does the limiting.
     longest := Max(sw, sh)
     scale   := 1.0
-    if (longest > PuzzleCfg.MaxBoard)
+    if (PuzzleCfg.MaxBoard > 0 && longest > PuzzleCfg.MaxBoard)
         scale := PuzzleCfg.MaxBoard / longest
     else if (longest < PuzzleCfg.MinBoard)
         scale := PuzzleCfg.MinBoard / longest
+
+    ; Fit the work area, since an oversized window can't be resized once it is
+    ; up.  The reserves below are the actual chrome: window border and GUI
+    ; margins across, plus title bar and the button row down.
+    MonitorGetWorkArea( , &wkL, &wkT, &wkR, &wkB)
+    availW := (wkR - wkL) - 46
+    availH := (wkB - wkT) - 128
+    prelimW := sw * scale
+    prelimH := sh * scale
+    if (prelimW > availW || prelimH > availH)
+        scale *= Min(availW / Max(1, prelimW), availH / Max(1, prelimH))
 
     tileW := Max(16, Floor(sw * scale / cols))
     tileH := Max(16, Floor(sh * scale / rows))
@@ -362,8 +447,9 @@ PuzzleCreate(pOrig, cols, rows, x := '', y := '') {
           , 'Float', A_ScreenDPI + 0.0, 'Float', A_ScreenDPI + 0.0)
 
     ; ── Window ────────────────────────────────────────────────────────────────
+    mode := (mode = 'swap') ? 'swap' : 'slide'
     opts := '-MaximizeBox +OwnDialogs' (PuzzleCfg.OnTop ? ' +AlwaysOnTop' : '')
-    g := Gui(opts, 'Snip Puzzle   ' cols ' x ' rows)
+    g := Gui(opts, 'Snip Puzzle   ' (mode = 'swap' ? 'Swap' : 'Slide') '   ' cols ' x ' rows)
     g.MarginX := 10, g.MarginY := 10
 
     ; Seed the control with a real (blank) board so it has something to size
@@ -392,23 +478,24 @@ PuzzleCreate(pOrig, cols, rows, x := '', y := '') {
     bHelp := g.Add('Button', 'x+6 yp w26 h26', '?')
 
     P := { Gui: g, Hwnd: g.Hwnd, Pic: pic, Stats: stats, PeekBtn: bPeek
+         , Mode: mode
          , Cols: cols, Rows: rows, TileW: tileW, TileH: tileH
          , BoardW: boardW, BoardH: boardH, Gap: Max(0, PuzzleCfg.Gap)
          , ClientW: boardW, ClientH: boardH
          , TileDrawW: tileW, TileDrawH: tileH
          , Orig: pOrig, Img: pImg, Back: pBack, Gfx: gBack, TileBmp: Map()
-         , Tiles: [], Blank: cols * rows, History: []
+         , Tiles: [], Blank: cols * rows, Sel: 0, History: []
          , Moves: 0, StartTick: 0, Elapsed: 0
          , Solved: false, Busy: false, Peeking: false, PeekLock: false
          , Numbers: PuzzleCfg.Numbers ? true : false
-         , AnimSet: 0, AnimOrder: 0, AnimDX: 0, AnimDY: 0
+         , AnimSet: 0, AnimOrder: 0, AnimProg: 0
          , Ticker: 0 }
 
     bShuf.OnEvent('Click', (*) => PuzzleNewGame(P))
     bPeek.OnEvent('Click', (*) => PuzzleTogglePeek(P))
     bHelp.OnEvent('Click', (*) => PuzzleShowHelp(P))
-    g.OnEvent('Close',       (*) => PuzzleDestroy(P))
-    g.OnEvent('Escape',      (*) => PuzzleDestroy(P))
+    g.OnEvent('Close',       (*) => PuzzleConfirmClose(P))
+    g.OnEvent('Escape',      (*) => PuzzleConfirmClose(P))
     g.OnEvent('ContextMenu', PuzzleShowMenu)
 
     PuzzleState.Games[g.Hwnd]  := P
@@ -485,7 +572,10 @@ PuzzleBuildTiles(P) {
     th := P.TileH - P.Gap * 2
 
     n := P.Cols * P.Rows
-    Loop n - 1 {
+    ; Slide mode removes one tile to make the gap; swap mode keeps all of them,
+    ; since there is nowhere for a tile to slide INTO — you trade places instead.
+    highest := (P.Mode = 'swap') ? n : n - 1
+    Loop highest {
         t  := A_Index
         sx := Mod(t - 1, P.Cols) * P.TileW + P.Gap
         sy := ((t - 1) // P.Cols) * P.TileH + P.Gap
@@ -534,10 +624,17 @@ PuzzleNewGame(P, paint := true) {
         return
     n := P.Cols * P.Rows
     P.Tiles := []
-    Loop n - 1
-        P.Tiles.Push(A_Index)
-    P.Tiles.Push(0)                      ; blank in the bottom-right
-    P.Blank   := n
+    if (P.Mode = 'swap') {
+        Loop n
+            P.Tiles.Push(A_Index)        ; every cell filled; no gap
+        P.Blank := 0
+    } else {
+        Loop n - 1
+            P.Tiles.Push(A_Index)
+        P.Tiles.Push(0)                  ; blank in the bottom-right
+        P.Blank := n
+    }
+    P.Sel     := 0
     P.History := []
     P.Moves   := 0
     P.StartTick := 0                     ; clock starts on the first real move
@@ -571,6 +668,10 @@ PuzzleNewGame(P, paint := true) {
 ; `last` blocks the immediate reversal — without it the blank does a drunkard's
 ; walk and tends to wander back toward where it started.
 PuzzleShuffleBoard(P) {
+    if (P.Mode = 'swap') {
+        PuzzleShuffleSwap(P)
+        return
+    }
     n     := P.Cols * P.Rows
     moves := (PuzzleCfg.Shuffle > 0) ? PuzzleCfg.Shuffle : n * 25
     last  := 0
@@ -597,6 +698,36 @@ PuzzleShuffleBoard(P) {
     ; sad way to start.
     if PuzzleIsSolved(P)
         PuzzleCommit(P, PuzzleNeighbors(P)[1])
+}
+
+; Swap mode gets a straight Fisher-Yates shuffle, and that is not a shortcut —
+; it is a genuine difference between the two puzzles.
+;
+; Adjacent transpositions generate the whole symmetric group, so EVERY
+; permutation of a swap board is reachable and therefore solvable.  The parity
+; trap that forces the slide puzzle to shuffle by legal moves simply doesn't
+; exist here: half of all slide arrangements are impossible, none of the swap
+; ones are.  So we can deal the tiles out at random and be done.
+PuzzleShuffleSwap(P) {
+    n := P.Cols * P.Rows
+    ; Fisher-Yates, walking down and swapping each cell with a random earlier
+    ; one.  Uniform over all n! arrangements, unlike the "swap two at random,
+    ; lots of times" approach, which is subtly biased.
+    i := n
+    while (i > 1) {
+        j := Random(1, i)
+        t := P.Tiles[i]
+        P.Tiles[i] := P.Tiles[j]
+        P.Tiles[j] := t
+        i--
+    }
+    ; A shuffle can land on solved, or leave a board where nothing moved.  Both
+    ; are legal and both are a dull way to start, so nudge it.
+    if PuzzleIsSolved(P) {
+        t := P.Tiles[1]
+        P.Tiles[1] := P.Tiles[2]
+        P.Tiles[2] := t
+    }
 }
 
 ; Cell indices orthogonally adjacent to the blank.
@@ -631,8 +762,11 @@ PuzzleRC(P, idx, &r, &c) {
     c := Mod(idx - 1, P.Cols) + 1
 }
 
+; Solved when every tile sits on its home cell.  Slide mode checks all but the
+; last cell, because that one holds the blank; swap mode checks all of them.
 PuzzleIsSolved(P) {
-    Loop P.Cols * P.Rows - 1
+    n := P.Cols * P.Rows
+    Loop (P.Mode = 'swap') ? n : n - 1
         if (P.Tiles[A_Index] != A_Index)
             return false
     return true
@@ -679,7 +813,7 @@ PuzzleSlide(P, cell, animate := true) {
 
     P.Busy := true
     if (animate && PuzzleCfg.AnimMs >= 10)
-        PuzzleAnimate(P, cells, dx, dy)
+        PuzzleAnimate(P, cells, PuzzleDeltas(cells, dx * P.TileW, dy * P.TileH))
     P.Busy := false
 
     if !PuzzleState.Games.Has(P.Hwnd)     ; closed mid-animation
@@ -724,10 +858,117 @@ PuzzleCommit(P, cell) {
     P.Blank := cell
 }
 
+; ── Swap mode ─────────────────────────────────────────────────────────────────
+
+; Swap the tiles in two orthogonally adjacent cells.  Returns true if it
+; happened.  This is the whole rule set of the swap puzzle: no gap, no sliding
+; group, just two neighbours trading places.
+PuzzleSwap(P, a, b, animate := true, record := true) {
+    if (P.Busy || P.Solved || P.Peeking || P.PeekLock)
+        return false
+    n := P.Cols * P.Rows
+    if (a < 1 || b < 1 || a > n || b > n || a = b)
+        return false
+    if !PuzzleAdjacent(P, a, b)
+        return false
+
+    P.Busy := true
+    if (animate && PuzzleCfg.AnimMs >= 10) {
+        PuzzleRC(P, a, &ar, &ac)
+        PuzzleRC(P, b, &br, &bc)
+        d := Map()
+        d[a] := { X: (bc - ac) * P.TileW, Y: (br - ar) * P.TileH }
+        d[b] := { X: (ac - bc) * P.TileW, Y: (ar - br) * P.TileH }
+        ; `a` last in the draw order so the tile you picked passes OVER the one
+        ; it is trading with, rather than disappearing under it.
+        PuzzleAnimate(P, [b, a], d)
+    }
+    P.Busy := false
+
+    if !PuzzleState.Games.Has(P.Hwnd)      ; closed mid-animation
+        return false
+
+    t := P.Tiles[a]
+    P.Tiles[a] := P.Tiles[b]
+    P.Tiles[b] := t
+
+    if record {
+        P.History.Push({ A: a, B: b })
+        P.Moves += 1
+        if !P.StartTick
+            P.StartTick := A_TickCount
+    }
+    P.Sel := 0                             ; a completed swap clears the pick
+
+    if PuzzleIsSolved(P)
+        PuzzleWin(P)
+    else {
+        PuzzleUpdateStats(P)
+        PuzzleRender(P)
+    }
+    return true
+}
+
+; Orthogonal neighbours only — diagonals are not a move.
+PuzzleAdjacent(P, a, b) {
+    PuzzleRC(P, a, &ar, &ac)
+    PuzzleRC(P, b, &br, &bc)
+    return (Abs(ar - br) + Abs(ac - bc)) = 1
+}
+
+; A click in swap mode.  With nothing picked, the click picks.  With something
+; picked: the same cell un-picks, an adjacent cell completes the swap, and
+; anything else MOVES the pick rather than rejecting the click — misjudging
+; which tiles are adjacent is the commonest slip, and silently doing nothing
+; would just feel broken.
+PuzzleSwapClick(P, cell) {
+    if (P.Busy || P.Solved || P.Peeking || P.PeekLock)
+        return
+    if !P.Sel {
+        P.Sel := cell
+        PuzzleRender(P)
+        return
+    }
+    if (cell = P.Sel) {
+        P.Sel := 0
+        PuzzleRender(P)
+        return
+    }
+    if PuzzleAdjacent(P, P.Sel, cell) {
+        PuzzleSwap(P, P.Sel, cell)
+        return
+    }
+    P.Sel := cell
+    PuzzleRender(P)
+}
+
 ; Arrow keys.  The direction is the direction the TILE travels, which is the
 ; convention every sliding puzzle uses and the opposite of "move the gap":
 ; press Left and the tile to the RIGHT of the gap comes left into it.
+;
+; In swap mode the same key means "trade the picked tile with its neighbour that
+; way", and the pick follows the tile, so holding a direction walks a tile
+; across the board one trade at a time.  With nothing picked yet, the first
+; arrow just picks the top-left cell to give you something to steer.
 PuzzleArrow(P, dx, dy) {
+    if (P.Mode = 'swap') {
+        if !P.Sel {
+            P.Sel := 1
+            PuzzleRender(P)
+            return
+        }
+        PuzzleRC(P, P.Sel, &sr, &sc)
+        r := sr + dy, c := sc + dx
+        if (r < 1 || r > P.Rows || c < 1 || c > P.Cols)
+            return
+        target := PuzzleIdx(P, r, c)
+        keep   := target                   ; where the picked tile ends up
+        if PuzzleSwap(P, P.Sel, target) {
+            P.Sel := keep
+            PuzzleRender(P)
+        }
+        return
+    }
     PuzzleRC(P, P.Blank, &br, &bc)
     r := br - dy, c := bc - dx
     if (r < 1 || r > P.Rows || c < 1 || c > P.Cols)
@@ -735,17 +976,25 @@ PuzzleArrow(P, dx, dy) {
     PuzzleSlide(P, PuzzleIdx(P, r, c))
 }
 
-; Undo is free, and it is free for a pleasing reason: sliding is its own
-; inverse.  If the gap was at B and you slid the group at C into it, the gap is
-; now at C — and sliding the group at B back is exactly the same operation.  So
-; the history only ever needs the previous blank position.
+; Undo is free in both modes, and it is free for a pleasing reason: each move is
+; its own inverse.  Sliding: if the gap was at B and you slid the group at C into
+; it, sliding the group at B back is the identical operation, so the history only
+; needs the previous blank position.  Swapping: trading two tiles twice puts them
+; back, so the history only needs the pair.
 PuzzleUndo(P) {
     if (P.Busy || P.Solved || !P.History.Length)
         return
     h := P.History.Pop()
-    PuzzleSlideNoRecord(P, h.Blank)
-    P.Moves := Max(0, P.Moves - h.Count)
+    if (P.Mode = 'swap') {
+        PuzzleSwap(P, h.A, h.B, true, false)   ; no record, no move count
+        P.Moves := Max(0, P.Moves - 1)
+        P.Sel := 0
+    } else {
+        PuzzleSlideNoRecord(P, h.Blank)
+        P.Moves := Max(0, P.Moves - h.Count)
+    }
     PuzzleUpdateStats(P)
+    PuzzleRender(P)
 }
 
 ; Same as PuzzleSlide but without pushing history (or it would undo the undo).
@@ -768,7 +1017,7 @@ PuzzleSlideNoRecord(P, cell) {
         dx := 0, dy := -step
     }
     if (PuzzleCfg.AnimMs >= 10)
-        PuzzleAnimate(P, cells, dx, dy)
+        PuzzleAnimate(P, cells, PuzzleDeltas(cells, dx * P.TileW, dy * P.TileH))
     P.Busy := false
     if !PuzzleState.Games.Has(P.Hwnd)
         return
@@ -809,6 +1058,7 @@ PuzzleFanfare() {
 PuzzleTogglePeek(P) {
     if (P.Solved || P.Busy)
         return
+    P.Sel := 0                            ; don't return to a stale highlight
     P.PeekLock := !P.PeekLock
     P.PeekBtn.Text := P.PeekLock ? 'Hide' : 'Peek'
     PuzzleRender(P)
@@ -827,9 +1077,11 @@ PuzzleToggleNumbers(P) {
 ; original image is CLONED across first, then the old game (and its copy) is
 ; disposed — belt and braces against a half-built replacement leaving you with
 ; neither.
-PuzzleResize(P, cols, rows) {
+PuzzleRebuild(P, mode, cols, rows) {
     if P.Busy
         return
+    if (mode = P.Mode && cols = P.Cols && rows = P.Rows)
+        return                        ; nothing would change; don't wipe the board
     DllCall('gdiplus\GdipCloneImage', 'Ptr', P.Orig, 'Ptr*', &clone := 0)
     if !clone
         return
@@ -837,7 +1089,31 @@ PuzzleResize(P, cols, rows) {
     if WinExist('ahk_id ' P.Hwnd)
         WinGetPos(&x, &y, , , 'ahk_id ' P.Hwnd)
     PuzzleDestroy(P)
-    PuzzleCreate(clone, cols, rows, x, y)
+    PuzzleCreate(clone, mode, cols, rows, x, y)
+}
+
+; Esc and the X button both come through here.  A half-solved board represents
+; real work and there is no undo for closing, so it asks — but only when there
+; is something to lose.  Confirming the close of an untouched or already-solved
+; board would just be a dialog in the way.
+;
+; PuzzleDestroy stays the unconditional teardown, because PuzzleRebuild uses it
+; to swap a board out mid-flight and must not be interrupted by a prompt.
+PuzzleConfirmClose(P) {
+    if P.Busy
+        return
+    if (P.Solved || !P.Moves) {
+        PuzzleDestroy(P)
+        return
+    }
+    ; +OwnDialogs is per-thread, so it has to be asked for again here — this is
+    ; a hotkey or Gui-event thread, not the one that built the window.
+    try P.Gui.Opt('+OwnDialogs')
+    answer := MsgBox('Close this puzzle?`n`n'
+                   . P.Moves ' move' (P.Moves = 1 ? '' : 's') ' will be lost.'
+                   , 'Snip Puzzle', 0x4 | 0x20 | 0x1000)   ; Yes/No, question, topmost
+    if (answer = 'Yes')
+        PuzzleDestroy(P)
 }
 
 ; Teardown.  Deregister FIRST so any in-flight animation frame or timer tick
@@ -894,17 +1170,44 @@ PuzzleRender(P) {
             i := A_Index
             t := P.Tiles[i]
             if !t
-                continue
+                continue                  ; the gap, in slide mode
             if (P.AnimSet && P.AnimSet.Has(i))
                 continue                  ; drawn below, at its animated offset
             PuzzleBlit(P, gfx, t, i, 0, 0)
         }
-        if P.AnimSet
-            for i in P.AnimOrder
-                PuzzleBlit(P, gfx, P.Tiles[i], i, P.AnimDX, P.AnimDY)
+        ; Each moving tile carries its OWN delta now, rather than the whole group
+        ; sharing one.  A slide passes the same delta for every cell; a swap
+        ; passes two opposite ones so the pair crosses over.
+        if P.AnimSet {
+            for i in P.AnimOrder {
+                d := P.AnimSet[i]
+                PuzzleBlit(P, gfx, P.Tiles[i], i
+                         , Round(d.X * P.AnimProg), Round(d.Y * P.AnimProg))
+            }
+        }
+        ; The picked tile, drawn last so the outline sits above its neighbours.
+        ; Skipped mid-animation: the tile is in flight and the ring would be
+        ; hanging over the cell it already left.
+        if (P.Sel && !P.AnimSet)
+            PuzzleDrawSelection(P, gfx, P.Sel)
     }
 
     PuzzlePush(P)
+}
+
+; The "this one is picked" ring.  Two rects, a bright inner and a dark outer, so
+; it reads against both a light and a dark tile without needing to know what the
+; picture underneath looks like.
+PuzzleDrawSelection(P, gfx, idx) {
+    PuzzleRC(P, idx, &r, &c)
+    x := (c - 1) * P.TileW + P.Gap
+    y := (r - 1) * P.TileH + P.Gap
+    w := P.TileDrawW
+    h := P.TileDrawH
+    PuzzleDrawEdge(gfx, 0xC0000000, x - 1, y - 1, w + 2, h + 2)
+    PuzzleDrawEdge(gfx, 0xFF000000 | PuzzleCfg.SelColor, x,     y,     w,     h)
+    PuzzleDrawEdge(gfx, 0xFF000000 | PuzzleCfg.SelColor, x + 1, y + 1, w - 2, h - 2)
+    PuzzleDrawEdge(gfx, 0x60000000, x + 2, y + 2, w - 4, h - 4)
 }
 
 ; Draw one tile into cell `idx`, offset by (offX, offY) px for animation.
@@ -946,16 +1249,15 @@ PuzzlePush(P) {
 ; timer would triple the size of this file for no gain.  The loop re-checks the
 ; registry every frame so closing the window mid-slide is clean rather than a
 ; paint into a destroyed control.
-PuzzleAnimate(P, cells, dxCells, dyCells) {
-    P.AnimSet := Map()
-    for i in cells
-        P.AnimSet[i] := true
-    P.AnimOrder := cells
+; `order` is the cells to move, back-to-front for drawing.  `deltas` maps each
+; of those cells to its own {X, Y} travel in PIXELS — a slide hands every cell
+; the same one, a swap hands the two tiles opposite ones.
+PuzzleAnimate(P, order, deltas) {
+    P.AnimOrder := order
+    P.AnimSet   := deltas
 
-    stepX := dxCells * P.TileW
-    stepY := dyCells * P.TileH
-    ms    := Max(10, PuzzleCfg.AnimMs)    ; never 0 — it's a divisor below
-    t0    := A_TickCount
+    ms := Max(10, PuzzleCfg.AnimMs)       ; never 0 — it's a divisor below
+    t0 := A_TickCount
 
     Loop {
         if !PuzzleState.Games.Has(P.Hwnd)
@@ -963,14 +1265,20 @@ PuzzleAnimate(P, cells, dxCells, dyCells) {
         prog := (A_TickCount - t0) / ms
         if (prog >= 1)
             break
-        e := 1 - (1 - prog) * (1 - prog)          ; ease-out: fast off the mark
-        P.AnimDX := Round(stepX * e)
-        P.AnimDY := Round(stepY * e)
+        P.AnimProg := 1 - (1 - prog) * (1 - prog)   ; ease-out: fast off the mark
         PuzzleRender(P)
         Sleep 8
     }
 
-    P.AnimSet := 0, P.AnimOrder := 0, P.AnimDX := 0, P.AnimDY := 0
+    P.AnimSet := 0, P.AnimOrder := 0, P.AnimProg := 0
+}
+
+; Build a delta map where every cell travels the same distance — the slide case.
+PuzzleDeltas(cells, dxPx, dyPx) {
+    d := Map()
+    for i in cells
+        d[i] := { X: dxPx, Y: dyPx }
+    return d
 }
 
 ; ══════════════════════════════════════════════════════════════════════════════
@@ -1005,13 +1313,14 @@ PuzzleTimeStr(secs) {
 }
 
 PuzzleShowHelp(P) {
-    static txt := "
+    static slideTxt := "
 (
-Snip Puzzle — a sliding-tile puzzle cut from your snip.
+Snip Puzzle — a SLIDING-tile puzzle cut from your snip.
 
-Click any tile in the blank's row or column.  It slides
-into the gap, and so does everything between them, so a
-click three cells away moves three tiles at once.
+One tile is missing.  Click any tile in the blank's row
+or column and it slides into the gap, and so does
+everything between them, so a click three cells away
+moves three tiles at once.
 
   Click tile        Slide it (and its neighbours) over
   Arrow keys        Slide one tile that way into the gap
@@ -1019,17 +1328,49 @@ click three cells away moves three tiles at once.
   Space (hold)      Peek at the finished picture
   N                 Numbers on the tiles, on / off
   R                 Shuffle and start over
-  Right-click       Menu — grid size, and all of the above
+  Right-click       Menu — grid size, puzzle type, more
   F1                This help
   Esc               Close the puzzle
 
 The shuffle is made of real slides, so the board is
 always solvable.  Solve it and the seams disappear.
+)"
+
+    static swapTxt := "
+(
+Snip Puzzle — a SWAPPING-tile puzzle cut from your snip.
+
+No tile is missing.  Click a tile to pick it up, then
+click one of its four neighbours to trade places.  Only
+neighbours: diagonals and distant tiles are not a move.
+Clicking a tile that isn't adjacent just moves the pick
+there instead.
+
+  Click, click      Pick a tile, then a neighbour to swap
+  Click the pick    Put it back down
+  Arrow keys        Swap the picked tile that way
+  Ctrl + Z          Undo the last swap
+  Space (hold)      Peek at the finished picture
+  N                 Numbers on the tiles, on / off
+  R                 Shuffle and start over
+  Right-click       Menu — grid size, puzzle type, more
+  F1                This help
+  Esc               Close the puzzle
+
+Any arrangement of a swap board can be solved, so this
+one is shuffled completely at random.
+)"
+
+    static tail := "
+(
 
 The snip it came from stays open as your reference.
+Switch between slide and swap on the right-click menu.
 Settings live in the [Puzzle] section of
 Data\snipSettings.ini.
 )"
+
+    txt := ((P.Mode = 'swap') ? swapTxt : slideTxt) tail
     MsgBox(txt, 'Snip Puzzle — Help', 4096)
 }
 
@@ -1073,7 +1414,14 @@ PuzzleWM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
         return 0
     c := x // P.TileW + 1
     r := y // P.TileH + 1
-    PuzzleSlide(P, PuzzleIdx(P, r, c))
+    ; Guard the edge: a click on the last pixel column of a board whose width
+    ; isn't an exact multiple would index one cell past the grid.
+    c := Max(1, Min(P.Cols, c))
+    r := Max(1, Min(P.Rows, r))
+    if (P.Mode = 'swap')
+        PuzzleSwapClick(P, PuzzleIdx(P, r, c))
+    else
+        PuzzleSlide(P, PuzzleIdx(P, r, c))
     return 0
 }
 
@@ -1121,7 +1469,7 @@ PuzzleKeySimple(what) {
         case 'numbers': PuzzleToggleNumbers(P)
         case 'undo':    PuzzleUndo(P)
         case 'help':    PuzzleShowHelp(P)
-        case 'close':   PuzzleDestroy(P)
+        case 'close':   PuzzleConfirmClose(P)
         case 'menu':    PuzzleShowMenu(P.Gui)
     }
 }
@@ -1159,9 +1507,13 @@ NumpadEnter::  return ; hide
 ; one that can't be broken by a refactor over there.
 
 PuzzleNewBitmap(w, h) {
-    ; 0x21808 = PixelFormat32bppARGB, the same format ScreenSnip's crops use.
+    ; 0x26200A = PixelFormat32bppARGB, straight (non-premultiplied) alpha — the
+    ; same constant ScreenSnip's drop-shadow code uses.  It MUST be a 32bpp
+    ; format with the alpha flag: 0x21808 looks similar but is 24bppRGB, and a
+    ; bitmap with no alpha channel zero-fills to opaque BLACK rather than to
+    ; transparent, so anything not painted shows up as a black rectangle.
     DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', w, 'Int', h
-          , 'Int', 0, 'Int', 0x21808, 'Ptr', 0, 'Ptr*', &p := 0)
+          , 'Int', 0, 'Int', 0x26200A, 'Ptr', 0, 'Ptr*', &p := 0)
     return p
 }
 
