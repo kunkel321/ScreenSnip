@@ -1,4 +1,5 @@
 {
+  "_VersionDate": "8-28-2026",
   "_Comment": "Metadata for snipSettings.ini (ScreenSnip).  Every key carries restart:..\\ScreenSnip.exe because settings are read once at load: the SnipCfg() loader caches the whole INI on first read, and the add-on modules' class statics initialise before the auto-execute section.  NOTE: a restart closes all open snips.  Keys typed 'text' with a decimal validation regex are FLOATS awaiting a float type in SettingsManager; their intended ranges are stated in the help text.",
   "Capture.SelectionColor": {
     "label": "SelectionColor",
@@ -1196,6 +1197,192 @@
       "1=Enabled"
     ],
     "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.Color": {
+    "label": "Color",
+    "help": "Default STROKE color for a new markup object: the arrow, the rectangle's outline, the callout's border. Six hex digits, RRGGBB, with no 0x or # prefix.\n\nThis is only the starting value. The palette's twelve swatches change it on the fly, and with an object selected a swatch recolors THAT object (or every object in the selection) instead of the default.\n\nShipped as a strong red because it is the one hue almost never present in application chrome, so an annotation reads as an annotation rather than as part of the screenshot.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "E81123",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.FillColor": {
+    "label": "FillColor",
+    "help": "Default FILL color for shapes drawn with FillShapes on, and the body color of callout bubbles. Six hex digits, RRGGBB, no prefix.\n\nCtrl+click a palette swatch to set the fill instead of the stroke; doing so also switches the fill on.\n\nNumbered badges ignore this and take their disc color from Color, so that recoloring a badge is one click rather than two. Text drawn on a fill (badge digits, callout text) is automatically black or white, whichever contrasts with the fill.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "FFFFFF",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.FillShapes": {
+    "label": "FillShapes",
+    "help": "Whether a newly drawn rectangle or ellipse starts filled with FillColor.\n\nOff is the usual choice for annotation: an outline lets the reader see what you are pointing AT. Turn it on when you are covering something up rather than circling it, though Blur is the better tool for hiding information.\n\nThe palette's 'Fill shape' checkbox overrides this per object.",
+    "type": "boolean",
+    "options": [
+      "0=Outline only",
+      "1=Filled"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.Thickness": {
+    "label": "Thickness",
+    "help": "Default stroke width in image pixels for new objects: line and arrow shafts, shape outlines, callout borders.\n\n2 to 4 suits a normal desktop screenshot. Go heavier for a scaled-down image that will be viewed small, lighter for a dense UI where a fat outline would bury the thing it is marking.\n\nThe palette's Width list changes it, and a group resize deliberately does NOT scale it - a shrunken hairline reads as a rendering fault rather than as a smaller arrow.",
+    "type": "integer",
+    "min": 1,
+    "max": 16,
+    "default": "3",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.FontName": {
+    "label": "FontName",
+    "help": "Font family for text labels, numbered badges and callout text. Any installed font name.\n\nA UI font is usually the right call, since the annotation is meant to sit on top of a screenshot without pretending to be part of it.",
+    "type": "text",
+    "default": "Segoe UI",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.FontSize": {
+    "label": "FontSize",
+    "help": "Default text height in IMAGE pixels, not points. A label therefore keeps its size relative to the screenshot rather than to the display, so a snip shared with someone on a different DPI looks the same to both of you.\n\nAlso drives two things that are derived from it: the diameter of a numbered badge, and the corner radius of a callout bubble.\n\nUnlike stroke width, font size DOES scale with a multi-object group resize.",
+    "type": "integer",
+    "min": 6,
+    "max": 200,
+    "default": "18",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.Outline": {
+    "label": "Outline",
+    "help": "Draw a thin contrasting halo underneath each object so it stays legible against a busy background. This is what stops a red arrow disappearing into a red-ish toolbar.\n\nThe halo is black or white, chosen from the OBJECT'S own color, not by sampling the pixels behind it - sampling is expensive and makes the halo flicker between black and white while you drag a shape across a varied screenshot.\n\nOn by default because it is doing a job, unlike the shadow, which is decoration. Per object on the palette. Highlighter strokes never get one.",
+    "type": "boolean",
+    "options": [
+      "0=No halo",
+      "1=Contrasting halo"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.OutlineWidth": {
+    "label": "OutlineWidth",
+    "help": "How far the legibility halo extends beyond the object, in pixels, when Outline is on.\n\n1 to 2 is enough to separate the object from its background. Much more starts to read as a deliberate two-tone outline, which is a look rather than a legibility aid.\n\nText labels use half this for their halo, since glyph strokes are thinner than shape strokes and a wide halo would close up the counters inside letters like e and a.",
+    "type": "integer",
+    "min": 1,
+    "max": 8,
+    "default": "2",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.Shadow": {
+    "label": "Shadow",
+    "help": "Give new objects a drop shadow.\n\nOff by default, for three reasons: Outline already does the legibility job that shadows do in other annotation tools, every shadowed object costs a second full draw, and the snip window may already have its own drop shadow - shadowed annotations on a shadowed snip is a lot of shadow.\n\nIt is a hard offset copy rather than a blurred one, which reads correctly at screenshot scale and costs almost nothing. Per object on the palette.",
+    "type": "boolean",
+    "options": [
+      "0=No shadow",
+      "1=Drop shadow"
+    ],
+    "default": "0",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.ShadowOffset": {
+    "label": "ShadowOffset",
+    "help": "How far down and to the right an object's drop shadow is displaced, in image pixels, when Shadow is on.\n\n2 to 4 gives a shadow that reads as depth. Larger values start to look like a second, misaligned copy of the object, because this shadow is a hard offset rather than a blur - see Shadow.",
+    "type": "integer",
+    "min": 1,
+    "max": 20,
+    "default": "2",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.ShadowAlpha": {
+    "label": "ShadowAlpha",
+    "help": "Opacity of an object's drop shadow: 0 is invisible, 255 is solid black.\n\nAround 100 to 130 reads as a shadow over most screenshots. Push it much higher and the offset copy competes with the object itself instead of sitting behind it.\n\nThis is the shadow on MARKUP OBJECTS. The snip window's own shadow is the separate ShadowAlpha in the SnipShadow section.",
+    "type": "integer",
+    "min": 0,
+    "max": 255,
+    "default": "110",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.HighlightAlpha": {
+    "label": "HighlightAlpha",
+    "help": "Opacity of a highlighter rectangle: 0 is invisible, 255 is solid.\n\nThe point of a highlighter is that you can still read what is underneath, so keep this low - roughly 70 to 110 behaves like a real marker pen. Above about 150 it stops highlighting text and starts covering it.\n\nHighlighter objects are always filled and never get a halo, regardless of FillShapes and Outline.",
+    "type": "integer",
+    "min": 10,
+    "max": 255,
+    "default": "90",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.ArrowHeadScale": {
+    "label": "ArrowHeadScale",
+    "help": "Arrow head size as a multiple of the arrow's stroke width, so heads stay in proportion when you change Thickness instead of needing to be retuned.\n\nAround 3 to 4 looks like an arrow. Below 2 the head barely reads as one; above 5 it becomes a triangle with a short tail attached.\n\nThere is a floor of 8 pixels, so a 1px arrow still gets a head you can see.",
+    "type": "float",
+    "min": 0.5,
+    "max": 8,
+    "decimals": 1,
+    "default": "3.5",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.Pixelate": {
+    "label": "Pixelate",
+    "help": "How the Blur tool hides what is underneath it.\n\nPixelate is the default and the better choice for redaction: it is cheaper, and a reader can SEE that something was deliberately hidden rather than wondering whether the image is just out of focus.\n\nEither way the pixels are genuinely destroyed in the saved or copied image, not merely covered over - redaction is applied to the image before any rotation or flip, so there is no original underneath to recover.",
+    "type": "boolean",
+    "options": [
+      "0=Soft blur",
+      "1=Pixelate"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.BlurAmount": {
+    "label": "BlurAmount",
+    "help": "Strength of the Blur tool: the image inside the rectangle is shrunk by this factor and blown back up, so the number is effectively the block size in pixels when Pixelate is on.\n\n8 to 12 destroys ordinary body text. Small text on a high-DPI screenshot may need more - check the result at full size, because a value that looks safe at a glance can leave large headings readable.",
+    "type": "integer",
+    "min": 2,
+    "max": 64,
+    "default": "10",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.HandleSize": {
+    "label": "HandleSize",
+    "help": "Size in pixels of the square grab handles on a selected markup object.\n\nThe clickable area is a little larger than the square you see, so a small handle is still easy to hit. Raise this if you work on a high-DPI display and the handles look like specks.\n\nHandles are drawn into the on-screen image only. They can never reach a saved, copied or uploaded image.",
+    "type": "integer",
+    "min": 3,
+    "max": 20,
+    "default": "7",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.HandleColor": {
+    "label": "HandleColor",
+    "help": "Color of the selection handles and the dashed selection boxes. Six hex digits, RRGGBB, no prefix.\n\nIt wants to be a hue you would never draw an annotation in, so that selection chrome is never mistaken for part of the markup. If you routinely annotate in blue, change this to something else.\n\nAlso used for the rubber-band rectangle when you Shift+drag to select several objects.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "00A2FF",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.UndoDepth": {
+    "label": "UndoDepth",
+    "help": "How many undo steps each snip keeps.\n\nUndo stores a whole snapshot of the object list per step rather than a reversible command, which is what makes it impossible for undo to drift out of step with what is on screen. The objects are small records, so even a deep history costs very little - the exception is pasted images, which are shared between snapshots rather than copied.\n\nThe history belongs to the snip and dies with it; closing a snip discards it.",
+    "type": "integer",
+    "min": 1,
+    "max": 500,
+    "default": "60",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.PaletteAutoShow": {
+    "label": "PaletteAutoShow",
+    "help": "Whether the tool palette appears automatically when you enter markup mode.\n\nTurn it off if you know the single-letter tool keys and would rather not have a second window on screen; F3 still summons it when you want it.\n\nThe palette does not take focus when you click it, so the tool keys keep working while it is open and the snip stays the active window.",
+    "type": "boolean",
+    "options": [
+      "0=Hotkeys only",
+      "1=Show palette"
+    ],
+    "default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.PaletteGap": {
+    "label": "PaletteGap",
+    "help": "Gap in pixels between the snip and the tool palette when the palette is first placed.\n\nIt parks to the LEFT of the snip if there is room, flipping to the right if there is not, and clamps onto the monitor either way. Once you drag it somewhere, that position is remembered for the rest of the session and this setting no longer applies.",
+    "type": "integer",
+    "min": 0,
+    "max": 200,
+    "default": "12",
     "restart": "..\\ScreenSnip.exe"
   }
 }

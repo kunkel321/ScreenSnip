@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 8-11-2026 
+; Version date: 8-28-2026 
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -675,6 +675,17 @@ SnipMenu := Menu()
 SnipMenu.Add('Copy to Clipboard', SnipMenu_Handler)
 SnipMenu.Add('Save Image As…`tCtrl+S', SnipMenu_Handler)
 
+; Markup — see Resources\SnipMarkup.ahk.  Sits with the primary actions rather
+; than down among Rotate/Flip, because it is a step in the CAPTURE → ANNOTATE →
+; SHARE workflow and belongs above the OCR and Imgur items that follow it, not
+; below them.  Same opt-out contract as every module in this file: delete
+; SnipMarkup.ahk and MarkupCfg never exists, so this block is skipped and every
+; other markup hook short-circuits on the same test.
+if IsSet(MarkupCfg) {
+    markupMenuBuilder := 'MarkupBuildMenu'
+    SnipMenu.Add('Markup', %markupMenuBuilder%())
+}
+
 ; OCR submenu — assembled from whichever text-extraction add-ons are present.
 ; Both are opt-out on the same contract as Imgur below: delete the module (or
 ; comment out its #Include at the bottom of this file) and its config class
@@ -1271,7 +1282,7 @@ MonitorIndexAt(x, y) {
 }
 
 #HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI')
-Esc::           CloseSnip() ; hide
+Esc::           SnipEscape() ; hide
 F1::            ShowHelp() ; hide
 ^c::            SnipToClipboard() ; hide  — same as the menu's Copy to Clipboard
 ^s::            SaveSnipAs() ; hide       — same as the menu's Save Image As…
@@ -1538,6 +1549,21 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
     return g.Hwnd
 }
 
+; What Esc does on a snip.  Normally it closes the snip, but markup mode gets a
+; chance to consume the key first so that Esc can ESCALATE while annotating:
+; deselect → back to the Select tool → leave markup → only then close.  That
+; gives a panic key which can't destroy work with a mistimed press.  Wired to
+; the Esc hotkey rather than into CloseSnip itself, so the menu's "Close This
+; Snip" still means exactly that.
+SnipEscape() {
+    if IsSet(MarkupCfg) {
+        markupEscFn := 'MarkupEscape'
+        if %markupEscFn%(WinGetID('A'))
+            return
+    }
+    CloseSnip()
+}
+
 ; Close one snip (defaults to active window).
 CloseSnip(Hwnd?) {
     global guiSnips
@@ -1546,6 +1572,10 @@ CloseSnip(Hwnd?) {
     if guiSnips.Has(Hwnd) {
         snip := guiSnips[Hwnd]
         guiSnips.Delete(Hwnd)   ; remove first so in-flight handlers/timers bail out
+        if IsSet(MarkupCfg) {   ; end any markup session and free its image pool
+            markupCloseFn := 'MarkupOnSnipClosed'
+            %markupCloseFn%(snip, Hwnd)
+        }
         DestroySnipShadow(snip)
         GDIp.DisposeImage(snip.pBitmap)
         if (snip.HasProp('SrcBitmap') && snip.SrcBitmap)
@@ -1575,6 +1605,15 @@ SnipToClipboard(Hwnd?) {
         Hwnd := WinGetID('A')
     if !guiSnips.Has(Hwnd)
         return
+    ; This path copies the Picture control's EXISTING bitmap rather than
+    ; re-rendering, so anything drawn into it goes to the clipboard — including
+    ; markup's selection handles.  Give markup a chance to drop the selection
+    ; and re-render first; without this, Ctrl+C mid-annotation copies the blue
+    ; boxes along with the image.
+    if IsSet(MarkupCfg) {
+        markupExpFn := 'MarkupBeforeExport'
+        %markupExpFn%(Hwnd)
+    }
     hBitmap := SendMessage(0x173, 0, 0, guiSnips[Hwnd].GuiObj.Pic)
     GDIp.SetHBITMAPToClipboard(hBitmap)
 }
@@ -1698,6 +1737,14 @@ BuildDisplayBitmap(snip) {
     if !work
         return 0
 
+    ; MARKUP, stage 1 — redaction (blur/pixelate) onto the UPRIGHT crop, before
+    ; any transform, because hiding pixels is an operation on the image itself.
+    ; See the header of Resources\SnipMarkup.ahk for why the compose is split.
+    if (IsSet(MarkupCfg) && snip.HasProp('Markup')) {
+        markupImgFn := 'MarkupComposeImage'
+        %markupImgFn%(snip, work)
+    }
+
     ; Flips first — lossless, exact.
     if snip.FlipH
         DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', 4)   ; FlipX (horizontal)
@@ -1719,6 +1766,15 @@ BuildDisplayBitmap(snip) {
 
     dpi := A_ScreenDPI + 0.0
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', result, 'Float', dpi, 'Float', dpi)
+
+    ; MARKUP, stage 2 — every other annotation, drawn onto the FINISHED display
+    ; bitmap so vector art lands at final resolution and is never resampled by
+    ; the skew or rotation pass.  wantChrome is true here: selection handles are
+    ; part of the on-screen picture but never part of an exported one.
+    if (IsSet(MarkupCfg) && snip.HasProp('Markup')) {
+        markupOvFn := 'MarkupComposeOverlay'
+        %markupOvFn%(snip, result, true)
+    }
     return result
 }
 
@@ -1731,6 +1787,10 @@ BuildSaveBitmap(snip, wantTransparent) {
     DllCall('gdiplus\GdipCloneImage', 'UPtr', snip.pBitmap, 'UPtr*', &work := 0)
     if !work
         return 0
+    if (IsSet(MarkupCfg) && snip.HasProp('Markup')) {   ; markup stage 1 — redaction
+        markupImgFn := 'MarkupComposeImage'
+        %markupImgFn%(snip, work)
+    }
     if snip.FlipH
         DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', 4)   ; horizontal
     if snip.FlipV
@@ -1748,6 +1808,12 @@ BuildSaveBitmap(snip, wantTransparent) {
     }
     dpi := A_ScreenDPI + 0.0
     DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', result, 'Float', dpi, 'Float', dpi)
+    ; markup stage 2 — annotations, but wantChrome FALSE: no selection handles
+    ; in a saved or uploaded image.
+    if (IsSet(MarkupCfg) && snip.HasProp('Markup')) {
+        markupOvFn := 'MarkupComposeOverlay'
+        %markupOvFn%(snip, result, false)
+    }
     return result
 }
 
@@ -2235,6 +2301,17 @@ WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
             SnipResizeDrag(snipHwnd, edge)
             return
         }
+    }
+    ; Markup gets first refusal on the click.  It returns TRUE only when it
+    ; actually used the press (drawing, or grabbing an object/handle); a click
+    ; on empty canvas with the Select tool comes back FALSE and falls through to
+    ; the window-move below, so the drag-to-move muscle memory survives markup
+    ; mode.  Everything is behind IsSet(MarkupCfg), so with the module deleted
+    ; this is one variable test.
+    if IsSet(MarkupCfg) {
+        markupClickFn := 'MarkupOnLButton'
+        if %markupClickFn%(snipHwnd)
+            return
     }
     PostMessage(0xA1, 2, , snipHwnd)   ; WM_NCLBUTTONDOWN, HTCAPTION → move
 }
@@ -3534,6 +3611,16 @@ Class GDIp {
 ; SnipPuzzle.ahk either; settings live in the [Jigsaw] section of
 ; Data\snipSettings.ini and fall back to coded defaults when absent.
 #Include *i Resources\SnipJigsaw.ahk
+
+; Markup / annotation — provides MarkupCfg plus MarkupBuildMenu and the compose,
+; click, escape, export and close hooks called from the seven places in this
+; file marked "MARKUP" or guarded by IsSet(MarkupCfg).  Adds rectangles,
+; ellipses, lines, arrows, freehand pen, highlighter, text, numbered callouts,
+; speech callouts, blur/pixelate redaction and pasted images as EDITABLE objects
+; that survive rotate/pan/flip because they are stored in the same master-local
+; coordinate space the crop uses.  No dependencies; settings live in the
+; [Markup] section of Data\snipSettings.ini and fall back to coded defaults.
+#Include *i Resources\SnipMarkup.ahk
 
 ; Tooltip styling — bigger, colored, padded tooltips.  Unlike the four above,
 ; this one isn't a ScreenSnip module at all: it's an unmodified copy of
