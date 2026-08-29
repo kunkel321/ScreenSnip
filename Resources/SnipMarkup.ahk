@@ -1,6 +1,6 @@
 ; ==============================================================================
 ; SnipMarkup.ahk  —  annotation / markup layer for ScreenSnip
-;                       Version Date: 8-29-2026 9:15am
+;                       Version Date: 8-29-2026 2pm
 ; ==============================================================================
 ;
 ; An optional add-on on the same contract as SnipOCR / SnipAI / SnipImgur /
@@ -70,6 +70,13 @@
 ; with no extra work.  Every key falls back to a coded default, so an INI with
 ; no [Markup] section at all is fine.
 ;
+; Two FURTHER sections, [MarkupCaps] and [MarkupDashes], hold user-defined
+; arrowheads and dash patterns.  Those are deliberately NOT read through
+; SnipCfg(): their key names are invented by the user, so nothing can ask for
+; them by name at compile time, and they have to be re-readable at runtime for
+; the style editor to work without a restart.  They are parsed a section at a
+; time by MarkupLoadCustomStyles() — see the LINE STYLE REGISTRIES block.
+;
 ; ==============================================================================
 
 ; ── Settings + presence sentinel ──────────────────────────────────────────────
@@ -118,6 +125,33 @@ class MarkupCfg {
     static PathCornerRadius  := Integer(SnipCfg('Markup', 'PathCornerRadius', 7))
     static PathMaxSegments   := Integer(SnipCfg('Markup', 'PathMaxSegments', 24))
 
+    ; Line styling, PER TOOL.  Line, Arrow and Path Arrow are the same object as
+    ; far as the renderer is concerned — the tool you pick only seeds these
+    ; properties, which is what a "tool" ought to mean.  So the defaults live
+    ; one per tool rather than one per script, and picking the Line tool then
+    ; choosing a chevron end doesn't quietly change what Arrow draws.
+    ; Values are NAMES from the cap / dash registries (see MarkupStyles); an
+    ; unknown name resolves to none / solid rather than throwing.
+    static LineDash      := SnipCfg('Markup', 'LineDash',      'solid')
+    static LineCapStart  := SnipCfg('Markup', 'LineCapStart',  'none')
+    static LineCapEnd    := SnipCfg('Markup', 'LineCapEnd',    'none')
+    static ArrowDash     := SnipCfg('Markup', 'ArrowDash',     'solid')
+    static ArrowCapStart := SnipCfg('Markup', 'ArrowCapStart', 'none')
+    static ArrowCapEnd   := SnipCfg('Markup', 'ArrowCapEnd',   'arrow')
+    static PathDash      := SnipCfg('Markup', 'PathDash',      'solid')
+    static PathCapStart  := SnipCfg('Markup', 'PathCapStart',  'none')
+    static PathCapEnd    := SnipCfg('Markup', 'PathCapEnd',    'arrow')
+    static PenDash       := SnipCfg('Markup', 'PenDash',       'solid')
+    static PenCapStart   := SnipCfg('Markup', 'PenCapStart',   'none')
+    static PenCapEnd     := SnipCfg('Markup', 'PenCapEnd',     'none')
+
+    ; Corner radius, in master pixels.  -1 means AUTO: keep whatever the type
+    ; derived before this setting existed, so nothing drawn under the old code
+    ; changes appearance.  Rectangles were sharp, so their auto is 0 and their
+    ; default is 0; callouts derived theirs from the font size, so theirs is -1.
+    static RectCorner    := Integer(SnipCfg('Markup', 'RectCorner', 0))
+    static CalloutCorner := Integer(SnipCfg('Markup', 'CalloutCorner', -1))
+
     ; Redaction.  Pixelate is cheaper than a true blur and is the more honest
     ; choice for hiding data, so it is the default.  BlurAmount is the block
     ; size in pixels for pixelate, or the downscale factor for blur.
@@ -130,6 +164,26 @@ class MarkupCfg {
     static HandleColor := SnipCfgHex('Markup', 'HandleColor', 0x00A2FF)
 
     static UndoDepth   := Integer(SnipCfg('Markup', 'UndoDepth', 60))
+
+    ; Ctrl+click an annotation to reach into it without leaving the tool you are
+    ; drawing with.  It also works on a snip that is NOT in a markup session —
+    ; annotations stay on the snip after Esc, so this is the way back in.
+    ;
+    ; A double-click used to do this as well and was dropped: it had to survive
+    ; its own first click, which starts a draw, and the render that tidies away
+    ; the discarded object could still be running when the second press arrived.
+    ; OnMessage allows one thread per message, so that press was discarded and
+    ; the gesture silently failed — intermittently, and worse on large snips.
+    ; A single modified press has no timing window to lose.
+    ;
+    ; A Ctrl+click landing on bare image is always left alone, so drag-to-move
+    ; is untouched.
+    static CtrlClickSelect := Integer(SnipCfg('Markup', 'CtrlClickSelect', 1)) ? true : false
+
+    ; When a double-click borrows the Select tool, remember which drawing tool
+    ; was in hand and give it back at the next click on bare image.  Off makes
+    ; the double-click a one-way trip to Select, as it was before.
+    static StickyTool := Integer(SnipCfg('Markup', 'StickyTool', 1)) ? true : false
 
     ; Palette window.  AutoShow false = hotkey-only operation for people who
     ; know the letters and don't want a second window on screen.
@@ -151,6 +205,16 @@ class MarkupState {
     static Dragging := false
     static Band     := 0          ; live rubber-band rect (display coords) or 0
     static Ctl      := Map()      ; palette control name → control object
+
+    ; Per-tool line style, seeded from MarkupCfg on first use.  Changing a
+    ; palette control with NOTHING selected edits the entry for the current
+    ; tool; with a selection it edits the objects.  See MarkupApplyStyle.
+    static ToolStyle  := Map()
+    static PreviewBmp := 0        ; HBITMAP behind the palette preview strip
+
+    ; The drawing tool a double-click borrowed Select from, or '' when Select
+    ; was chosen deliberately.  See MarkupArmSticky.
+    static Borrowed := ''
 
     ; Sels is the real selection — an array, so a group of objects can be moved,
     ; resized and restyled together.  Sel is kept as a one-object view onto it
@@ -278,6 +342,9 @@ MarkupBuildMenu() {
     m.Add('Paste Image`tCtrl+V',       MarkupMenu_Handler)
     m.Add('Add Image From File…',      MarkupMenu_Handler)
     m.Add('')
+    m.Add('Swap Line Ends`tCtrl+\',    MarkupMenu_Handler)
+    m.Add('Line Styles…',              MarkupMenu_Handler)
+    m.Add('')
     m.Add('Select All`tCtrl+A',        MarkupMenu_Handler)
     m.Add('Edit Text…`tF2',            MarkupMenu_Handler)
     m.Add('Duplicate`tCtrl+D',         MarkupMenu_Handler)
@@ -299,6 +366,8 @@ MarkupMenu_Handler(ItemName, ItemPos, *) {
         case 'Show/Hide Tool Palette': MarkupPaletteMenuItem(hwnd)
         case 'Paste Image':            MarkupPasteImage(hwnd)
         case 'Add Image From File…':   MarkupImageFromFile(hwnd)
+        case 'Swap Line Ends':         MarkupSwapEnds()
+        case 'Line Styles…':           MarkupStyleEditor()
         case 'Select All':             MarkupSelectAll(hwnd)
         case 'Edit Text…':             MarkupEditSelText(hwnd)
         case 'Duplicate':              MarkupDuplicateSel(hwnd)
@@ -346,6 +415,7 @@ MarkupBegin(hwnd := 0) {
     ; Only while a session is running — see MarkupOnActivate.  Re-registering
     ; the same callback is harmless in v2; it does not stack.
     OnMessage(0x0006, MarkupOnActivate)          ; WM_ACTIVATE
+    MarkupWheelHotkeys(true)
     WinActivate('ahk_id ' hwnd)
     if MarkupCfg.PaletteAutoShow
         MarkupShowPalette()
@@ -359,10 +429,12 @@ MarkupEnd(leaveTip := true) {
     global guiSnips
     hwnd := MarkupState.Active
     OnMessage(0x0006, MarkupOnActivate, 0)       ; stop watching WM_ACTIVATE
+    MarkupWheelHotkeys(false)                    ; and leave the mouse hook alone
     MarkupHidePalette()                          ; before Active is cleared, so
-    MarkupState.Active := 0                      ; the position is filed against
-    MarkupState.Sel    := 0                      ; the right snip
-    MarkupState.Tool   := 'select'
+    MarkupState.Active   := 0                    ; the position is filed against
+    MarkupState.Sel      := 0                    ; the right snip
+    MarkupState.Tool     := 'select'
+    MarkupState.Borrowed := ''                   ; no tool survives the session
     if (hwnd && guiSnips.Has(hwnd))
         MarkupRender(guiSnips[hwnd])           ; redraw without selection chrome
     if leaveTip {
@@ -386,6 +458,13 @@ MarkupEscape(hwnd) {
         MarkupSyncPalette()
         if guiSnips.Has(hwnd)
             MarkupRender(guiSnips[hwnd])
+        return true
+    }
+    if (MarkupState.Borrowed != '') {
+        ; Esc after a double-click means "never mind the tool either", so the
+        ; loan is cancelled rather than silently waiting for the next click.
+        MarkupState.Borrowed := ''
+        MarkupSyncPalette()
         return true
     }
     if (MarkupState.Tool != 'select') {
@@ -669,6 +748,11 @@ MarkupRedo(hwnd := 0) {
 ;
 ; Upright is the "don't turn with the image" flag described at the top of this
 ; file.  It is set for the types whose whole job is to be read.
+;
+; Dash / CapStart / CapEnd / HeadScale / Corner are the line-style properties.
+; They are set from the TOOL's remembered defaults rather than from a global,
+; which is what lets Line, Arrow and Path Arrow be one object type wearing three
+; different presets — see MarkupToolStyle.
 
 MarkupNewObj(type) {
     o := { Type:      type
@@ -686,8 +770,10 @@ MarkupNewObj(type) {
          , Num:       0
          , TailX:     0,   TailY: 0
          , TailA:     0,   TailB: 0        ; tail base, offsets along the edge
-         , Dash:      0                    ; GDI+ DashStyle; 0 = solid
-         , CapStart:  0,   CapEnd: 0       ; 0 = none, 1 = arrow head
+         , Dash:      'solid'              ; named pattern  — see MarkupStyles
+         , CapStart:  'none', CapEnd: 'none'   ; named end treatments
+         , HeadScale: MarkupCfg.ArrowHeadScale ; head length as a multiple of Thick
+         , Corner:    0                    ; corner radius; -1 = auto for the type
          , ImgIdx:    0
          , Pts:       []
          , Upright:   (type = 'text' || type = 'number' || type = 'callout') }
@@ -698,8 +784,14 @@ MarkupNewObj(type) {
         o.FillColor := 0xFFF200                 ; classic highlighter yellow
         o.Outline := false
     }
-    if (type = 'arrow' || type = 'path')
-        o.CapEnd := 1
+    ; The tool's remembered line style.  This lookup is the ONLY thing that
+    ; makes Line, Arrow and Path Arrow different from one another, which is why
+    ; it is a table rather than a chain of ifs bolted on here.
+    st := MarkupToolStyle(type)
+    o.Dash     := st.Dash
+    o.CapStart := st.CapStart
+    o.CapEnd   := st.CapEnd
+    o.Corner   := st.Corner
     if (type = 'number')
         o.Fill := true, o.FillColor := o.Color
     if (type = 'callout')
@@ -803,41 +895,443 @@ MarkupDuplicateSel(hwnd) {
 }
 
 ; ==============================================================================
+; LINE STYLE REGISTRIES  —  arrowheads, dash patterns
+; ==============================================================================
+;
+; Four properties that used to be constants are now per-object:
+;
+;   Dash       a named dash pattern       'solid', 'dash', ... or a user's own
+;   CapStart   end treatment at X1,Y1     'none', 'arrow', 'dot', ... or ditto
+;   CapEnd     end treatment at X2,Y2
+;   Corner     corner radius in master px, -1 = auto for the type
+;
+; A CAP IS DATA.  Each definition is a polygon (or a circle) in a normalised
+; frame — tip at the origin, +X back along the shaft, units of head length — so
+; the built-in triangle and something a user typed into the INI go through the
+; identical draw routine.  That is the whole reason "add your own arrowhead" is
+; a parser and a dialog rather than a new case in the renderer.
+;
+; A DASH is either one of the five GDI+ DashStyles or a float array in multiples
+; of the pen width.
+;
+; Custom entries live in their own INI sections:
+;
+;   [MarkupCaps]
+;   ; Name = poly|circle, fill|open|line, shrink, coords...
+;   Fletch = poly, fill, 0.90, 0,0, 1,-0.60, 0.60,0, 1,0.60
+;   Ring   = circle, open, 0.76, 0.38, 0.38          ; centre, radius
+;
+;   [MarkupDashes]
+;   ; Name = on, off, on, off ...  (multiples of the stroke width)
+;   Railroad = 5, 2, 1, 2
+;
+; fill = filled solid, open = stroked outline (closed), line = stroked polyline
+; (not closed — that is what makes a chevron a chevron rather than a triangle).
+;
+; MarkupReloadStyles() rebuilds all of this at runtime, which is why the editor
+; needs no restart.  It reads the INI SECTIONS directly rather than through
+; SnipCfg(): that cache is filled once at load with no way to invalidate it, and
+; it can only answer for key names known at compile time — a user-invented cap
+; name is neither.
+
+class MarkupStyles {
+    static Caps      := Map()     ; id (lowercased name) → definition
+    static CapOrder  := []        ; ids, in the order they appear in the lists
+    static Dashes    := Map()
+    static DashOrder := []
+    static Ready     := false
+}
+
+MarkupIniPath() => SnipDataPath('snipSettings.ini')
+
+; Register one cap.  Re-registering an existing id REPLACES it in place and
+; keeps its position in the list, so a user entry named 'arrow' overrides the
+; built-in rather than appearing twice.
+MarkupDefCap(def) {
+    if !def.HasProp('Pts')
+        def.Pts := []
+    if !def.HasProp('CX')
+        def.CX := 0.36
+    if !def.HasProp('R')
+        def.R := 0.36
+    if !def.HasProp('Builtin')
+        def.Builtin := false
+    def.Id := StrLower(def.Name)
+    isNew := !MarkupStyles.Caps.Has(def.Id)
+    MarkupStyles.Caps[def.Id] := def
+    ; A leading underscore marks a SCRATCH entry — the style editor registers
+    ; one to draw its live preview from half-typed numbers.  It is lookupable
+    ; but never listed, so an in-progress definition can't leak into the palette.
+    if (isNew && SubStr(def.Id, 1, 1) != '_')
+        MarkupStyles.CapOrder.Push(def.Id)
+}
+
+MarkupDefDash(def) {
+    if !def.HasProp('Arr')
+        def.Arr := []
+    if !def.HasProp('Style')
+        def.Style := 5
+    if !def.HasProp('Builtin')
+        def.Builtin := false
+    def.Id := StrLower(def.Name)
+    isNew := !MarkupStyles.Dashes.Has(def.Id)
+    MarkupStyles.Dashes[def.Id] := def
+    if (isNew && SubStr(def.Id, 1, 1) != '_')       ; scratch — see MarkupDefCap
+        MarkupStyles.DashOrder.Push(def.Id)
+}
+
+MarkupLoadStyles() {
+    MarkupStyles.Caps   := Map(),  MarkupStyles.Caps.CaseSense   := false
+    MarkupStyles.Dashes := Map(),  MarkupStyles.Dashes.CaseSense := false
+    MarkupStyles.CapOrder := [],   MarkupStyles.DashOrder := []
+
+    ; 'none' must exist and must be first — it is the fallback for an unknown
+    ; name, which is what stops a deleted custom cap from throwing on every
+    ; render of an object that still refers to it.
+    MarkupDefCap({Name: 'none',    Kind: 'none',   Fill: false, Close: false, Shrink: 0,    Builtin: true})
+    MarkupDefCap({Name: 'arrow',   Kind: 'poly',   Fill: true,  Close: true,  Shrink: 0.85
+                , Pts: [0,0, 0.913,-0.408, 0.913,0.408], Builtin: true})
+    MarkupDefCap({Name: 'stealth', Kind: 'poly',   Fill: true,  Close: true,  Shrink: 0.68
+                , Pts: [0,0, 1.00,-0.50, 0.62,0, 1.00,0.50], Builtin: true})
+    MarkupDefCap({Name: 'hollow',  Kind: 'poly',   Fill: false, Close: true,  Shrink: 0.85
+                , Pts: [0,0, 0.913,-0.408, 0.913,0.408], Builtin: true})
+    MarkupDefCap({Name: 'chevron', Kind: 'poly',   Fill: false, Close: false, Shrink: 0.10
+                , Pts: [0.95,-0.50, 0,0, 0.95,0.50], Builtin: true})
+    MarkupDefCap({Name: 'bar',     Kind: 'poly',   Fill: false, Close: false, Shrink: 0
+                , Pts: [0.05,-0.50, 0.05,0.50], Builtin: true})
+    MarkupDefCap({Name: 'dot',     Kind: 'circle', Fill: true,  Close: false, Shrink: 0.36
+                , CX: 0.36, R: 0.36, Builtin: true})
+    MarkupDefCap({Name: 'circle',  Kind: 'circle', Fill: false, Close: false, Shrink: 0.76
+                , CX: 0.38, R: 0.38, Builtin: true})
+    MarkupDefCap({Name: 'square',  Kind: 'poly',   Fill: true,  Close: true,  Shrink: 0.72
+                , Pts: [0,-0.36, 0,0.36, 0.72,0.36, 0.72,-0.36], Builtin: true})
+    MarkupDefCap({Name: 'diamond', Kind: 'poly',   Fill: true,  Close: true,  Shrink: 1.00
+                , Pts: [0,0, 0.50,-0.42, 1.00,0, 0.50,0.42], Builtin: true})
+
+    MarkupDefDash({Name: 'solid',      Style: 0, Builtin: true})
+    MarkupDefDash({Name: 'dash',       Style: 1, Builtin: true})
+    MarkupDefDash({Name: 'dot',        Style: 2, Builtin: true})
+    MarkupDefDash({Name: 'dashdot',    Style: 3, Builtin: true})
+    MarkupDefDash({Name: 'dashdotdot', Style: 4, Builtin: true})
+
+    MarkupLoadCustomStyles()
+    MarkupStyles.Ready := true
+}
+
+; A missing section makes IniRead throw, and a malformed line is skipped by the
+; parsers rather than reported — a typo in the INI must never stop ScreenSnip
+; drawing, it just means that one entry doesn't appear in the list.
+MarkupLoadCustomStyles() {
+    path := MarkupIniPath()
+    if !FileExist(path)
+        return
+    try {
+        for line in StrSplit(IniRead(path, 'MarkupCaps'), '`n')
+            MarkupParseCapLine(line)
+    } catch {
+        ; no [MarkupCaps] section — normal, and nothing to do
+    }
+    try {
+        for line in StrSplit(IniRead(path, 'MarkupDashes'), '`n')
+            MarkupParseDashLine(line)
+    } catch {
+        ; no [MarkupDashes] section
+    }
+}
+
+MarkupParseCapLine(line) {
+    if !(pos := InStr(line, '='))
+        return false
+    name := Trim(SubStr(line, 1, pos - 1))
+    f    := StrSplit(Trim(SubStr(line, pos + 1)), ',', ' `t')
+    if (name = '' || f.Length < 3)
+        return false
+    kind := StrLower(f[1])
+    if (kind != 'poly' && kind != 'circle')
+        return false
+    word := StrLower(f[2])
+    if (word != 'fill' && word != 'open' && word != 'line')
+        return false
+    if !IsNumber(f[3])
+        return false
+
+    def := { Name:   name
+           , Kind:   kind
+           , Fill:   (word = 'fill')
+           , Close:  (word != 'line')
+           , Shrink: Float(f[3]) }
+
+    if (kind = 'circle') {
+        if (f.Length < 5 || !IsNumber(f[4]) || !IsNumber(f[5]))
+            return false
+        def.CX := Float(f[4]), def.R := Float(f[5])
+        if (def.R <= 0)
+            return false
+    } else {
+        pts := [], i := 4
+        while (i <= f.Length) {
+            if !IsNumber(f[i])
+                return false
+            pts.Push(Float(f[i])), i++
+        }
+        ; Needs at least two points, and pairs of them.
+        if (pts.Length < 4 || Mod(pts.Length, 2))
+            return false
+        def.Pts := pts
+    }
+    MarkupDefCap(def)
+    return true
+}
+
+MarkupParseDashLine(line) {
+    if !(pos := InStr(line, '='))
+        return false
+    name := Trim(SubStr(line, 1, pos - 1))
+    if (name = '')
+        return false
+    arr := []
+    for v in StrSplit(Trim(SubStr(line, pos + 1)), ',', ' `t') {
+        if (v = '')
+            continue
+        if !IsNumber(v)
+            return false
+        n := Float(v)
+        if (n <= 0)                    ; GDI+ rejects a zero-length dash entry
+            return false
+        arr.Push(n)
+    }
+    ; A pattern is on/off pairs, so anything shorter than two numbers is not one.
+    if (arr.Length < 2)
+        return false
+    MarkupDefDash({ Name: name, Style: 5, Arr: arr })
+    return true
+}
+
+; Lookups.  Both accept the OLD numeric form (Dash 0..4, Cap 0/1) as well as a
+; name, because objects created before the registry existed are still sitting in
+; undo snapshots, and an unknown name resolves to none / solid rather than
+; throwing — a cap the user deleted must not take the render down with it.
+MarkupCap(id) {
+    if !MarkupStyles.Ready
+        MarkupLoadStyles()
+    if (id is Number)
+        id := id ? 'arrow' : 'none'
+    id := StrLower(String(id))
+    return MarkupStyles.Caps.Has(id) ? MarkupStyles.Caps[id] : MarkupStyles.Caps['none']
+}
+
+MarkupDash(id) {
+    if !MarkupStyles.Ready
+        MarkupLoadStyles()
+    if (id is Number) {
+        static legacy := ['solid', 'dash', 'dot', 'dashdot', 'dashdotdot']
+        id := legacy[Min(Max(Integer(id) + 1, 1), 5)]
+    }
+    id := StrLower(String(id))
+    return MarkupStyles.Dashes.Has(id) ? MarkupStyles.Dashes[id] : MarkupStyles.Dashes['solid']
+}
+
+; Serialise back to the INI's one-line grammar.  The editor writes through this,
+; so what it saves is exactly what MarkupParseCapLine can read back.
+MarkupCapToIni(def) {
+    word := def.Fill ? 'fill' : (def.Close ? 'open' : 'line')
+    out  := def.Kind ', ' word ', ' MarkupNumText(def.Shrink)
+    if (def.Kind = 'circle')
+        return out ', ' MarkupNumText(def.CX) ', ' MarkupNumText(def.R)
+    for v in def.Pts
+        out .= ', ' MarkupNumText(v)
+    return out
+}
+
+MarkupDashToIni(def) {
+    out := ''
+    for v in def.Arr
+        out .= (out = '' ? '' : ', ') MarkupNumText(v)
+    return out
+}
+
+; 3.0 → "3", 3.5 → "3.5".  Used everywhere a number has to survive a round trip
+; through a control or an INI without growing a trailing ".000000".
+MarkupNumText(v) {
+    if !IsNumber(v)
+        return String(v)
+    v := v + 0.0
+    return (v = Round(v)) ? String(Integer(v)) : Format('{:g}', v)
+}
+
+; ── Per-tool defaults ────────────────────────────────────────────────────────
+;
+; The tool list is a list of PRESETS.  Line, Arrow and Path Arrow build the same
+; kind of object; what differs is the style they seed it with.  Keeping that in
+; a table rather than in MarkupNewObj means picking Line, choosing a chevron end
+; and going back to Arrow doesn't silently redefine what Arrow draws.
+
+MarkupToolStyle(tool) {
+    if !MarkupState.ToolStyle.Count
+        MarkupInitToolStyles()
+    if !MarkupState.ToolStyle.Has(tool)
+        MarkupState.ToolStyle[tool] := { Dash: 'solid', CapStart: 'none'
+                                       , CapEnd: 'none', Corner: 0 }
+    return MarkupState.ToolStyle[tool]
+}
+
+MarkupInitToolStyles() {
+    ts := MarkupState.ToolStyle := Map()
+    ts['line']      := { Dash: MarkupCfg.LineDash,  CapStart: MarkupCfg.LineCapStart
+                       , CapEnd: MarkupCfg.LineCapEnd,  Corner: 0 }
+    ts['arrow']     := { Dash: MarkupCfg.ArrowDash, CapStart: MarkupCfg.ArrowCapStart
+                       , CapEnd: MarkupCfg.ArrowCapEnd, Corner: 0 }
+    ts['path']      := { Dash: MarkupCfg.PathDash,  CapStart: MarkupCfg.PathCapStart
+                       , CapEnd: MarkupCfg.PathCapEnd,  Corner: MarkupCfg.PathCornerRadius }
+    ts['pen']       := { Dash: MarkupCfg.PenDash,   CapStart: MarkupCfg.PenCapStart
+                       , CapEnd: MarkupCfg.PenCapEnd,   Corner: 0 }
+    ts['rect']      := { Dash: 'solid', CapStart: 'none', CapEnd: 'none'
+                       , Corner: MarkupCfg.RectCorner }
+    ts['highlight'] := { Dash: 'solid', CapStart: 'none', CapEnd: 'none'
+                       , Corner: MarkupCfg.RectCorner }
+    ts['callout']   := { Dash: 'solid', CapStart: 'none', CapEnd: 'none'
+                       , Corner: MarkupCfg.CalloutCorner }
+    ts['ellipse']   := { Dash: 'solid', CapStart: 'none', CapEnd: 'none', Corner: 0 }
+}
+
+; Rebuild the registries from the INI and push the result at everything that is
+; showing it.  This is what "no restart" means in practice.
+MarkupReloadStyles() {
+    global guiSnips
+    MarkupLoadStyles()
+    MarkupFillStyleLists()
+    MarkupSyncPalette()
+    if (MarkupState.Active && guiSnips.Has(MarkupState.Active))
+        MarkupRender(guiSnips[MarkupState.Active])
+}
+
+; ==============================================================================
 ; GDI+ DRAWING HELPERS
 ; ==============================================================================
 
 MarkupARGB(rgb, alpha := 255) => ((alpha & 0xFF) << 24) | (rgb & 0xFFFFFF)
 
-; dash maps straight onto GDI+ DashStyle: 0 solid, 1 dash, 2 dot, 3 dash-dot,
-; 4 dash-dot-dot.  Objects carry a Dash property (0 everywhere today), so adding
-; a line-style control later is a palette widget and nothing else — every shape
-; already routes its stroke through here.
-MarkupPen(rgb, alpha, width, dash := 0) {
+; Every stroke in the module goes through here, which is what lets a dash
+; pattern be a property rather than a special case: dash is a NAME looked up in
+; the registry, so a user-defined pattern draws through exactly the same code
+; path as a built-in one.
+MarkupPen(rgb, alpha, width, dash := 'solid') {
     DllCall('gdiplus\GdipCreatePen1', 'UInt', MarkupARGB(rgb, alpha)
           , 'Float', Max(0.5, width + 0.0), 'Int', 2, 'UPtr*', &p := 0)   ; 2 = UnitPixel
     if p {
         DllCall('gdiplus\GdipSetPenStartCap', 'UPtr', p, 'Int', 2)        ; 2 = LineCapRound
         DllCall('gdiplus\GdipSetPenEndCap',   'UPtr', p, 'Int', 2)
         DllCall('gdiplus\GdipSetPenLineJoin', 'UPtr', p, 'Int', 2)        ; 2 = LineJoinRound
-        if dash
-            DllCall('gdiplus\GdipSetPenDashStyle', 'UPtr', p, 'Int', dash)
+        MarkupApplyDash(p, dash)
     }
     return p
 }
 
-; One filled arrow head, pointing along ang.  Split out of the arrow case so the
-; path arrow can reuse it, and so that adding other end treatments later (open
-; chevron, bar, circle, diamond) is a switch in ONE place rather than an edit to
-; every object type that has ends.
-MarkupDrawHead(pGfx, tipX, tipY, ang, head, col, alpha) {
-    static SPREAD := 0.42
-    pb := MarkupPointBuf([ tipX, tipY
-                         , tipX - Cos(ang - SPREAD) * head, tipY - Sin(ang - SPREAD) * head
-                         , tipX - Cos(ang + SPREAD) * head, tipY - Sin(ang + SPREAD) * head ])
-    br := MarkupBrush(col, alpha)
-    DllCall('gdiplus\GdipFillPolygon', 'UPtr', pGfx, 'UPtr', br
-          , 'Ptr', pb.Buf, 'Int', pb.N, 'Int', 0)
-    MarkupDelBrush(br)
+; The five built-in patterns are GDI+ DashStyles; everything else is a float
+; array.  GDI+ measures a dash array in multiples of the PEN WIDTH, not in
+; pixels, so a custom pattern keeps its proportions when the stroke weight
+; changes — which is why the style editor asks for "6, 3" rather than pixels.
+MarkupApplyDash(pen, dashId) {
+    d := MarkupDash(dashId)
+    if !d
+        return
+    if d.Arr.Length {
+        buf := Buffer(d.Arr.Length * 4, 0)
+        for i, v in d.Arr
+            NumPut('Float', v + 0.0, buf, (i - 1) * 4)
+        DllCall('gdiplus\GdipSetPenDashArray', 'UPtr', pen
+              , 'Ptr', buf, 'Int', d.Arr.Length)
+        return
+    }
+    if d.Style
+        DllCall('gdiplus\GdipSetPenDashStyle', 'UPtr', pen, 'Int', d.Style)
+}
+
+; One point of a cap definition, mapped into the drawing.  A cap is defined in a
+; normalised frame: the tip is the origin, +X runs BACK along the shaft, +Y runs
+; across it, and both are measured in head-lengths.  One definition therefore
+; serves every angle, every stroke weight and every head size — which is what
+; makes a user-supplied row of numbers a first-class arrowhead.
+;
+; (The old hard-coded triangle used a half-spread of 0.42 radians; that is
+; exactly [0,0, 0.913,-0.408, 0.913,0.408] in this frame, which is how the
+; built-in 'arrow' still draws pixel-for-pixel what it always did.)
+MarkupCapPoint(tipX, tipY, ang, head, x, y, &wx, &wy) {
+    c := Cos(ang), s := Sin(ang)
+    wx := tipX - head * (x * c + y * s)
+    wy := tipY - head * (x * s - y * c)
+}
+
+; One end treatment, pointing along ang.  Built-in or read out of the INI, every
+; shape comes through here, so adding an arrowhead is data and never code.
+MarkupDrawCap(pGfx, capId, tipX, tipY, ang, head, col, alpha, strokeW := 2) {
+    cap := MarkupCap(capId)
+    if (cap.Kind = 'none')
+        return
+
+    if (cap.Kind = 'circle') {
+        MarkupCapPoint(tipX, tipY, ang, head, cap.CX, 0, &cx, &cy)
+        r := Max(0.5, head * cap.R)
+        if cap.Fill {
+            br := MarkupBrush(col, alpha)
+            DllCall('gdiplus\GdipFillEllipse', 'UPtr', pGfx, 'UPtr', br
+                  , 'Float', cx - r, 'Float', cy - r, 'Float', r * 2, 'Float', r * 2)
+            MarkupDelBrush(br)
+        } else {
+            pn := MarkupPen(col, alpha, strokeW)
+            DllCall('gdiplus\GdipDrawEllipse', 'UPtr', pGfx, 'UPtr', pn
+                  , 'Float', cx - r, 'Float', cy - r, 'Float', r * 2, 'Float', r * 2)
+            MarkupDelPen(pn)
+        }
+        return
+    }
+
+    if (cap.Pts.Length < 4)
+        return
+    pts := [], i := 1
+    while (i <= cap.Pts.Length) {
+        MarkupCapPoint(tipX, tipY, ang, head, cap.Pts[i], cap.Pts[i + 1], &wx, &wy)
+        pts.Push(wx, wy), i += 2
+    }
+    pb := MarkupPointBuf(pts)
+
+    if cap.Fill {
+        br := MarkupBrush(col, alpha)
+        DllCall('gdiplus\GdipFillPolygon', 'UPtr', pGfx, 'UPtr', br
+              , 'Ptr', pb.Buf, 'Int', pb.N, 'Int', 0)
+        MarkupDelBrush(br)
+        return
+    }
+    ; Stroked caps use the object's own line weight, so a chevron head matches
+    ; the shaft it sits on instead of being a hairline stuck to a fat line.
+    pn := MarkupPen(col, alpha, strokeW)
+    if cap.Close
+        DllCall('gdiplus\GdipDrawPolygon', 'UPtr', pGfx, 'UPtr', pn
+              , 'Ptr', pb.Buf, 'Int', pb.N)
+    else
+        DllCall('gdiplus\GdipDrawLines', 'UPtr', pGfx, 'UPtr', pn
+              , 'Ptr', pb.Buf, 'Int', pb.N)
+    MarkupDelPen(pn)
+}
+
+; Head length in master pixels.  The halo pass inflates it so the contrasting
+; outline shows around the head as well as along the shaft.
+MarkupHeadSize(o, isHalo := false) {
+    sc := o.HasProp('HeadScale') ? o.HeadScale : MarkupCfg.ArrowHeadScale
+    return Max(8, o.Thick * sc) + (isHalo ? MarkupCfg.OutlineWidth : 0)
+}
+
+; How far back along the shaft the stroke must stop so the cap's back edge has
+; no nub of line poking through it, in master pixels.
+MarkupCapShrink(capId, head) => MarkupCap(capId).Shrink * head
+
+; Corner radius for a rectangle-ish object, clamped so shrinking the shape
+; degrades to a stadium instead of overshooting into itself.
+MarkupCornerRadius(o, w, h) {
+    r := o.HasProp('Corner') ? o.Corner : 0
+    if (r < 0)                             ; auto — a plain rectangle was sharp
+        r := 0
+    return Max(0, Min(r, Min(w, h) / 2))
 }
 
 MarkupBrush(rgb, alpha := 255) {
@@ -1125,7 +1619,14 @@ MarkupPathBuild(pts, radius, shrinkStart, shrinkEnd) {
 ; order MarkupCalloutPath walks the perimeter: +x along the top, +y down the
 ; right, -x along the bottom, -y up the left.
 
-MarkupCalloutRadius(o, w, h) => Max(1, Min(o.FontSize * 0.45, Min(w, h) / 2))
+; Corner < 0 (or absent) is AUTO, which keeps the original font-derived radius
+; so callouts drawn before this setting existed look exactly as they did.  Any
+; other value is an explicit radius.  The Min(w,h)/2 clamp applies either way,
+; so dragging a bubble small turns it into a stadium rather than tying knots.
+MarkupCalloutRadius(o, w, h) {
+    r := (o.HasProp('Corner') && o.Corner >= 0) ? o.Corner : o.FontSize * 0.45
+    return Max(1, Min(r, Min(w, h) / 2))
+}
 
 ; Returns 0 when there should be no tail at all (tip inside the box, or a
 ; degenerate box); otherwise a record describing the base.  Edge is the index of
@@ -1306,6 +1807,27 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
     switch o.Type {
 
     case 'rect', 'highlight':
+        ; Corner > 0 routes through the rounded path; 0 keeps the original
+        ; single-call rectangle, which is both faster and pixel-identical to
+        ; what every existing snip was drawn with.
+        rad := MarkupCornerRadius(o, w, h)
+        if (rad > 0) {
+            gp := MarkupRoundRectPath(x1, y1, w, h, rad)
+            if gp {
+                if doFill {
+                    br := MarkupBrush(fillCol, fillAlpha)
+                    DllCall('gdiplus\GdipFillPath', 'UPtr', pGfx, 'UPtr', br, 'UPtr', gp)
+                    MarkupDelBrush(br)
+                }
+                if (o.Type = 'rect') {
+                    pn := MarkupPen(col, alpha, width, o.Dash)
+                    DllCall('gdiplus\GdipDrawPath', 'UPtr', pGfx, 'UPtr', pn, 'UPtr', gp)
+                    MarkupDelPen(pn)
+                }
+                DllCall('gdiplus\GdipDeletePath', 'UPtr', gp)
+            }
+            return
+        }
         if doFill {
             br := MarkupBrush(fillCol, fillAlpha)
             DllCall('gdiplus\GdipFillRectangle', 'UPtr', pGfx, 'UPtr', br
@@ -1313,7 +1835,7 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
             MarkupDelBrush(br)
         }
         if (o.Type = 'rect') {
-            pn := MarkupPen(col, alpha, width)
+            pn := MarkupPen(col, alpha, width, o.Dash)
             DllCall('gdiplus\GdipDrawRectangle', 'UPtr', pGfx, 'UPtr', pn
                   , 'Float', x1, 'Float', y1, 'Float', w, 'Float', h)
             MarkupDelPen(pn)
@@ -1326,31 +1848,43 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
                   , 'Float', x1, 'Float', y1, 'Float', w, 'Float', h)
             MarkupDelBrush(br)
         }
-        pn := MarkupPen(col, alpha, width)
+        pn := MarkupPen(col, alpha, width, o.Dash)
         DllCall('gdiplus\GdipDrawEllipse', 'UPtr', pGfx, 'UPtr', pn
               , 'Float', x1, 'Float', y1, 'Float', w, 'Float', h)
         MarkupDelPen(pn)
 
-    case 'line':
-        pn := MarkupPen(col, alpha, width)
-        DllCall('gdiplus\GdipDrawLine', 'UPtr', pGfx, 'UPtr', pn
-              , 'Float', o.X1 + ox, 'Float', o.Y1 + oy
-              , 'Float', o.X2 + ox, 'Float', o.Y2 + oy)
-        MarkupDelPen(pn)
-
-    case 'arrow':
-        ; Shaft stops short of the tip so the head's back edge doesn't show a
-        ; nub of shaft poking through it on thick arrows.
-        ang  := MarkupAtan2(o.Y2 - o.Y1, o.X2 - o.X1)
-        head := Max(8, o.Thick * MarkupCfg.ArrowHeadScale) + (isHalo ? MarkupCfg.OutlineWidth : 0)
-        tipX := o.X2 + ox, tipY := o.Y2 + oy
-        bx   := tipX - Cos(ang) * head * 0.85
-        by   := tipY - Sin(ang) * head * 0.85
-        pn := MarkupPen(col, alpha, width, o.Dash)
-        DllCall('gdiplus\GdipDrawLine', 'UPtr', pGfx, 'UPtr', pn
-              , 'Float', o.X1 + ox, 'Float', o.Y1 + oy, 'Float', bx, 'Float', by)
-        MarkupDelPen(pn)
-        MarkupDrawHead(pGfx, tipX, tipY, ang, head, col, alpha)
+    case 'line', 'arrow':
+        ; ONE case for both.  A Line and an Arrow differ only in which end
+        ; treatments their tool seeded, so there is nothing left to branch on —
+        ; the Arrow tool is the Line tool with CapEnd preset to 'arrow'.
+        ;
+        ; The shaft stops short of each end by that cap's own shrink distance,
+        ; so a thick line doesn't show a nub poking out through the back of its
+        ; head, and a cap that needs no clearance (a bar, a chevron) gets none.
+        ax := o.X1 + ox, ay := o.Y1 + oy
+        bx := o.X2 + ox, by := o.Y2 + oy
+        ang  := MarkupAtan2(by - ay, bx - ax)
+        head := MarkupHeadSize(o, isHalo)
+        len  := MarkupPathLen(ax, ay, bx, by)
+        shrS := MarkupCapShrink(o.CapStart, head)
+        shrE := MarkupCapShrink(o.CapEnd,   head)
+        if (len > 0.5) {
+            ; Never eat more than 90% of the shaft: a short line with two big
+            ; heads would otherwise draw its stroke backwards.
+            if (shrS + shrE > len * 0.9) {
+                k := len * 0.9 / (shrS + shrE)
+                shrS *= k, shrE *= k
+            }
+            ux := (bx - ax) / len, uy := (by - ay) / len
+            pn := MarkupPen(col, alpha, width, o.Dash)
+            DllCall('gdiplus\GdipDrawLine', 'UPtr', pGfx, 'UPtr', pn
+                  , 'Float', ax + ux * shrS, 'Float', ay + uy * shrS
+                  , 'Float', bx - ux * shrE, 'Float', by - uy * shrE)
+            MarkupDelPen(pn)
+        }
+        MarkupDrawCap(pGfx, o.CapEnd,   bx, by, ang,          head, col, alpha, width)
+        MarkupDrawCap(pGfx, o.CapStart, ax, ay, ang + 3.14159265358979
+                    , head, col, alpha, width)
 
     case 'path':
         if (o.Pts.Length < 4)
@@ -1360,13 +1894,16 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
         while (i <= o.Pts.Length)
             pp.Push(o.Pts[i] + ox, o.Pts[i + 1] + oy), i += 2
         np   := pp.Length // 2
-        head := Max(8, o.Thick * MarkupCfg.ArrowHeadScale) + (isHalo ? MarkupCfg.OutlineWidth : 0)
-        ; The shaft is pulled back only where a head will actually cover it.
-        shrS := o.CapStart ? head * 0.85 : 0
-        shrE := o.CapEnd   ? head * 0.85 : 0
-        ; Corner radius grows with stroke width, or a thick path's corners look
-        ; pinched next to its own line weight.
-        rad  := Max(MarkupCfg.PathCornerRadius, o.Thick)
+        head := MarkupHeadSize(o, isHalo)
+        ; The shaft is pulled back only as far as the cap on that end needs.
+        shrS := MarkupCapShrink(o.CapStart, head)
+        shrE := MarkupCapShrink(o.CapEnd,   head)
+        ; Elbow radius is per-object now, but still floored at the stroke width:
+        ; a thick path with tight corners looks pinched next to its own weight.
+        ; Corner < 0 means auto, i.e. whatever PathCornerRadius says.
+        rad  := Max((o.HasProp('Corner') && o.Corner >= 0) ? o.Corner
+                                                           : MarkupCfg.PathCornerRadius
+                  , o.Thick)
         gp   := MarkupPathBuild(pp, rad, shrS, shrE)
         if gp {
             pn := MarkupPen(col, alpha, width, o.Dash)
@@ -1374,14 +1911,12 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
             MarkupDelPen(pn)
             DllCall('gdiplus\GdipDeletePath', 'UPtr', gp)
         }
-        if o.CapEnd {
-            ang := MarkupAtan2(pp[2*np] - pp[2*np - 2], pp[2*np - 1] - pp[2*np - 3])
-            MarkupDrawHead(pGfx, pp[2*np - 1], pp[2*np], ang, head, col, alpha)
-        }
-        if o.CapStart {
-            ang := MarkupAtan2(pp[2] - pp[4], pp[1] - pp[3])
-            MarkupDrawHead(pGfx, pp[1], pp[2], ang, head, col, alpha)
-        }
+        ; Each end's angle comes from its own last segment, so a cap turns with
+        ; the elbow it sits on rather than pointing along the overall run.
+        ang := MarkupAtan2(pp[2*np] - pp[2*np - 2], pp[2*np - 1] - pp[2*np - 3])
+        MarkupDrawCap(pGfx, o.CapEnd, pp[2*np - 1], pp[2*np], ang, head, col, alpha, width)
+        ang := MarkupAtan2(pp[2] - pp[4], pp[1] - pp[3])
+        MarkupDrawCap(pGfx, o.CapStart, pp[1], pp[2], ang, head, col, alpha, width)
 
     case 'pen':
         if (o.Pts.Length < 4)
@@ -1391,10 +1926,24 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
         while (i <= o.Pts.Length)
             shifted.Push(o.Pts[i] + ox, o.Pts[i + 1] + oy), i += 2
         pb := MarkupPointBuf(shifted)
-        pn := MarkupPen(col, alpha, width)
+        pn := MarkupPen(col, alpha, width, o.Dash)
         DllCall('gdiplus\GdipDrawLines', 'UPtr', pGfx, 'UPtr', pn
               , 'Ptr', pb.Buf, 'Int', pb.N)
         MarkupDelPen(pn)
+        ; A freehand stroke gets end treatments too, but its shaft is NOT pulled
+        ; back: trimming a hand-drawn polyline part-way along a segment reads as
+        ; a glitch, so the cap is simply drawn over the final point.
+        np   := pb.N
+        head := MarkupHeadSize(o, isHalo)
+        if (np >= 2) {
+            ang := MarkupAtan2(shifted[2*np] - shifted[2*np - 2]
+                             , shifted[2*np - 1] - shifted[2*np - 3])
+            MarkupDrawCap(pGfx, o.CapEnd, shifted[2*np - 1], shifted[2*np]
+                        , ang, head, col, alpha, width)
+            ang := MarkupAtan2(shifted[2] - shifted[4], shifted[1] - shifted[3])
+            MarkupDrawCap(pGfx, o.CapStart, shifted[1], shifted[2]
+                        , ang, head, col, alpha, width)
+        }
 
     case 'text':
         MarkupDrawString(pGfx, o.Text, o.X1 + ox, o.Y1 + oy, o, col, alpha
@@ -1437,7 +1986,7 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
                 DllCall('gdiplus\GdipFillPath', 'UPtr', pGfx, 'UPtr', br, 'UPtr', path)
                 MarkupDelBrush(br)
             }
-            pn := MarkupPen(col, alpha, width)
+            pn := MarkupPen(col, alpha, width, o.Dash)
             DllCall('gdiplus\GdipDrawPath', 'UPtr', pGfx, 'UPtr', pn, 'UPtr', path)
             MarkupDelPen(pn)
             DllCall('gdiplus\GdipDeletePath', 'UPtr', path)
@@ -1936,9 +2485,21 @@ MarkupRender(snip) {
 
 MarkupOnLButton(hwnd) {
     global guiSnips
-    if (MarkupState.Active != hwnd || !guiSnips.Has(hwnd))
+    if !guiSnips.Has(hwnd)
         return false
     snip := guiSnips[hwnd]
+
+    ; Tested BEFORE the markup-mode guard, because this gesture can be the way
+    ; IN to markup on a snip that isn't in a session.
+    ;
+    ; Shift already means extend-selection and marquee, so it wins outright
+    ; rather than combining into a third meaning nobody would guess.
+    if (MarkupCfg.CtrlClickSelect && GetKeyState('Ctrl', 'P')
+     && !GetKeyState('Shift', 'P') && MarkupBorrowSelect(snip, hwnd))
+        return true
+
+    if (MarkupState.Active != hwnd)
+        return false
     MarkupEnsure(snip)
     MarkupCursorPos(snip, &dx, &dy)
 
@@ -1956,6 +2517,18 @@ MarkupOnLButton(hwnd) {
             ; behaviour worth protecting, so the marquee took the modifier.
             if extend {
                 MarkupMarquee(snip, dx, dy)
+                return true
+            }
+            ; Bare image, and a tool is on loan — take it back and let it have
+            ; this click.  Clicking away from your objects is what "I'm done
+            ; editing" looks like, so it is the natural moment.
+            ;
+            ; Note what this does NOT cost: a click with no drag still deselects
+            ; and leaves nothing behind, because MarkupStartDraw discards a
+            ; zero-drag object.  So the click-empty-space-to-deselect habit
+            ; survives intact, and only a DRAG actually draws.
+            if MarkupReturnTool() {
+                MarkupStartDraw(snip, dx, dy)
                 return true
             }
             if MarkupState.Sels.Length {
@@ -1983,6 +2556,53 @@ MarkupOnLButton(hwnd) {
     }
 
     MarkupStartDraw(snip, dx, dy)
+    return true
+}
+
+; Ctrl+click ON AN OBJECT selects it.  Returns false when the click missed every
+; object, so a Ctrl+click on bare image falls straight through to the core's
+; drag-to-move exactly as it always did.
+;
+; Two things make this worth having.  With a drawing tool active it is the
+; escape hatch: you can grab the thing you just drew without going back to the
+; palette or remembering V.  With markup mode off it is the way back in —
+; annotations stay on the snip after Esc, so clicking one reopens the session
+; with that object already selected.
+MarkupBorrowSelect(snip, hwnd) {
+    ; No annotations at all — don't steal the click from the window move.
+    if (!snip.HasProp('Markup') || !snip.Markup.Objs.Length)
+        return false
+    wasActive := (MarkupState.Active = hwnd)
+
+    MarkupCursorPos(snip, &dx, &dy)
+    obj := MarkupHitTest(snip, dx, dy)
+    if !obj
+        return false
+
+    ; Order matters: MarkupBegin resets both the tool and the selection, so the
+    ; object has to be selected after it, not before.
+    prev := wasActive ? MarkupState.Tool : ''
+    if !wasActive
+        MarkupBegin(hwnd)
+    MarkupSetTool('select')
+    ; Borrowing, not switching: reaching into an object while a drawing tool was
+    ; in hand lends you Select for as long as you are working on existing
+    ; objects, and gives the tool back at the first click on bare image.
+    ; Nothing is borrowed when Select was already active — there would be
+    ; nothing to return.
+    if (MarkupCfg.StickyTool && prev != '' && prev != 'select')
+        MarkupState.Borrowed := prev
+    MarkupState.Sel := obj
+    MarkupSyncPalette()
+    MarkupRender(snip)
+
+    ; Text-bearing objects get the editor too, which is what a double-click
+    ; means in every other application.  KeyWait first, or the dialog opens with
+    ; the button still down and swallows the release.
+    if (obj.Type = 'text' || obj.Type = 'callout') {
+        KeyWait('LButton')
+        MarkupEditSelText(hwnd)
+    }
     return true
 }
 
@@ -2795,10 +3415,10 @@ MarkupShowPalette() {
     items := []
     for row in MarkupToolTable()
         items.Push(row[1] '  (' row[3] ')')
-    ctl['tools'] := g.Add('ListBox', 'x10 y10 w170 h206 Choose1', items)
+    ctl['tools'] := g.Add('ListBox', 'x10 y10 w210 h206 Choose1', items)
     ctl['tools'].OnEvent('Change', MarkupPal_Tool)
 
-    g.Add('Text', 'x10 y224 w170 h16', 'Color  (Ctrl+click sets fill)')
+    g.Add('Text', 'x10 y224 w210 h16', 'Color  (Ctrl+click sets fill)')
     i := 0
     for col in MarkupSwatches() {
         xx := 10 + Mod(i, 6) * 27
@@ -2808,34 +3428,74 @@ MarkupShowPalette() {
         i++
     }
 
-    ctl['fill']    := g.Add('Checkbox', 'x10 y304 w170 h18', 'Fill shape')
-    ctl['outline'] := g.Add('Checkbox', 'x10 y326 w170 h18', 'Outline (legibility halo)')
-    ctl['shadow']  := g.Add('Checkbox', 'x10 y348 w170 h18', 'Drop shadow')
+    ctl['fill']    := g.Add('Checkbox', 'x10 y304 w210 h18', 'Fill shape')
+    ctl['outline'] := g.Add('Checkbox', 'x10 y326 w210 h18', 'Outline (legibility halo)')
+    ctl['shadow']  := g.Add('Checkbox', 'x10 y348 w210 h18', 'Drop shadow')
     ctl['fill'].OnEvent('Click',    MarkupPal_Check.Bind('Fill'))
     ctl['outline'].OnEvent('Click', MarkupPal_Check.Bind('Outline'))
     ctl['shadow'].OnEvent('Click',  MarkupPal_Check.Bind('Shadow'))
 
     g.Add('Text', 'x10 y376 w44 h22 +0x200', 'Width')
     ctl['thick'] := g.Add('DropDownList', 'x58 y373 w56'
-                        , ['1','2','3','4','5','6','8','10','12','16'])
-    g.Add('Text', 'x10 y404 w44 h22 +0x200', 'Font')
-    ctl['font']  := g.Add('DropDownList', 'x58 y401 w56'
-                        , ['10','12','14','16','18','20','24','28','32','40','48'])
+                        , MarkupStepStrings(MarkupThickSteps()))
+    g.Add('Text', 'x122 y376 w34 h22 +0x200', 'Font')
+    ctl['font']  := g.Add('DropDownList', 'x160 y373 w60'
+                        , MarkupStepStrings(MarkupFontSteps()))
     ctl['thick'].OnEvent('Change', MarkupPal_Num.Bind('Thick'))
     ctl['font'].OnEvent('Change',  MarkupPal_Num.Bind('FontSize'))
 
-    ctl['undo'] := g.Add('Button', 'x10  y436 w56 h26', 'Undo')
-    ctl['redo'] := g.Add('Button', 'x70  y436 w56 h26', 'Redo')
-    ctl['del']  := g.Add('Button', 'x130 y436 w50 h26', 'Delete')
+    ; ── Geometry and line style ──────────────────────────────────────────────
+    ; Head is the arrowhead length as a multiple of the stroke width, so a head
+    ; stays in proportion when the line gets fatter.  Corner is the rounding on
+    ; a Rectangle, Highlighter or Callout box and the elbow radius on a Path
+    ; Arrow; 'auto' keeps whatever the type derived before the setting existed.
+    g.Add('Text', 'x10 y404 w44 h22 +0x200', 'Head')
+    ctl['head'] := g.Add('DropDownList', 'x58 y401 w56'
+                       , ['1.5','2','2.5','3','3.5','4','4.5','5','6','8'])
+    g.Add('Text', 'x120 y404 w46 h22 +0x200', 'Corner')
+    ctl['corner'] := g.Add('DropDownList', 'x170 y401 w50'
+                         , ['auto','0','2','3','4','6','8','10','12','16','20','24','32'])
+    ctl['head'].OnEvent('Change',   MarkupPal_Head)
+    ctl['corner'].OnEvent('Change', MarkupPal_Corner)
+
+    g.Add('Text', 'x10 y432 w44 h22 +0x200', 'Dash')
+    ctl['dash'] := g.Add('DropDownList', 'x58 y429 w162', [])
+    ctl['dash'].OnEvent('Change', MarkupPal_Style.Bind('Dash'))
+
+    g.Add('Text', 'x10 y460 w44 h22 +0x200', 'Ends')
+    ctl['capstart'] := g.Add('DropDownList', 'x58 y457 w70', [])
+    ctl['swap']     := g.Add('Button', 'x132 y457 w22 h22', Chr(0x21C4))
+    ctl['capend']   := g.Add('DropDownList', 'x158 y457 w62', [])
+    ctl['capstart'].OnEvent('Change', MarkupPal_Style.Bind('CapStart'))
+    ctl['capend'].OnEvent('Change',   MarkupPal_Style.Bind('CapEnd'))
+    ctl['swap'].OnEvent('Click',      (*) => MarkupSwapEnds())
+
+    ; The preview is drawn by the SAME MarkupDrawObject the snip uses, on a
+    ; throwaway object — so it cannot drift out of step with what you actually
+    ; get.  A preview that lies is worse than no preview at all.
+    ctl['preview'] := g.Add('Picture', 'x10 y488 w210 h38 Border')
+
+    ctl['undo'] := g.Add('Button', 'x10  y536 w66 h26', 'Undo')
+    ctl['redo'] := g.Add('Button', 'x80  y536 w66 h26', 'Redo')
+    ctl['del']  := g.Add('Button', 'x150 y536 w70 h26', 'Delete')
     ctl['undo'].OnEvent('Click', (*) => MarkupUndo())
     ctl['redo'].OnEvent('Click', (*) => MarkupRedo())
     ctl['del'].OnEvent('Click',  (*) => MarkupDeleteSel())
 
-    ctl['done'] := g.Add('Button', 'x10 y470 w170 h26', 'Done  (Esc)')
+    ctl['savedef'] := g.Add('Button', 'x10  y570 w120 h26', 'Save as default')
+    ctl['editsty'] := g.Add('Button', 'x134 y570 w86  h26', 'Line styles…')
+    ctl['savedef'].OnEvent('Click', (*) => MarkupSaveDefaults())
+    ctl['editsty'].OnEvent('Click', (*) => MarkupStyleEditor())
+
+    ctl['done'] := g.Add('Button', 'x10 y604 w210 h26', 'Done  (Esc)')
     ctl['done'].OnEvent('Click', (*) => MarkupEnd())
 
     g.OnEvent('Close', (*) => MarkupEnd())
     MarkupState.Palette := g
+    ; After Palette is set, not before: MarkupFillStyleLists (and the preview
+    ; inside MarkupSyncPalette) both bail out when there is no palette, so
+    ; filling the cap and dash lists earlier would silently do nothing.
+    MarkupFillStyleLists()
     ; Show('Hide') creates the window without displaying it, so GetPos in
     ; MarkupPositionPalette has real dimensions to work with. Positioning after
     ; a visible Show would make the palette jump on first open.
@@ -2945,7 +3605,7 @@ MarkupPositionPalette() {
     ; logical-unit fallback would reintroduce the very mismatch this avoids.
     if (!MarkupWinRect(g.Hwnd, , , &pw, &ph) || !pw || !ph) {
         sc := A_ScreenDPI / 96.0
-        pw := Round(210 * sc), ph := Round(540 * sc)
+        pw := Round(236 * sc), ph := Round(650 * sc)
     }
     if !MarkupWinRect(MarkupState.Active, &sl, &st, &sw, &sh)
         return
@@ -2987,11 +3647,130 @@ MarkupSyncPalette() {
     try ctl['shadow'].Value  := (o ? o.Shadow  : MarkupCfg.Shadow)  ? 1 : 0
     try ctl['thick'].Text    := String(thick)
     try ctl['font'].Text     := String(fsize)
+
+    ; Line style shows the selection when there is one, otherwise the CURRENT
+    ; TOOL's remembered style — which is also what changing a control edits.
+    st   := MarkupToolStyle(MarkupState.Tool)
+    dash := o ? o.Dash     : st.Dash
+    cs   := o ? o.CapStart : st.CapStart
+    ce   := o ? o.CapEnd   : st.CapEnd
+    corn := (o && o.HasProp('Corner')) ? o.Corner : (o ? 0 : st.Corner)
+    hsc  := (o && o.HasProp('HeadScale')) ? o.HeadScale : MarkupCfg.ArrowHeadScale
+    try ctl['dash'].Text     := MarkupDash(dash).Name
+    try ctl['capstart'].Text := MarkupCap(cs).Name
+    try ctl['capend'].Text   := MarkupCap(ce).Name
+    try ctl['head'].Text     := MarkupNumText(hsc)
+    try ctl['corner'].Text   := (corn < 0) ? 'auto' : MarkupNumText(corn)
+
+    ; With a tool on loan the list highlights the tool you will GET BACK, not
+    ; the Select you are temporarily using — otherwise the palette would say
+    ; Select right up until an arrow appeared out of nowhere.
+    shown := (MarkupState.Borrowed != '') ? MarkupState.Borrowed : MarkupState.Tool
     for i, row in MarkupToolTable()
-        if (row[2] = MarkupState.Tool) {
+        if (row[2] = shown) {
             try ctl['tools'].Value := i
             break
         }
+    MarkupUpdatePreview()
+}
+
+; Refill the two cap lists and the dash list from the registries.  Called on
+; palette build and again after every reload, which is the whole of what the
+; palette has to do to pick up a newly defined arrowhead.
+MarkupFillStyleLists() {
+    if !MarkupState.Palette
+        return
+    if !MarkupStyles.Ready
+        MarkupLoadStyles()
+    ctl  := MarkupState.Ctl
+    caps := [], dashes := []
+    for id in MarkupStyles.CapOrder
+        caps.Push(MarkupStyles.Caps[id].Name)
+    for id in MarkupStyles.DashOrder
+        dashes.Push(MarkupStyles.Dashes[id].Name)
+    for key in ['capstart', 'capend'] {
+        if ctl.Has(key) {
+            try ctl[key].Delete()
+            try ctl[key].Add(caps)
+        }
+    }
+    if ctl.Has('dash') {
+        try ctl['dash'].Delete()
+        try ctl['dash'].Add(dashes)
+    }
+}
+
+; The object the preview strip draws.  A short line carrying whatever the
+; selection (or the current tool) is set to, with the thickness capped so a
+; 16px stroke doesn't overflow a 38px strip, and shadow forced off because the
+; strip has no background for one to fall on.
+MarkupPreviewObj() {
+    o := MarkupNewObj('line')
+    if (sel := MarkupState.Sel) {
+        o.Color   := sel.Color
+        o.Thick   := sel.Thick
+        o.Dash    := sel.Dash
+        o.CapStart := sel.CapStart, o.CapEnd := sel.CapEnd
+        o.Outline := sel.Outline
+        o.HeadScale := sel.HasProp('HeadScale') ? sel.HeadScale : MarkupCfg.ArrowHeadScale
+    } else {
+        st := MarkupToolStyle(MarkupState.Tool)
+        o.Color   := MarkupCfg.Color
+        o.Thick   := MarkupCfg.Thickness
+        o.Dash    := st.Dash
+        o.CapStart := st.CapStart, o.CapEnd := st.CapEnd
+        o.Outline := MarkupCfg.Outline
+        o.HeadScale := MarkupCfg.ArrowHeadScale
+    }
+    o.Shadow := false
+    o.Thick  := Min(o.Thick, 7)
+    pad := MarkupHeadSize(o) * 0.6
+    o.X1 := 14 + pad, o.Y1 := 19
+    o.X2 := 192 - pad, o.Y2 := 19
+    return o
+}
+
+MarkupUpdatePreview() {
+    if (!MarkupState.Palette || !MarkupState.Ctl.Has('preview'))
+        return
+    MarkupRenderStrip(MarkupState.Ctl['preview'], MarkupPreviewObj(), 206, 34, 'palette')
+}
+
+; Draw one markup object into an HBITMAP and hand it to a Picture control.
+; Shared by the palette strip and both previews in the style editor, so all
+; three are guaranteed to agree with the snip and with each other.
+;
+; slot names the caller so each control's previous handle can be tracked
+; separately.  The old handle is freed only after GetObjectType confirms it is
+; still a live object: setting a Picture's Value can itself destroy the bitmap
+; the control was showing, and double-freeing a GDI handle is a far worse bug
+; than leaking a 30KB bitmap.
+MarkupRenderStrip(ctrl, o, w, h, slot) {
+    static handles := Map()
+    static BACK := 0xFFF0F0F0                 ; button-face, so the strip blends
+    DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', w, 'Int', h, 'Int', 0
+          , 'Int', 0x26200A, 'Ptr', 0, 'UPtr*', &pBmp := 0)
+    if !pBmp
+        return
+    DllCall('gdiplus\GdipGetImageGraphicsContext', 'UPtr', pBmp, 'UPtr*', &pGfx := 0)
+    if pGfx {
+        DllCall('gdiplus\GdipSetSmoothingMode', 'UPtr', pGfx, 'Int', 4)
+        DllCall('gdiplus\GdipGraphicsClear', 'UPtr', pGfx, 'UInt', BACK)
+        try MarkupDrawObject(pGfx, o)
+        DllCall('gdiplus\GdipDeleteGraphics', 'UPtr', pGfx)
+    }
+    DllCall('gdiplus\GdipCreateHBITMAPFromBitmap', 'UPtr', pBmp
+          , 'UPtr*', &hbm := 0, 'UInt', BACK)
+    DllCall('gdiplus\GdipDisposeImage', 'UPtr', pBmp)
+    if !hbm
+        return
+    old := handles.Has(slot) ? handles[slot] : 0
+    try ctrl.Value := 'HBITMAP:*' hbm
+    handles[slot] := hbm
+    if (slot = 'palette')
+        MarkupState.PreviewBmp := hbm
+    if (old && old != hbm && DllCall('gdi32\GetObjectType', 'Ptr', old))
+        DllCall('DeleteObject', 'Ptr', old)
 }
 
 MarkupPal_Tool(ctrl, *) {
@@ -3000,8 +3779,14 @@ MarkupPal_Tool(ctrl, *) {
         MarkupSetTool(MarkupToolTable()[v][2])
 }
 
+; Every DELIBERATE tool change comes through here — palette click, hotkey, the
+; Esc ladder — so this is also where a borrowed tool is forgotten.  Choosing a
+; tool by hand means you meant it, and nothing should hand you a different one
+; later.  MarkupBorrowSelect arms the loan immediately AFTER calling this, which
+; is the only way the flag ever gets set.
 MarkupSetTool(name) {
-    MarkupState.Tool := name
+    MarkupState.Tool     := name
+    MarkupState.Borrowed := ''
     ; Picking a drawing tool clears the selection, so the style controls
     ; immediately describe what you are about to draw rather than what you last
     ; had selected.
@@ -3014,6 +3799,19 @@ MarkupSetTool(name) {
     MarkupSyncPalette()
 }
 
+; Give a borrowed drawing tool back.  Returns true if there was one, so the
+; caller knows the click it is holding belongs to that tool now.
+MarkupReturnTool() {
+    if (MarkupState.Borrowed = '')
+        return false
+    tool := MarkupState.Borrowed
+    MarkupState.Borrowed := ''
+    MarkupState.Tool := tool
+    MarkupState.Sels := []
+    MarkupSyncPalette()
+    return true
+}
+
 ; Ctrl+click a swatch to set the FILL colour instead of the stroke.
 MarkupPal_Color(col, *) {
     prop := GetKeyState('Ctrl', 'P') ? 'FillColor' : 'Color'
@@ -3024,6 +3822,96 @@ MarkupPal_Color(col, *) {
 
 MarkupPal_Check(prop, ctrl, *) => MarkupApplyStyle(prop, ctrl.Value ? true : false)
 MarkupPal_Num(prop, ctrl, *)   => MarkupApplyStyle(prop, Integer(ctrl.Text))
+
+; The style dropdowns carry DISPLAY names; the objects carry ids.  Lowercasing
+; here is the whole of the conversion, which is why a cap's id is defined as the
+; lowercase of its name rather than as a separate field the user could get wrong.
+MarkupPal_Style(prop, ctrl, *) => MarkupApplyStyle(prop, StrLower(ctrl.Text))
+MarkupPal_Head(ctrl, *)        => MarkupApplyStyle('HeadScale', Float(ctrl.Text))
+MarkupPal_Corner(ctrl, *)      => MarkupApplyStyle('Corner'
+                                                 , (ctrl.Text = 'auto') ? -1 : Integer(ctrl.Text))
+
+; Reverse the two end treatments — on the selection if there is one, otherwise
+; on the tool's default.  Drawn an arrow the wrong way round is common enough
+; that this beats redrawing it.
+MarkupSwapEnds() {
+    global guiSnips
+    if MarkupState.Sels.Length {
+        hwnd := MarkupState.Active
+        if !guiSnips.Has(hwnd)
+            return
+        snip := guiSnips[hwnd]
+        MarkupPushUndo(snip)
+        for o in MarkupState.Sels {
+            tmp := o.CapStart
+            o.CapStart := o.CapEnd, o.CapEnd := tmp
+        }
+        MarkupRender(snip)
+    } else {
+        st  := MarkupToolStyle(MarkupState.Tool)
+        tmp := st.CapStart
+        st.CapStart := st.CapEnd, st.CapEnd := tmp
+    }
+    MarkupSyncPalette()
+}
+
+; Step to the next (or previous) entry in a registry.  Bound to [ ] and \\ so a
+; style can be tried on without going near the palette.
+MarkupCycleStyle(prop, dir := 1) {
+    if !MarkupStyles.Ready
+        MarkupLoadStyles()
+    list := (prop = 'Dash') ? MarkupStyles.DashOrder : MarkupStyles.CapOrder
+    if !list.Length
+        return
+    raw := (o := MarkupState.Sel) ? o.%prop% : MarkupToolStyle(MarkupState.Tool).%prop%
+    cur := (prop = 'Dash') ? MarkupDash(raw).Id : MarkupCap(raw).Id
+    idx := 1
+    for i, id in list
+        if (id = cur) {
+            idx := i
+            break
+        }
+    MarkupApplyStyle(prop, list[Mod(idx - 1 + dir + list.Length, list.Length) + 1])
+}
+
+; Write the current palette state into the INI.
+;
+; A BUTTON, not a write on every click.  Colours and widths get changed
+; constantly while annotating, and saving each one would make "my default" mean
+; "whatever I last happened to use" — which is the opposite of a default.
+MarkupSaveDefaults() {
+    path := MarkupIniPath()
+    try {
+        IniWrite(Format('{:06X}', MarkupCfg.Color),     path, 'Markup', 'Color')
+        IniWrite(Format('{:06X}', MarkupCfg.FillColor), path, 'Markup', 'FillColor')
+        IniWrite(MarkupCfg.Thickness,          path, 'Markup', 'Thickness')
+        IniWrite(MarkupCfg.FontSize,           path, 'Markup', 'FontSize')
+        IniWrite(MarkupCfg.FillShapes ? 1 : 0, path, 'Markup', 'FillShapes')
+        IniWrite(MarkupCfg.Outline    ? 1 : 0, path, 'Markup', 'Outline')
+        IniWrite(MarkupCfg.Shadow     ? 1 : 0, path, 'Markup', 'Shadow')
+        IniWrite(MarkupNumText(MarkupCfg.ArrowHeadScale)
+               , path, 'Markup', 'ArrowHeadScale')
+
+        for tool, prefix in Map('line', 'Line', 'arrow', 'Arrow'
+                              , 'path', 'Path', 'pen',  'Pen') {
+            st := MarkupToolStyle(tool)
+            IniWrite(st.Dash,     path, 'Markup', prefix 'Dash')
+            IniWrite(st.CapStart, path, 'Markup', prefix 'CapStart')
+            IniWrite(st.CapEnd,   path, 'Markup', prefix 'CapEnd')
+        }
+        IniWrite(MarkupToolStyle('rect').Corner,    path, 'Markup', 'RectCorner')
+        IniWrite(MarkupToolStyle('callout').Corner, path, 'Markup', 'CalloutCorner')
+        IniWrite(MarkupToolStyle('path').Corner,    path, 'Markup', 'PathCornerRadius')
+        MarkupToast('Markup defaults saved')
+    } catch as e {
+        MarkupToast('Could not save defaults: ' e.Message, 2500)
+    }
+}
+
+MarkupToast(txt, ms := 1400) {
+    ToolTip(txt)
+    SetTimer(() => ToolTip(), -ms)
+}
 
 ; With something selected, edit THAT object. With nothing selected, change the
 ; default for the next one. Same control, two jobs, no modes to explain.
@@ -3056,6 +3944,12 @@ MarkupApplyStyle(prop, value) {
         case 'FontSize':  MarkupCfg.FontSize  := value
         case 'Outline':   MarkupCfg.Outline   := value
         case 'Shadow':    MarkupCfg.Shadow    := value
+        case 'HeadScale': MarkupCfg.ArrowHeadScale := value
+        ; These four are per TOOL, not per script — see MarkupToolStyle.  So
+        ; setting a chevron end while the Line tool is active changes what Line
+        ; draws next and leaves Arrow exactly as it was.
+        case 'Dash', 'CapStart', 'CapEnd', 'Corner':
+            MarkupToolStyle(MarkupState.Tool).%prop% := value
     }
     MarkupSyncPalette()
 }
@@ -3074,6 +3968,548 @@ MarkupTogglePalette() {
         MarkupHidePalette()
     else
         MarkupShowPalette()
+}
+
+; ==============================================================================
+; MOUSE WHEEL  —  resize the selection
+; ==============================================================================
+;
+; With something selected, Ctrl+Wheel steps its size: stroke width for anything
+; that draws a line, point size for Text and Number badges.
+;
+; CTRL rather than a bare wheel, for two reasons.  A plain binding would swallow
+; every scroll over a snip, including the ones where nothing is selected and the
+; user just meant to scroll the window behind.  And Ctrl is already the "reach
+; into the objects" modifier here — Ctrl+click selects one, Ctrl+wheel resizes
+; what you selected — so the two gestures tell one story instead of two.
+;
+; REGISTERED AT RUNTIME, not as a static #HotIf block, and that is deliberate.
+; A permanently declared wheel hotkey puts the whole script into the mouse-hook
+; chain for every scroll anywhere on the machine — which is precisely why the
+; core's FreezeDetectWheel() registers its own wheel keys the same way.  Binding
+; these only for the length of a markup session keeps that promise.
+;
+; Alt+Wheel is left alone: the core uses it to adjust snip transparency.
+
+MarkupWheelHotkeys(turnOn) {
+    state := turnOn ? 'On' : 'Off'
+    HotIfWinActive('SnipperWindow ahk_class AutoHotkeyGUI')
+    try Hotkey('^WheelUp',   MarkupWheelUp,   state)
+    try Hotkey('^WheelDown', MarkupWheelDown, state)
+    HotIf()
+}
+
+MarkupWheelUp(*)   => MarkupWheelSize(1)
+MarkupWheelDown(*) => MarkupWheelSize(-1)
+
+; The size ladders.  ONE definition each, shared with the palette dropdowns, so
+; the wheel can never land on a value the dropdown has no entry for — which
+; would leave the palette showing a stale number after every scroll.
+MarkupThickSteps() {
+    static t := [1, 2, 3, 4, 5, 6, 8, 10, 12, 16]
+    return t
+}
+
+MarkupFontSteps() {
+    static t := [10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48]
+    return t
+}
+
+MarkupStepStrings(steps) {
+    out := []
+    for v in steps
+        out.Push(String(v))
+    return out
+}
+
+; The next rung up or down.  Strictly greater / strictly less rather than
+; index arithmetic, so a value that ISN'T on the ladder (typed into the INI, or
+; left over from an older step list) still moves sensibly instead of snapping to
+; a neighbour it already passed.
+MarkupStepValue(steps, cur, dir) {
+    if (dir > 0) {
+        for v in steps
+            if (v > cur)
+                return v
+        return steps[steps.Length]
+    }
+    i := steps.Length
+    while (i >= 1) {
+        if (steps[i] < cur)
+            return steps[i]
+        i--
+    }
+    return steps[1]
+}
+
+; Which size a given object actually has.  Blur, highlighter and pasted images
+; are excluded because none of them strokes anything — a "width" on those would
+; be a control that visibly does nothing.
+MarkupSizeProp(o) {
+    switch o.Type {
+        case 'text', 'number':            return 'FontSize'
+        case 'blur', 'image', 'highlight': return ''
+    }
+    return 'Thick'
+}
+
+MarkupWheelSize(dir) {
+    global guiSnips
+    static lastTick := 0
+    if (!MarkupState.Active || !MarkupState.Sels.Length)
+        return
+    if !guiSnips.Has(MarkupState.Active)
+        return
+    snip := guiSnips[MarkupState.Active]
+
+    ; Work out every new value BEFORE touching anything.  Doing it in this order
+    ; is what lets the undo entry be taken only when something will really move:
+    ; MarkupPushUndo also clears the redo branch, so a notch at the end of the
+    ; ladder must not reach it, or scrolling against the stop would silently
+    ; throw away a redo the user still wanted.
+    plan := []
+    for o in MarkupState.Sels {
+        prop := MarkupSizeProp(o)
+        if (prop = '')
+            continue
+        steps := (prop = 'FontSize') ? MarkupFontSteps() : MarkupThickSteps()
+        val   := MarkupStepValue(steps, o.%prop%, dir)
+        if (val != o.%prop%)
+            plan.Push({ Obj: o, Prop: prop, Val: val })
+    }
+    if !plan.Length
+        return
+
+    ; One undo entry per SPIN, not per notch.  Without this a three-second
+    ; scroll would bury everything else on the stack under forty snapshots.
+    now := A_TickCount
+    if (now - lastTick > 700)
+        MarkupPushUndo(snip)
+    lastTick := now
+
+    shown := ''
+    for p in plan {
+        p.Obj.%p.Prop% := p.Val
+        if (shown = '')
+            shown := (p.Prop = 'FontSize' ? 'Font ' : 'Width ') p.Val
+    }
+    MarkupSyncPalette()
+    MarkupRender(snip)
+    MarkupToast(shown, 700)
+}
+
+; ==============================================================================
+; LINE STYLE EDITOR
+; ==============================================================================
+;
+; Defines arrowheads and dash patterns and writes them to [MarkupCaps] /
+; [MarkupDashes].  Saving re-registers immediately and re-renders every open
+; snip, so nothing here needs a restart of ScreenSnip.
+;
+; The validator is MarkupParseCapLine — the SAME function that reads the INI at
+; startup.  A definition the editor accepts is therefore one the loader will
+; accept next time, which is the only way to be sure the dialog can't write a
+; file that then fails to load.  It also means a definition typed by hand into
+; the INI and one built here are indistinguishable, by construction.
+;
+; A custom entry may reuse a built-in name; MarkupDefCap replaces in place, so
+; the override takes the built-in's slot in the lists rather than sitting next
+; to it under the same label.  Deleting the override restores the built-in on
+; the next reload, which is why Delete is offered even for built-in names.
+
+class MarkupEd {
+    static Gui     := ''
+    static Ctl     := Map()
+    static CapIds  := []          ; parallel to the caps ListBox
+    static DashIds := []
+}
+
+MarkupStyleEditor() {
+    if MarkupEd.Gui {
+        MarkupEd.Gui.Show()
+        MarkupEd_Fill()
+        return
+    }
+    if !MarkupStyles.Ready
+        MarkupLoadStyles()
+
+    g := Gui('+AlwaysOnTop +ToolWindow', 'Markup Line Styles')
+    g.MarginX := 8, g.MarginY := 8
+    g.SetFont('s9', 'Segoe UI')
+    ctl := MarkupEd.Ctl := Map()
+
+    tabs := g.Add('Tab3', 'x8 y8 w464 h330', ['Arrowheads', 'Dashes'])
+
+    ; ── Arrowheads ───────────────────────────────────────────────────────────
+    tabs.UseTab(1)
+    ctl['caplist'] := g.Add('ListBox', 'x20 y40 w140 h250')
+    ctl['caplist'].OnEvent('Change', MarkupEd_LoadCap)
+
+    g.Add('Text', 'x176 y42 w40 h22 +0x200', 'Name')
+    ctl['capname'] := g.Add('Edit', 'x220 y40 w236')
+
+    g.Add('Text', 'x176 y74 w40 h22 +0x200', 'Shape')
+    ctl['capkind'] := g.Add('DropDownList', 'x220 y72 w90', ['poly', 'circle'])
+    g.Add('Text', 'x320 y74 w34 h22 +0x200', 'Draw')
+    ctl['capfill'] := g.Add('DropDownList', 'x358 y72 w98', ['fill', 'open', 'line'])
+    ctl['capkind'].OnEvent('Change', MarkupEd_CapChanged)
+    ctl['capfill'].OnEvent('Change', MarkupEd_CapChanged)
+
+    g.Add('Text', 'x176 y106 w46 h22 +0x200', 'Shrink')
+    ctl['capshrink'] := g.Add('Edit', 'x224 y104 w56')
+    ctl['capshrink'].OnEvent('Change', MarkupEd_CapChanged)
+    g.Add('Text', 'x288 y106 w168 h22 +0x200', 'how far the shaft stops short')
+
+    ctl['caphint'] := g.Add('Text', 'x176 y134 w280 h16', 'Points')
+    ctl['cappts']  := g.Add('Edit', 'x176 y152 w280 h72 Multi')
+    ctl['cappts'].OnEvent('Change', MarkupEd_CapChanged)
+
+    ctl['cappv'] := g.Add('Picture', 'x176 y232 w280 h44 Border')
+
+    ctl['capnew'] := g.Add('Button', 'x176 y284 w64 h26', 'New')
+    ctl['capcpy'] := g.Add('Button', 'x244 y284 w64 h26', 'Copy')
+    ctl['capsav'] := g.Add('Button', 'x312 y284 w64 h26', 'Save')
+    ctl['capdel'] := g.Add('Button', 'x380 y284 w76 h26', 'Delete')
+    ctl['capnew'].OnEvent('Click', (*) => MarkupEd_NewCap())
+    ctl['capcpy'].OnEvent('Click', (*) => MarkupEd_CopyCap())
+    ctl['capsav'].OnEvent('Click', (*) => MarkupEd_SaveCap())
+    ctl['capdel'].OnEvent('Click', (*) => MarkupEd_DeleteCap())
+
+    ; ── Dashes ───────────────────────────────────────────────────────────────
+    tabs.UseTab(2)
+    ctl['dashlist'] := g.Add('ListBox', 'x20 y40 w140 h250')
+    ctl['dashlist'].OnEvent('Change', MarkupEd_LoadDash)
+
+    g.Add('Text', 'x176 y42 w52 h22 +0x200', 'Name')
+    ctl['dashname'] := g.Add('Edit', 'x232 y40 w224')
+
+    g.Add('Text', 'x176 y74 w52 h22 +0x200', 'Pattern')
+    ctl['dashpat'] := g.Add('Edit', 'x232 y72 w224')
+    ctl['dashpat'].OnEvent('Change', MarkupEd_DashChanged)
+
+    g.Add('Text', 'x176 y104 w280 h48'
+        , 'Lengths alternating on, off, on, off …  Each is a multiple of the '
+        . 'stroke width, so a pattern keeps its proportions at any line weight. '
+        . 'Built-in patterns have no editable numbers.')
+
+    ctl['dashpv'] := g.Add('Picture', 'x176 y232 w280 h44 Border')
+
+    ctl['dashnew'] := g.Add('Button', 'x176 y284 w64 h26', 'New')
+    ctl['dashcpy'] := g.Add('Button', 'x244 y284 w64 h26', 'Copy')
+    ctl['dashsav'] := g.Add('Button', 'x312 y284 w64 h26', 'Save')
+    ctl['dashdel'] := g.Add('Button', 'x380 y284 w76 h26', 'Delete')
+    ctl['dashnew'].OnEvent('Click', (*) => MarkupEd_NewDash())
+    ctl['dashcpy'].OnEvent('Click', (*) => MarkupEd_CopyDash())
+    ctl['dashsav'].OnEvent('Click', (*) => MarkupEd_SaveDash())
+    ctl['dashdel'].OnEvent('Click', (*) => MarkupEd_DeleteDash())
+
+    tabs.UseTab()
+    ctl['reload'] := g.Add('Button', 'x8   y348 w140 h26', 'Reload from INI')
+    ctl['close']  := g.Add('Button', 'x392 y348 w80  h26', 'Close')
+    ctl['reload'].OnEvent('Click', (*) => (MarkupReloadStyles(), MarkupEd_Fill()))
+    ctl['close'].OnEvent('Click',  (*) => MarkupEd_Close())
+    g.OnEvent('Close', (*) => MarkupEd_Close())
+
+    MarkupEd.Gui := g
+    MarkupEd_Fill()
+    g.Show()
+}
+
+MarkupEd_Close() {
+    if MarkupEd.Gui
+        MarkupEd.Gui.Hide()
+}
+
+; Refill both lists from the registries, keeping the current selections if the
+; names survived the reload.
+MarkupEd_Fill() {
+    if !MarkupEd.Gui
+        return
+    ctl := MarkupEd.Ctl
+    capWas  := MarkupEd_Selected('caplist',  MarkupEd.CapIds)
+    dashWas := MarkupEd_Selected('dashlist', MarkupEd.DashIds)
+
+    names := [], MarkupEd.CapIds := []
+    for id in MarkupStyles.CapOrder {
+        d := MarkupStyles.Caps[id]
+        names.Push(d.Name (d.Builtin ? '' : '  •'))
+        MarkupEd.CapIds.Push(id)
+    }
+    ctl['caplist'].Delete(), ctl['caplist'].Add(names)
+
+    names := [], MarkupEd.DashIds := []
+    for id in MarkupStyles.DashOrder {
+        d := MarkupStyles.Dashes[id]
+        names.Push(d.Name (d.Builtin ? '' : '  •'))
+        MarkupEd.DashIds.Push(id)
+    }
+    ctl['dashlist'].Delete(), ctl['dashlist'].Add(names)
+
+    MarkupEd_Reselect('caplist',  MarkupEd.CapIds,  capWas  != '' ? capWas  : 'arrow')
+    MarkupEd_Reselect('dashlist', MarkupEd.DashIds, dashWas != '' ? dashWas : 'dash')
+    MarkupEd_LoadCap()
+    MarkupEd_LoadDash()
+}
+
+MarkupEd_Selected(listName, ids) {
+    v := 0
+    try v := MarkupEd.Ctl[listName].Value
+    return (v >= 1 && v <= ids.Length) ? ids[v] : ''
+}
+
+MarkupEd_Reselect(listName, ids, wantId) {
+    for i, id in ids
+        if (id = wantId) {
+            try MarkupEd.Ctl[listName].Value := i
+            return
+        }
+    try MarkupEd.Ctl[listName].Value := ids.Length ? 1 : 0
+}
+
+; ── Arrowhead tab ────────────────────────────────────────────────────────────
+
+MarkupEd_LoadCap(*) {
+    ctl := MarkupEd.Ctl
+    id  := MarkupEd_Selected('caplist', MarkupEd.CapIds)
+    if (id = '') {
+        MarkupEd_CapChanged()
+        return
+    }
+    d := MarkupStyles.Caps[id]
+    ctl['capname'].Value   := d.Name
+    ctl['capkind'].Text    := (d.Kind = 'none') ? 'poly' : d.Kind
+    ctl['capfill'].Text    := d.Fill ? 'fill' : (d.Close ? 'open' : 'line')
+    ctl['capshrink'].Value := MarkupNumText(d.Shrink)
+    if (d.Kind = 'circle') {
+        ctl['cappts'].Value := MarkupNumText(d.CX) ', ' MarkupNumText(d.R)
+    } else {
+        txt := '', i := 1
+        while (i <= d.Pts.Length) {
+            txt .= (txt = '' ? '' : '   ') MarkupNumText(d.Pts[i]) ',' MarkupNumText(d.Pts[i + 1])
+            i += 2
+        }
+        ctl['cappts'].Value := txt
+    }
+    MarkupEd_CapChanged()
+}
+
+; Live: retitle the points box for the current shape and redraw the preview from
+; whatever is typed, valid or not — an invalid definition simply draws nothing,
+; which is a clearer signal than a message box on every keystroke would be.
+MarkupEd_CapChanged(*) {
+    ctl := MarkupEd.Ctl
+    isCircle := (ctl['capkind'].Text = 'circle')
+    ctl['caphint'].Value := isCircle
+        ? 'Centre, radius  —  both in head-lengths back from the tip'
+        : 'Points as  x,y  pairs  —  tip is 0,0 and +x runs back along the shaft'
+    ctl['cappv'].Value := ''
+    if !(def := MarkupEd_BuildCap(&err))
+        return
+    ; Register under a scratch name so the preview can draw it without touching
+    ; the real registry entry the user may still be editing away from.
+    def := def.Clone()
+    def.Name := '_preview'
+    MarkupDefCap(def)
+    o := MarkupNewObj('line')
+    o.Color := MarkupCfg.Color, o.Thick := 4, o.Outline := false, o.Shadow := false
+    o.Dash  := 'solid', o.CapStart := 'none', o.CapEnd := '_preview'
+    o.X1 := 30, o.Y1 := 22, o.X2 := 240, o.Y2 := 22
+    MarkupRenderStrip(ctl['cappv'], o, 276, 40, 'edcap')
+}
+
+; Build a definition from the fields, or return 0 with err set.  Validation is
+; done by handing the composed INI line to the very parser that reads the file,
+; so anything this accepts is guaranteed to load again next time.
+MarkupEd_BuildCap(&err) {
+    ctl  := MarkupEd.Ctl
+    err  := ''
+    name := Trim(ctl['capname'].Value)
+    if !RegExMatch(name, '^[\w][\w \-]{0,23}$') {
+        err := 'Name must be 1-24 characters: letters, digits, spaces, - or _.'
+        return 0
+    }
+    ; The points box is deliberately forgiving about separators — "0,0  1,-0.45"
+    ; and "0 0 1 -0.45" and one number per line all normalise to the same thing.
+    body := RegExReplace(Trim(ctl['cappts'].Value), '[\s,]+', ',')
+    body := Trim(body, ',')
+    spec := ctl['capkind'].Text ', ' ctl['capfill'].Text ', '
+          . Trim(ctl['capshrink'].Value) ', ' body
+    ; Validate by parsing into a scratch slot, so nothing is committed until
+    ; Save and the check is literally the loader's own.
+    if !MarkupParseCapLine('_probe=' spec) {
+        err := 'That definition is not valid.  Check the numbers: '
+             . (ctl['capkind'].Text = 'circle'
+                ? 'a circle needs a centre and a radius.'
+                : 'a polygon needs at least two x,y pairs.')
+        return 0
+    }
+    def := MarkupStyles.Caps['_probe'].Clone()
+    def.Name := name
+    def.Id   := StrLower(name)
+    def.Builtin := false
+    return def
+}
+
+MarkupEd_SaveCap() {
+    if !(def := MarkupEd_BuildCap(&err)) {
+        MsgBox(err, 'Markup Line Styles', 'Icon!')
+        return
+    }
+    MarkupDefCap(def)
+    try {
+        IniWrite(MarkupCapToIni(def), MarkupIniPath(), 'MarkupCaps', def.Name)
+    } catch as e {
+        MsgBox('Saved for this session, but the INI could not be written:`n`n'
+             . e.Message, 'Markup Line Styles', 'Icon!')
+    }
+    MarkupReloadStyles()
+    MarkupEd_Fill()
+    MarkupEd_Reselect('caplist', MarkupEd.CapIds, StrLower(def.Name))
+    MarkupEd_LoadCap()
+}
+
+MarkupEd_NewCap() {
+    ctl := MarkupEd.Ctl
+    ctl['capname'].Value   := 'MyHead'
+    ctl['capkind'].Text    := 'poly'
+    ctl['capfill'].Text    := 'fill'
+    ctl['capshrink'].Value := '0.85'
+    ctl['cappts'].Value    := '0,0   1,-0.45   1,0.45'
+    MarkupEd_CapChanged()
+}
+
+MarkupEd_CopyCap() {
+    ctl  := MarkupEd.Ctl
+    base := Trim(ctl['capname'].Value)
+    ctl['capname'].Value := SubStr(base ' copy', 1, 24)
+    MarkupEd_CapChanged()
+}
+
+MarkupEd_DeleteCap() {
+    id := MarkupEd_Selected('caplist', MarkupEd.CapIds)
+    if (id = '')
+        return
+    d := MarkupStyles.Caps[id]
+    if (d.Id = 'none') {
+        MsgBox('"none" is what an object falls back to, so it cannot be removed.'
+             , 'Markup Line Styles', 'Icon!')
+        return
+    }
+    msg := d.Builtin
+        ? 'Remove any custom override of "' d.Name '" and restore the built-in?'
+        : 'Delete the arrowhead "' d.Name '"?`n`nObjects still using it will '
+        . 'fall back to no end treatment.'
+    if (MsgBox(msg, 'Markup Line Styles', 'YesNo Icon?') != 'Yes')
+        return
+    try IniDelete(MarkupIniPath(), 'MarkupCaps', d.Name)
+    catch {
+        ; No INI entry to remove — a pure built-in.  Reloading restores it.
+    }
+    MarkupReloadStyles()
+    MarkupEd_Fill()
+}
+
+; ── Dash tab ─────────────────────────────────────────────────────────────────
+
+MarkupEd_LoadDash(*) {
+    ctl := MarkupEd.Ctl
+    id  := MarkupEd_Selected('dashlist', MarkupEd.DashIds)
+    if (id = '') {
+        MarkupEd_DashChanged()
+        return
+    }
+    d := MarkupStyles.Dashes[id]
+    ctl['dashname'].Value := d.Name
+    ctl['dashpat'].Value  := d.Arr.Length ? MarkupDashToIni(d) : ''
+    MarkupEd_DashChanged()
+}
+
+MarkupEd_DashChanged(*) {
+    ctl := MarkupEd.Ctl
+    ctl['dashpv'].Value := ''
+    pat := Trim(ctl['dashpat'].Value)
+    id  := MarkupEd_Selected('dashlist', MarkupEd.DashIds)
+    if (pat = '') {
+        ; A built-in with no numbers of its own — preview the real thing.
+        if (id = '')
+            return
+        prev := id
+    } else {
+        if !MarkupParseDashLine('_preview=' pat)
+            return
+        prev := '_preview'
+    }
+    o := MarkupNewObj('line')
+    o.Color := MarkupCfg.Color, o.Thick := 4, o.Outline := false, o.Shadow := false
+    o.Dash  := prev, o.CapStart := 'none', o.CapEnd := 'none'
+    o.X1 := 18, o.Y1 := 22, o.X2 := 258, o.Y2 := 22
+    MarkupRenderStrip(ctl['dashpv'], o, 276, 40, 'eddash')
+}
+
+MarkupEd_SaveDash() {
+    ctl  := MarkupEd.Ctl
+    name := Trim(ctl['dashname'].Value)
+    if !RegExMatch(name, '^[\w][\w \-]{0,23}$') {
+        MsgBox('Name must be 1-24 characters: letters, digits, spaces, - or _.'
+             , 'Markup Line Styles', 'Icon!')
+        return
+    }
+    pat := Trim(ctl['dashpat'].Value)
+    if !MarkupParseDashLine(name '=' pat) {
+        MsgBox('A pattern needs at least two positive numbers, alternating on '
+             . 'and off — for example  6, 3  or  5, 2, 1, 2.'
+             , 'Markup Line Styles', 'Icon!')
+        return
+    }
+    try {
+        IniWrite(pat, MarkupIniPath(), 'MarkupDashes', name)
+    } catch as e {
+        MsgBox('Saved for this session, but the INI could not be written:`n`n'
+             . e.Message, 'Markup Line Styles', 'Icon!')
+    }
+    MarkupReloadStyles()
+    MarkupEd_Fill()
+    MarkupEd_Reselect('dashlist', MarkupEd.DashIds, StrLower(name))
+    MarkupEd_LoadDash()
+}
+
+MarkupEd_NewDash() {
+    MarkupEd.Ctl['dashname'].Value := 'MyDash'
+    MarkupEd.Ctl['dashpat'].Value  := '6, 3'
+    MarkupEd_DashChanged()
+}
+
+MarkupEd_CopyDash() {
+    ctl  := MarkupEd.Ctl
+    base := Trim(ctl['dashname'].Value)
+    ctl['dashname'].Value := SubStr(base ' copy', 1, 24)
+    if (Trim(ctl['dashpat'].Value) = '')
+        ctl['dashpat'].Value := '6, 3'
+    MarkupEd_DashChanged()
+}
+
+MarkupEd_DeleteDash() {
+    id := MarkupEd_Selected('dashlist', MarkupEd.DashIds)
+    if (id = '')
+        return
+    d := MarkupStyles.Dashes[id]
+    if (d.Id = 'solid') {
+        MsgBox('"solid" is what an object falls back to, so it cannot be removed.'
+             , 'Markup Line Styles', 'Icon!')
+        return
+    }
+    msg := d.Builtin
+        ? 'Remove any custom override of "' d.Name '" and restore the built-in?'
+        : 'Delete the dash pattern "' d.Name '"?`n`nObjects still using it will '
+        . 'fall back to solid.'
+    if (MsgBox(msg, 'Markup Line Styles', 'YesNo Icon?') != 'Yes')
+        return
+    try IniDelete(MarkupIniPath(), 'MarkupDashes', d.Name)
+    catch {
+        ; No INI entry — a pure built-in, restored by the reload below.
+    }
+    MarkupReloadStyles()
+    MarkupEd_Fill()
 }
 
 ; ==============================================================================
@@ -3130,6 +4566,17 @@ Delete::    MarkupDeleteSel() ; hide
 ^v::        MarkupPasteImage() ; hide
 ^PgUp::     MarkupRaiseSel(MarkupState.Active, true) ; hide
 ^PgDn::     MarkupRaiseSel(MarkupState.Active, false) ; hide
+; Line style, without going near the palette.  Bracket keys step the two ends,
+; backslash steps the dash; Shift reverses.  All three act on the selection when
+; there is one and on the current tool's default when there isn't, which is the
+; same rule every other style control follows.
+[::         MarkupCycleStyle('CapStart',  1) ; hide
++[::        MarkupCycleStyle('CapStart', -1) ; hide
+]::         MarkupCycleStyle('CapEnd',    1) ; hide
++]::        MarkupCycleStyle('CapEnd',   -1) ; hide
+\::         MarkupCycleStyle('Dash',      1) ; hide
++\::        MarkupCycleStyle('Dash',     -1) ; hide
+^\::        MarkupSwapEnds() ; hide
 ; Plain arrows only, deliberately.  Shift+arrow is already the core's Flip, and
 ; when two #HotIf variants of one key both have a true context the FIRST one
 ; created wins — so a Shift+arrow defined here would silently never fire, which

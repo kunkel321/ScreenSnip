@@ -1410,5 +1410,85 @@
     "max": 100,
     "default": "24",
     "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.LineDash": {
+    "label": "LineDash",
+    "help": "Dash pattern the Line tool starts with. Built-in names: solid, dash, dot, dashdot, dashdotdot. Any pattern you define in the [MarkupDashes] section can be named here too. An unrecognised name falls back to solid.",
+    "type": "text"
+  },
+  "Markup.LineCapStart": {
+    "label": "LineCapStart",
+    "help": "End treatment at the start of a new Line. Built-in names: none, arrow, stealth, hollow, chevron, bar, dot, circle, square, diamond, plus anything defined in [MarkupCaps]. An unrecognised name falls back to none.",
+    "type": "text"
+  },
+  "Markup.LineCapEnd": {
+    "label": "LineCapEnd",
+    "help": "End treatment at the finish of a new Line. Same names as LineCapStart. Setting this to arrow is the only thing that distinguishes the Arrow tool from the Line tool.",
+    "type": "text"
+  },
+  "Markup.ArrowDash": {
+    "label": "ArrowDash",
+    "help": "Dash pattern the Arrow tool starts with. Same names as LineDash.",
+    "type": "text"
+  },
+  "Markup.ArrowCapStart": {
+    "label": "ArrowCapStart",
+    "help": "End treatment at the tail of a new Arrow. Same names as LineCapStart. Set this as well as ArrowCapEnd for a double-headed arrow.",
+    "type": "text"
+  },
+  "Markup.ArrowCapEnd": {
+    "label": "ArrowCapEnd",
+    "help": "Arrowhead at the point of a new Arrow. Same names as LineCapStart. This is the one people change most often, and it is what makes the Arrow tool an arrow.",
+    "type": "text"
+  },
+  "Markup.PathDash": {
+    "label": "PathDash",
+    "help": "Dash pattern a new Path Arrow starts with. Same names as LineDash. Dashes follow the rounded elbows, so a dotted path reads well as a connector.",
+    "type": "text"
+  },
+  "Markup.PathCapStart": {
+    "label": "PathCapStart",
+    "help": "End treatment at the start of a new Path Arrow. Same names as LineCapStart. The cap angle follows the first segment, so it turns with the elbow it sits on.",
+    "type": "text"
+  },
+  "Markup.PathCapEnd": {
+    "label": "PathCapEnd",
+    "help": "End treatment at the finish of a new Path Arrow. Same names as LineCapStart. The cap angle follows the last segment.",
+    "type": "text"
+  },
+  "Markup.PenDash": {
+    "label": "PenDash",
+    "help": "Dash pattern a new freehand Pen stroke starts with. Same names as LineDash.",
+    "type": "text"
+  },
+  "Markup.PenCapStart": {
+    "label": "PenCapStart",
+    "help": "End treatment at the start of a new Pen stroke. Same names as LineCapStart. A freehand stroke is never trimmed back, so the cap is drawn over the first point rather than replacing part of the line.",
+    "type": "text"
+  },
+  "Markup.PenCapEnd": {
+    "label": "PenCapEnd",
+    "help": "End treatment at the finish of a new Pen stroke. Same names as LineCapStart. Useful for sketching a hand-drawn arrow.",
+    "type": "text"
+  },
+  "Markup.RectCorner": {
+    "label": "RectCorner",
+    "help": "Corner radius in image pixels for new Rectangle and Highlighter objects. 0 gives square corners, which is how rectangles were drawn before this setting existed. The radius is capped at half the shorter side, so shrinking a shape turns it into a stadium instead of tying itself in knots.",
+    "type": "integer"
+  },
+  "Markup.CalloutCorner": {
+    "label": "CalloutCorner",
+    "help": "Corner radius in image pixels for new Callout bubbles. -1 means auto, which keeps the original radius derived from the font size so existing callouts look unchanged. Any other value is an explicit radius, capped at half the shorter side.",
+    "type": "integer"
+  },
+  "Markup.CtrlClickSelect": {
+    "label": "CtrlClickSelect",
+    "help": "Ctrl+click an annotation to select it without leaving the drawing tool you are using. Works on a snip that is not in a markup session too, which starts one. A Ctrl+click on bare image is ignored, so dragging a snip by its middle is unaffected. Set to 0 to disable.",
+    "type": "boolean"
+  },
+  "Markup.StickyTool": {
+    "label": "StickyTool",
+    "help": "After a Ctrl+click borrows the Select tool, remember the drawing tool that was in hand and give it back at the next click on bare image. A click with no drag still just deselects, so only a drag actually draws. Set to 0 and the Ctrl+click is a one-way trip to Select.",
+    "type": "boolean"
   }
 }
