@@ -1,6 +1,6 @@
 ; ==============================================================================
 ; SnipMarkup.ahk  —  annotation / markup layer for ScreenSnip
-;                       Version Date: 8-28-2026 
+;                       Version Date: 8-29-2026 9:15am
 ; ==============================================================================
 ;
 ; An optional add-on on the same contract as SnipOCR / SnipAI / SnipImgur /
@@ -109,6 +109,15 @@ class MarkupCfg {
     static HighlightAlpha := Integer(SnipCfg('Markup', 'HighlightAlpha', 90))
     static ArrowHeadScale := Float(SnipCfg('Markup', 'ArrowHeadScale', 3.5))
 
+    ; Path Arrow.  TurnTolerance is how far the cursor must travel ACROSS the
+    ; current segment before a corner is committed: too small and hand jitter
+    ; spawns phantom elbows, too large and a deliberate short jog gets eaten.
+    ; It is a setting rather than a constant because the right value depends on
+    ; mouse speed and DPI, and can only really be found by using it.
+    static PathTurnTolerance := Integer(SnipCfg('Markup', 'PathTurnTolerance', 14))
+    static PathCornerRadius  := Integer(SnipCfg('Markup', 'PathCornerRadius', 7))
+    static PathMaxSegments   := Integer(SnipCfg('Markup', 'PathMaxSegments', 24))
+
     ; Redaction.  Pixelate is cheaper than a true blur and is the more honest
     ; choice for hiding data, so it is the default.  BlurAmount is the block
     ; size in pixels for pixelate, or the downscale factor for blur.
@@ -136,8 +145,9 @@ class MarkupState {
     static Active   := 0
     static Tool     := 'select'
     static Palette  := ''         ; Gui object, or '' when never built
-    static PalX     := ''         ; remembered palette position for the session
+    static PalX     := ''         ; palette position, remembered per snip
     static PalY     := ''
+    static PalOwner := 0          ; which snip PalX/PalY were remembered for
     static Dragging := false
     static Band     := 0          ; live rubber-band rect (display coords) or 0
     static Ctl      := Map()      ; palette control name → control object
@@ -333,6 +343,9 @@ MarkupBegin(hwnd := 0) {
     MarkupState.Active := hwnd
     MarkupState.Tool   := 'select'
     MarkupState.Sel    := 0
+    ; Only while a session is running — see MarkupOnActivate.  Re-registering
+    ; the same callback is harmless in v2; it does not stack.
+    OnMessage(0x0006, MarkupOnActivate)          ; WM_ACTIVATE
     WinActivate('ahk_id ' hwnd)
     if MarkupCfg.PaletteAutoShow
         MarkupShowPalette()
@@ -345,10 +358,11 @@ MarkupBegin(hwnd := 0) {
 MarkupEnd(leaveTip := true) {
     global guiSnips
     hwnd := MarkupState.Active
-    MarkupState.Active := 0
-    MarkupState.Sel    := 0
+    OnMessage(0x0006, MarkupOnActivate, 0)       ; stop watching WM_ACTIVATE
+    MarkupHidePalette()                          ; before Active is cleared, so
+    MarkupState.Active := 0                      ; the position is filed against
+    MarkupState.Sel    := 0                      ; the right snip
     MarkupState.Tool   := 'select'
-    MarkupHidePalette()
     if (hwnd && guiSnips.Has(hwnd))
         MarkupRender(guiSnips[hwnd])           ; redraw without selection chrome
     if leaveTip {
@@ -400,9 +414,13 @@ MarkupBeforeExport(hwnd) {
 ; pasted-image objects hold a bitmap; everything else is plain numbers.
 MarkupOnSnipClosed(snip, hwnd) {
     if (MarkupState.Active = hwnd) {
+        OnMessage(0x0006, MarkupOnActivate, 0)   ; stop watching WM_ACTIVATE
         MarkupState.Active := 0
         MarkupState.Sel    := 0
         MarkupHidePalette()
+        ; The snip this position was measured against is gone, so drop it and
+        ; let the next session place the palette against its own snip.
+        MarkupState.PalX := '', MarkupState.PalY := '', MarkupState.PalOwner := 0
     }
     if !snip.HasProp('Markup')
         return
@@ -668,6 +686,8 @@ MarkupNewObj(type) {
          , Num:       0
          , TailX:     0,   TailY: 0
          , TailA:     0,   TailB: 0        ; tail base, offsets along the edge
+         , Dash:      0                    ; GDI+ DashStyle; 0 = solid
+         , CapStart:  0,   CapEnd: 0       ; 0 = none, 1 = arrow head
          , ImgIdx:    0
          , Pts:       []
          , Upright:   (type = 'text' || type = 'number' || type = 'callout') }
@@ -678,6 +698,8 @@ MarkupNewObj(type) {
         o.FillColor := 0xFFF200                 ; classic highlighter yellow
         o.Outline := false
     }
+    if (type = 'arrow' || type = 'path')
+        o.CapEnd := 1
     if (type = 'number')
         o.Fill := true, o.FillColor := o.Color
     if (type = 'callout')
@@ -786,15 +808,36 @@ MarkupDuplicateSel(hwnd) {
 
 MarkupARGB(rgb, alpha := 255) => ((alpha & 0xFF) << 24) | (rgb & 0xFFFFFF)
 
-MarkupPen(rgb, alpha, width) {
+; dash maps straight onto GDI+ DashStyle: 0 solid, 1 dash, 2 dot, 3 dash-dot,
+; 4 dash-dot-dot.  Objects carry a Dash property (0 everywhere today), so adding
+; a line-style control later is a palette widget and nothing else — every shape
+; already routes its stroke through here.
+MarkupPen(rgb, alpha, width, dash := 0) {
     DllCall('gdiplus\GdipCreatePen1', 'UInt', MarkupARGB(rgb, alpha)
           , 'Float', Max(0.5, width + 0.0), 'Int', 2, 'UPtr*', &p := 0)   ; 2 = UnitPixel
     if p {
         DllCall('gdiplus\GdipSetPenStartCap', 'UPtr', p, 'Int', 2)        ; 2 = LineCapRound
         DllCall('gdiplus\GdipSetPenEndCap',   'UPtr', p, 'Int', 2)
         DllCall('gdiplus\GdipSetPenLineJoin', 'UPtr', p, 'Int', 2)        ; 2 = LineJoinRound
+        if dash
+            DllCall('gdiplus\GdipSetPenDashStyle', 'UPtr', p, 'Int', dash)
     }
     return p
+}
+
+; One filled arrow head, pointing along ang.  Split out of the arrow case so the
+; path arrow can reuse it, and so that adding other end treatments later (open
+; chevron, bar, circle, diamond) is a switch in ONE place rather than an edit to
+; every object type that has ends.
+MarkupDrawHead(pGfx, tipX, tipY, ang, head, col, alpha) {
+    static SPREAD := 0.42
+    pb := MarkupPointBuf([ tipX, tipY
+                         , tipX - Cos(ang - SPREAD) * head, tipY - Sin(ang - SPREAD) * head
+                         , tipX - Cos(ang + SPREAD) * head, tipY - Sin(ang + SPREAD) * head ])
+    br := MarkupBrush(col, alpha)
+    DllCall('gdiplus\GdipFillPolygon', 'UPtr', pGfx, 'UPtr', br
+          , 'Ptr', pb.Buf, 'Int', pb.N, 'Int', 0)
+    MarkupDelBrush(br)
 }
 
 MarkupBrush(rgb, alpha := 255) {
@@ -944,6 +987,123 @@ MarkupRoundRectPath(x, y, w, h, r) {
     }
     DllCall('gdiplus\GdipClosePathFigure', 'UPtr', p)
     return p
+}
+
+; ── Path Arrow geometry ──────────────────────────────────────────────────────
+;
+; A Path Arrow ("dogleg", or an elbow connector in diagramming tools) is a
+; multi-segment arrow that turns at right angles, for pointing at something from
+; across the image without the shaft crossing whatever is in between.
+;
+; It stores its geometry in Pts — the same flat [x1,y1,x2,y2,...] array the pen
+; tool uses, in master-local coordinates.  That is the whole reason this type
+; was cheap to add: bounds, hit-testing, move and group-resize already handle
+; Pts generically, so none of them needed a line changing.  Group resize even
+; preserves the right angles for free, since scaling each axis independently
+; keeps axis-aligned segments axis-aligned.
+;
+; The corners are stored SHARP.  Rounding is applied at draw time only, so the
+; radius stays a display choice rather than something baked into the geometry
+; that editing would then have to preserve.
+
+MarkupPathLen(ax, ay, bx, by) => Sqrt((bx - ax) ** 2 + (by - ay) ** 2)
+
+; Unit direction from A to B, or 0,0 for a degenerate segment.
+MarkupPathDir(ax, ay, bx, by, &ux, &uy) {
+    L := MarkupPathLen(ax, ay, bx, by)
+    if (L < 0.0001) {
+        ux := 0, uy := 0
+        return false
+    }
+    ux := (bx - ax) / L, uy := (by - ay) / L
+    return true
+}
+
+; Drop duplicate points and merge runs that carry on in the same direction.
+; Both are safe on an orthogonal path: neither changes any remaining segment's
+; direction, so the right angles survive.  Removing a SHORT segment would not be
+; safe — that takes out two corners at once and skews its neighbours — so short
+; jogs are deliberately left alone.
+MarkupPathSimplify(pts) {
+    out := []
+    i := 1
+    while (i + 1 <= pts.Length) {
+        x := pts[i], y := pts[i + 1]
+        n := out.Length
+        if (n >= 2 && MarkupPathLen(out[n - 1], out[n], x, y) < 0.5) {
+            i += 2
+            continue                      ; duplicate of the previous point
+        }
+        out.Push(x, y)
+        n := out.Length
+        if (n >= 6) {                     ; collinear middle point? drop it
+            MarkupPathDir(out[n - 5], out[n - 4], out[n - 3], out[n - 2], &u1x, &u1y)
+            MarkupPathDir(out[n - 3], out[n - 2], out[n - 1], out[n],     &u2x, &u2y)
+            if (Abs(u1x - u2x) < 0.01 && Abs(u1y - u2y) < 0.01) {
+                out[n - 3] := out[n - 1], out[n - 2] := out[n]
+                out.Pop(), out.Pop()
+            }
+        }
+        i += 2
+    }
+    return out
+}
+
+; Build the stroked path: straight runs joined by rounded corners, with the ends
+; pulled back by shrinkStart / shrinkEnd so an arrow head doesn't show a nub of
+; shaft poking through it.
+;
+; Corners are cubic Beziers with both control points sitting on the sharp vertex.
+; For a right angle that is visually indistinguishable from a true arc, and it
+; needs no arc rectangle or sweep angle — which matters because the segments are
+; only axis-aligned in DISPLAY space; on a rotated snip their master-space
+; directions are arbitrary, and an arc-based corner would have to special-case
+; that.  A Bezier does not care.
+MarkupPathBuild(pts, radius, shrinkStart, shrinkEnd) {
+    n := pts.Length // 2
+    if (n < 2)
+        return 0
+    ; Working copy with the two ends pulled in.
+    p := pts.Clone()
+    if (shrinkStart > 0 && MarkupPathDir(p[1], p[2], p[3], p[4], &sx, &sy)) {
+        segL := MarkupPathLen(p[1], p[2], p[3], p[4])
+        d    := Min(shrinkStart, segL * 0.9)
+        p[1] += sx * d, p[2] += sy * d
+    }
+    if (shrinkEnd > 0 && MarkupPathDir(p[2*n - 3], p[2*n - 2], p[2*n - 1], p[2*n], &ex, &ey)) {
+        segL := MarkupPathLen(p[2*n - 3], p[2*n - 2], p[2*n - 1], p[2*n])
+        d    := Min(shrinkEnd, segL * 0.9)
+        p[2*n - 1] -= ex * d, p[2*n] -= ey * d
+    }
+
+    DllCall('gdiplus\GdipCreatePath', 'Int', 0, 'UPtr*', &gp := 0)
+    if !gp
+        return 0
+    curX := p[1], curY := p[2]
+    Loop n - 2 {                          ; every interior vertex
+        i  := A_Index + 1
+        vx := p[2*i - 1], vy := p[2*i]
+        if (!MarkupPathDir(p[2*i - 3], p[2*i - 2], vx, vy, &inX, &inY)
+         || !MarkupPathDir(vx, vy, p[2*i + 1], p[2*i + 2], &outX, &outY))
+            continue
+        ; Never eat more than half of either adjacent segment, so a tight jog
+        ; degrades to a sharp corner instead of overshooting into its neighbour.
+        rr := Min(radius
+                , MarkupPathLen(p[2*i - 3], p[2*i - 2], vx, vy) / 2
+                , MarkupPathLen(vx, vy, p[2*i + 1], p[2*i + 2]) / 2)
+        ax := vx - inX * rr,  ay := vy - inY * rr
+        bx := vx + outX * rr, by := vy + outY * rr
+        DllCall('gdiplus\GdipAddPathLine', 'UPtr', gp
+              , 'Float', curX, 'Float', curY, 'Float', ax, 'Float', ay)
+        if (rr >= 0.5)
+            DllCall('gdiplus\GdipAddPathBezier', 'UPtr', gp
+                  , 'Float', ax, 'Float', ay, 'Float', vx, 'Float', vy
+                  , 'Float', vx, 'Float', vy, 'Float', bx, 'Float', by)
+        curX := bx, curY := by
+    }
+    DllCall('gdiplus\GdipAddPathLine', 'UPtr', gp
+          , 'Float', curX, 'Float', curY, 'Float', p[2*n - 1], 'Float', p[2*n])
+    return gp
 }
 
 ; ── Callout geometry ─────────────────────────────────────────────────────────
@@ -1186,19 +1346,42 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
         tipX := o.X2 + ox, tipY := o.Y2 + oy
         bx   := tipX - Cos(ang) * head * 0.85
         by   := tipY - Sin(ang) * head * 0.85
-        pn := MarkupPen(col, alpha, width)
+        pn := MarkupPen(col, alpha, width, o.Dash)
         DllCall('gdiplus\GdipDrawLine', 'UPtr', pGfx, 'UPtr', pn
               , 'Float', o.X1 + ox, 'Float', o.Y1 + oy, 'Float', bx, 'Float', by)
         MarkupDelPen(pn)
-        spread := 0.42
-        pts := [ tipX, tipY
-               , tipX - Cos(ang - spread) * head, tipY - Sin(ang - spread) * head
-               , tipX - Cos(ang + spread) * head, tipY - Sin(ang + spread) * head ]
-        pb := MarkupPointBuf(pts)
-        br := MarkupBrush(col, alpha)
-        DllCall('gdiplus\GdipFillPolygon', 'UPtr', pGfx, 'UPtr', br
-              , 'Ptr', pb.Buf, 'Int', pb.N, 'Int', 0)
-        MarkupDelBrush(br)
+        MarkupDrawHead(pGfx, tipX, tipY, ang, head, col, alpha)
+
+    case 'path':
+        if (o.Pts.Length < 4)
+            return
+        pp := []
+        i := 1
+        while (i <= o.Pts.Length)
+            pp.Push(o.Pts[i] + ox, o.Pts[i + 1] + oy), i += 2
+        np   := pp.Length // 2
+        head := Max(8, o.Thick * MarkupCfg.ArrowHeadScale) + (isHalo ? MarkupCfg.OutlineWidth : 0)
+        ; The shaft is pulled back only where a head will actually cover it.
+        shrS := o.CapStart ? head * 0.85 : 0
+        shrE := o.CapEnd   ? head * 0.85 : 0
+        ; Corner radius grows with stroke width, or a thick path's corners look
+        ; pinched next to its own line weight.
+        rad  := Max(MarkupCfg.PathCornerRadius, o.Thick)
+        gp   := MarkupPathBuild(pp, rad, shrS, shrE)
+        if gp {
+            pn := MarkupPen(col, alpha, width, o.Dash)
+            DllCall('gdiplus\GdipDrawPath', 'UPtr', pGfx, 'UPtr', pn, 'UPtr', gp)
+            MarkupDelPen(pn)
+            DllCall('gdiplus\GdipDeletePath', 'UPtr', gp)
+        }
+        if o.CapEnd {
+            ang := MarkupAtan2(pp[2*np] - pp[2*np - 2], pp[2*np - 1] - pp[2*np - 3])
+            MarkupDrawHead(pGfx, pp[2*np - 1], pp[2*np], ang, head, col, alpha)
+        }
+        if o.CapStart {
+            ang := MarkupAtan2(pp[2] - pp[4], pp[1] - pp[3])
+            MarkupDrawHead(pGfx, pp[1], pp[2], ang, head, col, alpha)
+        }
 
     case 'pen':
         if (o.Pts.Length < 4)
@@ -1439,7 +1622,7 @@ MarkupComposeOverlay(snip, pBmp, wantChrome := true) {
 ; rather than read off the record, because their size follows the font.
 MarkupBoundsMaster(o, &x1, &y1, &x2, &y2) {
     switch o.Type {
-    case 'pen':
+    case 'pen', 'path':
         if !o.Pts.Length {
             x1 := o.X1, y1 := o.Y1, x2 := o.X1, y2 := o.Y1
             return
@@ -1497,6 +1680,39 @@ MarkupHandleList(snip, o, m) {
         MarkupXform(m, o.X1, o.Y1, &ax, &ay)
         MarkupXform(m, o.X2, o.Y2, &bx, &by)
         hs.Push({ Id: 'p1', X: ax, Y: ay }, { Id: 'p2', X: bx, Y: by })
+        return hs
+    }
+    ; Path Arrow handles.  Deliberately NOT one per corner: dragging a corner on
+    ; a right-angled path has to push both its neighbours to keep the angles, and
+    ; when a neighbour is an endpoint that drags the arrow head off the thing it
+    ; was pointing at.  Infuriating, and the reason most diagram tools don't do
+    ; it either.
+    ;
+    ; Instead, each INTERIOR segment gets one handle at its midpoint, dragged
+    ; sideways.  A segment has exactly one free axis, so sliding it moves both
+    ; its corners together and simply lengthens the two neighbours — the right
+    ; angles are preserved by construction and both endpoints stay nailed down.
+    ; The first and last segments get none, since each is pinned by an endpoint.
+    if (o.Type = 'path') {
+        np := o.Pts.Length // 2
+        if (np < 2)
+            return hs
+        MarkupXform(m, o.Pts[1], o.Pts[2], &sx, &sy)
+        MarkupXform(m, o.Pts[2*np - 1], o.Pts[2*np], &ex, &ey)
+        hs.Push({ Id: 'pStart', X: sx, Y: sy }, { Id: 'pEnd', X: ex, Y: ey })
+        if (np = 3) {
+            ; A single elbow has no interior segment to slide, and its corner is
+            ; fully determined by the two ends plus a choice of which way round
+            ; the L goes. So give it a handle that picks between those two.
+            MarkupXform(m, o.Pts[3], o.Pts[4], &cx2, &cy2)
+            hs.Push({ Id: 'corner', X: cx2, Y: cy2 })
+        }
+        Loop Max(0, np - 3) {
+            i := A_Index + 1                      ; segments 2 .. np-2
+            MarkupXform(m, o.Pts[2*i - 1], o.Pts[2*i],     &ax, &ay)
+            MarkupXform(m, o.Pts[2*i + 1], o.Pts[2*i + 2], &bx, &by)
+            hs.Push({ Id: 'seg' i, X: (ax + bx) / 2, Y: (ay + by) / 2 })
+        }
         return hs
     }
     if (o.Type = 'pen' || o.Type = 'text' || o.Type = 'number')
@@ -1615,7 +1831,7 @@ MarkupHitObj(snip, o, m, dx, dy) {
         MarkupXform(m, o.X2, o.Y2, &bx, &by)
         return MarkupDistToSeg(dx, dy, ax, ay, bx, by) <= slop
     }
-    if (o.Type = 'pen') {
+    if (o.Type = 'pen' || o.Type = 'path') {
         i := 1
         while (i + 3 <= o.Pts.Length) {
             MarkupXform(m, o.Pts[i],     o.Pts[i + 1], &ax, &ay)
@@ -1890,8 +2106,14 @@ MarkupDragHandle(snip, id) {
     MarkupState.Dragging := false
     if !moved
         snip.Markup.Undo.Pop()
-    ; A resize can leave X1 > X2; normalise so later maths doesn't have to care.
-    if (o.Type != 'line' && o.Type != 'arrow') {
+    if (o.Type = 'path') {
+        ; X1..Y2 on a path are the two ENDPOINTS, not a bounding box — normalising
+        ; them would be meaningless. Just re-derive them from the edited points.
+        n := o.Pts.Length
+        if (n >= 4)
+            o.X1 := o.Pts[1], o.Y1 := o.Pts[2], o.X2 := o.Pts[n - 1], o.Y2 := o.Pts[n]
+    } else if (o.Type != 'line' && o.Type != 'arrow') {
+        ; A resize can leave X1 > X2; normalise so later maths doesn't have to care.
         a := Min(o.X1, o.X2), b := Max(o.X1, o.X2)
         c := Min(o.Y1, o.Y2), d := Max(o.Y1, o.Y2)
         o.X1 := a, o.X2 := b, o.Y1 := c, o.Y2 := d
@@ -1973,8 +2195,84 @@ MarkupApplyGroupHandle(snip, sels, origs, box, id, cx, cy) {
     MarkupRender(snip)
 }
 
+; All path edits work from ORIG (the geometry at the start of the drag) so that
+; nothing compounds across mouse-moves, and all of them are expressed in terms of
+; each segment's OWN direction rather than in x and y.  That is what makes them
+; correct on a rotated snip, where the segments are only square on screen and
+; their master-space directions are arbitrary.
+MarkupApplyPathHandle(snip, o, orig, id, mx, my) {
+    np := orig.Pts.Length // 2
+    if (np < 2)
+        return
+    pts := orig.Pts.Clone()
+
+    if (id = 'pStart' || id = 'pEnd') {
+        ; Move the endpoint to the cursor, then slide its NEIGHBOUR along the
+        ; terminal segment's original direction so that segment keeps its angle.
+        ; The neighbour only moves perpendicular to that direction — which is
+        ; along the next segment — so the next segment just gets longer or
+        ; shorter and nothing else in the path is disturbed.
+        if (id = 'pStart')
+            ei := 1, ni := 2
+        else
+            ei := np, ni := np - 1
+        if (np >= 3 && MarkupPathDir(pts[2*ei - 1], pts[2*ei], pts[2*ni - 1], pts[2*ni], &ux, &uy)) {
+            t := (pts[2*ni - 1] - mx) * ux + (pts[2*ni] - my) * uy
+            pts[2*ni - 1] := mx + ux * t, pts[2*ni] := my + uy * t
+        }
+        pts[2*ei - 1] := mx, pts[2*ei] := my
+        o.Pts := pts
+        return
+    }
+
+    if (id = 'corner' && np = 3) {
+        ; Two candidate elbows for one L. Chosen in DISPLAY space, because
+        ; "square" means square on screen, then mapped back to master.
+        m := MarkupMatrix(snip, 'display')
+        if !m
+            return
+        MarkupXform(m, pts[1], pts[2], &sx, &sy)
+        MarkupXform(m, pts[5], pts[6], &ex, &ey)
+        MarkupCursorPos(snip, &dcx, &dcy)
+        d1 := (dcx - ex) ** 2 + (dcy - sy) ** 2    ; horizontal-first corner
+        d2 := (dcx - sx) ** 2 + (dcy - ey) ** 2    ; vertical-first corner
+        if (d1 <= d2)
+            ccx := ex, ccy := sy
+        else
+            ccx := sx, ccy := ey
+        DllCall('gdiplus\GdipInvertMatrix', 'UPtr', m)
+        MarkupXform(m, ccx, ccy, &nmx, &nmy)
+        DllCall('gdiplus\GdipDeleteMatrix', 'UPtr', m)
+        pts[3] := nmx, pts[4] := nmy
+        o.Pts := pts
+        return
+    }
+
+    if (SubStr(id, 1, 3) = 'seg') {
+        i := Integer(SubStr(id, 4))
+        if (i < 2 || i > np - 2)
+            return
+        ax := pts[2*i - 1], ay := pts[2*i]
+        bx := pts[2*i + 1], by := pts[2*i + 2]
+        if !MarkupPathDir(ax, ay, bx, by, &ux, &uy)
+            return
+        nx := -uy, ny := ux                         ; perpendicular to the segment
+        ; Distance from the segment's original midpoint to the cursor, measured
+        ; along that perpendicular. Both endpoints of the segment move by it.
+        offs := (mx - (ax + bx) / 2) * nx + (my - (ay + by) / 2) * ny
+        pts[2*i - 1] := ax + nx * offs, pts[2*i]     := ay + ny * offs
+        pts[2*i + 1] := bx + nx * offs, pts[2*i + 2] := by + ny * offs
+        o.Pts := pts
+    }
+}
+
 MarkupApplyHandle(snip, o, orig, id, cx, cy) {
     MarkupToMaster(snip, cx, cy, &mx, &my)
+    if (o.Type = 'path') {
+        MarkupApplyPathHandle(snip, o, orig, id, mx, my)
+        MarkupRender(snip)
+        return
+    }
     switch id {
     case 'p1':  o.X1 := mx, o.Y1 := my
     case 'p2':  o.X2 := mx, o.Y2 := my
@@ -2009,6 +2307,84 @@ MarkupApplyHandle(snip, o, orig, id, cx, cy) {
 }
 
 ; ── Creating a new object ────────────────────────────────────────────────────
+
+; The Path Arrow drag, one mouse-move at a time.
+;
+; Tracked in DISPLAY space and mirrored into master, because "right angle" has
+; to mean square ON SCREEN as you draw it.  _DPts is the display-space copy and
+; _Axis is which way the live segment currently runs; both are scratch and are
+; deleted when the drag ends.
+;
+; The last point in the list is always the LIVE end, following the cursor along
+; the current axis.  A corner is committed when the cursor has travelled
+; PathTurnTolerance ACROSS that axis — at which point the live point is frozen
+; where it stands and a new live point starts from it on the other axis.
+;
+; There is no separate handling for dragging backwards: that just shortens the
+; live segment, which the same two lines already do.
+MarkupExtendPath(snip, o, cx, cy) {
+    tol := Max(4, MarkupCfg.PathTurnTolerance)
+    d   := o._DPts
+    n   := d.Length
+    ax  := d[n - 3], ay := d[n - 2]            ; last committed corner
+    maxPts := Max(2, MarkupCfg.PathMaxSegments) + 1
+
+    if (o._Axis = '') {
+        ; Undecided until the drag clears the tolerance; then the larger of the
+        ; two travels wins.
+        if (Abs(cx - ax) < tol && Abs(cy - ay) < tol) {
+            d[n - 1] := ax, d[n] := ay
+            MarkupPathSyncMaster(snip, o)
+            return
+        }
+        o._Axis := (Abs(cx - ax) >= Abs(cy - ay)) ? 'h' : 'v'
+    }
+
+    if (o._Axis = 'h') {
+        if (Abs(cy - ay) >= tol) {
+            if (Abs(cx - ax) >= tol && d.Length // 2 < maxPts) {
+                d[n - 1] := cx, d[n] := ay      ; freeze the corner here
+                d.Push(cx, cy)                  ; and start the new live segment
+            } else {
+                ; The segment so far is too short to be worth keeping — the user
+                ; has simply changed their mind about the direction, so turn on
+                ; the spot instead of leaving a stub behind.
+                d[n - 1] := ax, d[n] := cy
+            }
+            o._Axis := 'v'
+        } else {
+            d[n - 1] := cx, d[n] := ay
+        }
+    } else {
+        if (Abs(cx - ax) >= tol) {
+            if (Abs(cy - ay) >= tol && d.Length // 2 < maxPts) {
+                d[n - 1] := ax, d[n] := cy
+                d.Push(cx, cy)
+            } else {
+                d[n - 1] := cx, d[n] := ay
+            }
+            o._Axis := 'h'
+        } else {
+            d[n - 1] := ax, d[n] := cy
+        }
+    }
+    MarkupPathSyncMaster(snip, o)
+}
+
+; Mirror the display-space working points into the object's master-local Pts,
+; which is what everything else in the module reads.
+MarkupPathSyncMaster(snip, o) {
+    pts := []
+    i := 1
+    while (i <= o._DPts.Length) {
+        MarkupToMaster(snip, o._DPts[i], o._DPts[i + 1], &mx, &my)
+        pts.Push(mx, my)
+        i += 2
+    }
+    o.Pts := pts
+    o.X1 := pts[1], o.Y1 := pts[2]
+    o.X2 := pts[pts.Length - 1], o.Y2 := pts[pts.Length]
+}
 
 MarkupStartDraw(snip, dx, dy) {
     mk := MarkupEnsure(snip)
@@ -2049,6 +2425,14 @@ MarkupStartDraw(snip, dx, dy) {
     o.X1 := mx, o.Y1 := my, o.X2 := mx, o.Y2 := my
     if (tool = 'pen')
         o.Pts := [mx, my]
+    if (tool = 'path') {
+        ; Scratch state for the drag; deleted below when it ends.  The list
+        ; always holds committed corners plus one live end, so it starts with
+        ; the anchor twice.
+        o._DPts := [dx, dy, dx, dy]
+        o._Axis := ''
+        o.Pts   := [mx, my, mx, my]
+    }
     if (tool = 'callout')
         o.TailX := mx, o.TailY := my
     mk.Objs.Push(o)
@@ -2061,6 +2445,8 @@ MarkupStartDraw(snip, dx, dy) {
     if !moved {
         ; A click with no drag produced a zero-size shape — drop it rather than
         ; leaving an invisible object for the user to wonder about later.
+        if (o.Type = 'path')
+            o.DeleteProp('_DPts'), o.DeleteProp('_Axis')
         mk.Objs.Pop()
         mk.Undo.Pop()
         MarkupState.Sel := 0
@@ -2068,7 +2454,21 @@ MarkupStartDraw(snip, dx, dy) {
         return
     }
 
-    if (o.Type != 'line' && o.Type != 'arrow' && o.Type != 'pen') {
+    if (o.Type = 'path') {
+        ; Tidy up before the object becomes real: drop duplicate points and merge
+        ; runs that never actually turned.  Then let the scratch state go.
+        o.Pts := MarkupPathSimplify(o.Pts)
+        o.DeleteProp('_DPts'), o.DeleteProp('_Axis')
+        if (o.Pts.Length < 4) {           ; never left the anchor
+            mk.Objs.Pop(), mk.Undo.Pop()
+            MarkupState.Sel := 0
+            MarkupRender(snip)
+            return
+        }
+        o.X1 := o.Pts[1], o.Y1 := o.Pts[2]
+        o.X2 := o.Pts[o.Pts.Length - 1], o.Y2 := o.Pts[o.Pts.Length]
+    }
+    if (o.Type != 'line' && o.Type != 'arrow' && o.Type != 'pen' && o.Type != 'path') {
         a := Min(o.X1, o.X2), b := Max(o.X1, o.X2)
         c := Min(o.Y1, o.Y2), d := Max(o.Y1, o.Y2)
         o.X1 := a, o.X2 := b, o.Y1 := c, o.Y2 := d
@@ -2086,6 +2486,12 @@ MarkupStartDraw(snip, dx, dy) {
 }
 
 MarkupExtendDraw(snip, o, cx, cy) {
+    if (o.Type = 'path') {
+        ; Runs on the raw DISPLAY coordinates — see MarkupExtendPath.
+        MarkupExtendPath(snip, o, cx, cy)
+        MarkupRender(snip)
+        return
+    }
     MarkupToMaster(snip, cx, cy, &mx, &my)
     if (o.Type = 'pen') {
         ; Only record a point once the cursor has actually travelled, so a slow
@@ -2170,7 +2576,18 @@ MarkupPromptCancel(*) {
 MarkupTextPrompt(initial := '', title := 'Text') {
     MarkupPrompt.Done := 0, MarkupPrompt.Value := ''
 
-    g := Gui('+AlwaysOnTop +ToolWindow +OwnDialogs', title)
+    ; OWNED by the snip.  Windows guarantees an owned window sits above its
+    ; owner, which is the only reliable way to stay in front of a +AlwaysOnTop
+    ; snip — relying on activation alone let the dialog end up BEHIND the snip,
+    ; where it still had focus and still blocked this function's wait loop, so
+    ; the whole app looked frozen.
+    ;
+    ; Ownership only constrains this dialog relative to that one snip.  It does
+    ; not make the snip topmost, does not reorder it, and does not touch any
+    ; other window.
+    owner := (MarkupState.Active && WinExist('ahk_id ' MarkupState.Active))
+           ? MarkupState.Active : 0
+    g := Gui('+AlwaysOnTop +ToolWindow +OwnDialogs' (owner ? ' +Owner' owner : ''), title)
     g.MarginX := 10, g.MarginY := 10
     g.SetFont('s10')
     ed := g.Add('Edit', 'w300 h70 Multi WantReturn', initial)
@@ -2184,11 +2601,37 @@ MarkupTextPrompt(initial := '', title := 'Text') {
     g.OnEvent('Escape', MarkupPromptCancel)
 
     MarkupPrompt.Edit := ed
+
+    ; Centre it on the snip and clamp to the desktop, so it lands where the user
+    ; is already looking rather than wherever Windows would have cascaded it.
+    ; Physical pixels via MarkupWinRect / WinMove, for the same reason as the
+    ; palette: this Gui keeps DPI scaling on for its layout, so Gui.Show's x/y
+    ; would be logical units measured against a physical snip rect.
+    g.Show('Hide')
+    if (!MarkupWinRect(g.Hwnd, , , &pw, &ph) || !pw || !ph) {
+        sc := A_ScreenDPI / 96.0
+        pw := Round(340 * sc), ph := Round(180 * sc)
+    }
     g.Show()
+    if (owner && MarkupWinRect(owner, &ol, &ot, &ow, &oh)) {
+        GetVirtualScreen(&vx, &vy, &vw, &vh)
+        px := Max(vx, Min(ol + (ow - pw) // 2, vx + vw - pw))
+        py := Max(vy, Min(ot + (oh - ph) // 2, vy + vh - ph))
+        WinMove(px, py, , , 'ahk_id ' g.Hwnd)
+    }
     MarkupPrompt.Hwnd := g.Hwnd      ; set AFTER Show, so the hotkey context
-    ed.Focus()                        ; can't match a window that isn't up yet
-    while !MarkupPrompt.Done
+    try WinActivate('ahk_id ' g.Hwnd) ; can't match a window that isn't up yet
+    ed.Focus()
+    while !MarkupPrompt.Done {
+        ; Bail out if the window disappears from under us (the snip being
+        ; destroyed would take an owned dialog with it).  Without this the loop
+        ; would spin forever on a Done flag nothing can ever set.
+        if !WinExist('ahk_id ' g.Hwnd) {
+            MarkupPrompt.Value := ''
+            break
+        }
         Sleep 20
+    }
     MarkupPrompt.Hwnd := 0, MarkupPrompt.Edit := 0
     value := MarkupPrompt.Value
     g.Destroy()
@@ -2316,6 +2759,7 @@ MarkupToolTable() {
                 , ['Ellipse',     'ellipse',   'E']
                 , ['Line',        'line',      'L']
                 , ['Arrow',       'arrow',     'A']
+                , ['Path Arrow',  'path',      'D']
                 , ['Pen',         'pen',       'P']
                 , ['Highlighter', 'highlight', 'H']
                 , ['Text',        'text',      'T']
@@ -2335,6 +2779,7 @@ MarkupShowPalette() {
     if MarkupState.Palette {
         MarkupPositionPalette()
         MarkupState.Palette.Show('NoActivate')
+        MarkupRaisePalette()
         MarkupSyncPalette()
         return
     }
@@ -2350,43 +2795,43 @@ MarkupShowPalette() {
     items := []
     for row in MarkupToolTable()
         items.Push(row[1] '  (' row[3] ')')
-    ctl['tools'] := g.Add('ListBox', 'x10 y10 w170 h186 Choose1', items)
+    ctl['tools'] := g.Add('ListBox', 'x10 y10 w170 h206 Choose1', items)
     ctl['tools'].OnEvent('Change', MarkupPal_Tool)
 
-    g.Add('Text', 'x10 y204 w170 h16', 'Color  (Ctrl+click sets fill)')
+    g.Add('Text', 'x10 y224 w170 h16', 'Color  (Ctrl+click sets fill)')
     i := 0
     for col in MarkupSwatches() {
         xx := 10 + Mod(i, 6) * 27
-        yy := (i < 6) ? 224 : 251
+        yy := (i < 6) ? 244 : 271
         sw := g.Add('Text', 'x' xx ' y' yy ' w22 h22 Border Background' Format('{:06X}', col))
         sw.OnEvent('Click', MarkupPal_Color.Bind(col))
         i++
     }
 
-    ctl['fill']    := g.Add('Checkbox', 'x10 y284 w170 h18', 'Fill shape')
-    ctl['outline'] := g.Add('Checkbox', 'x10 y306 w170 h18', 'Outline (legibility halo)')
-    ctl['shadow']  := g.Add('Checkbox', 'x10 y328 w170 h18', 'Drop shadow')
+    ctl['fill']    := g.Add('Checkbox', 'x10 y304 w170 h18', 'Fill shape')
+    ctl['outline'] := g.Add('Checkbox', 'x10 y326 w170 h18', 'Outline (legibility halo)')
+    ctl['shadow']  := g.Add('Checkbox', 'x10 y348 w170 h18', 'Drop shadow')
     ctl['fill'].OnEvent('Click',    MarkupPal_Check.Bind('Fill'))
     ctl['outline'].OnEvent('Click', MarkupPal_Check.Bind('Outline'))
     ctl['shadow'].OnEvent('Click',  MarkupPal_Check.Bind('Shadow'))
 
-    g.Add('Text', 'x10 y356 w44 h22 +0x200', 'Width')
-    ctl['thick'] := g.Add('DropDownList', 'x58 y353 w56'
+    g.Add('Text', 'x10 y376 w44 h22 +0x200', 'Width')
+    ctl['thick'] := g.Add('DropDownList', 'x58 y373 w56'
                         , ['1','2','3','4','5','6','8','10','12','16'])
-    g.Add('Text', 'x10 y384 w44 h22 +0x200', 'Font')
-    ctl['font']  := g.Add('DropDownList', 'x58 y381 w56'
+    g.Add('Text', 'x10 y404 w44 h22 +0x200', 'Font')
+    ctl['font']  := g.Add('DropDownList', 'x58 y401 w56'
                         , ['10','12','14','16','18','20','24','28','32','40','48'])
     ctl['thick'].OnEvent('Change', MarkupPal_Num.Bind('Thick'))
     ctl['font'].OnEvent('Change',  MarkupPal_Num.Bind('FontSize'))
 
-    ctl['undo'] := g.Add('Button', 'x10  y416 w56 h26', 'Undo')
-    ctl['redo'] := g.Add('Button', 'x70  y416 w56 h26', 'Redo')
-    ctl['del']  := g.Add('Button', 'x130 y416 w50 h26', 'Delete')
+    ctl['undo'] := g.Add('Button', 'x10  y436 w56 h26', 'Undo')
+    ctl['redo'] := g.Add('Button', 'x70  y436 w56 h26', 'Redo')
+    ctl['del']  := g.Add('Button', 'x130 y436 w50 h26', 'Delete')
     ctl['undo'].OnEvent('Click', (*) => MarkupUndo())
     ctl['redo'].OnEvent('Click', (*) => MarkupRedo())
     ctl['del'].OnEvent('Click',  (*) => MarkupDeleteSel())
 
-    ctl['done'] := g.Add('Button', 'x10 y450 w170 h26', 'Done  (Esc)')
+    ctl['done'] := g.Add('Button', 'x10 y470 w170 h26', 'Done  (Esc)')
     ctl['done'].OnEvent('Click', (*) => MarkupEnd())
 
     g.OnEvent('Close', (*) => MarkupEnd())
@@ -2394,48 +2839,134 @@ MarkupShowPalette() {
     ; Show('Hide') creates the window without displaying it, so GetPos in
     ; MarkupPositionPalette has real dimensions to work with. Positioning after
     ; a visible Show would make the palette jump on first open.
+    ; Placed once while hidden (so it never flashes at the wrong spot) and again
+    ; once visible, because a Show with no coordinates can re-centre a window
+    ; that is being displayed for the first time.  The second call is idempotent.
     g.Show('Hide')
     MarkupPositionPalette()
     g.Show('NoActivate')
+    MarkupPositionPalette()
+    MarkupRaisePalette()
     MarkupSyncPalette()
+}
+
+; Lift the palette to the top of the topmost band.
+;
+; WHY THIS IS NEEDED: snip windows are +AlwaysOnTop, and the palette is
+; WS_EX_NOACTIVATE so that clicking its controls doesn't steal focus from the
+; snip.  That combination has a nasty consequence — activating the snip raises
+; it within the topmost band, and a NOACTIVATE window can never be raised by
+; activation, so the palette ends up buried under the very snip it belongs to.
+;
+; WHAT THIS DOES NOT DO: it never calls SetWindowPos on a snip.  Only the
+; palette's own z-order changes, with NOMOVE | NOSIZE | NOACTIVATE, so nothing
+; here can demote a snip or disturb the ordering the core sets up when a snip is
+; created.  That matters: snips reverting behind the window they were cut from
+; is a bug this project has already had to fix once.
+; A window's rect in PHYSICAL screen pixels.
+;
+; This exists because the palette is the one Gui in the project that keeps DPI
+; scaling switched on — it has an absolute-positioned layout that has to grow
+; with the display, unlike the core's -DPIScale overlays which are positioned
+; but not laid out.  The cost is that Gui.GetPos and Gui.Move speak SCALED
+; logical units, while GetWindowRect (and everything the core does with snip
+; coordinates) speaks physical pixels.  Mixing the two put the palette at
+; roughly 1/scale of the intended offset, which on a 125% display landed it on
+; top of the snip instead of beside it.
+;
+; So: every placement calculation below reads with GetWindowRect and writes with
+; WinMove, both of which are physical.  Gui.GetPos and Gui.Move are not used for
+; positioning at all.
+MarkupWinRect(hwnd, &x?, &y?, &w?, &h?) {
+    r := Buffer(16, 0)
+    if !DllCall('GetWindowRect', 'Ptr', hwnd, 'Ptr', r) {
+        x := y := w := h := 0
+        return false
+    }
+    x := NumGet(r, 0, 'Int'),     y := NumGet(r, 4, 'Int')
+    w := NumGet(r, 8, 'Int') - x, h := NumGet(r, 12, 'Int') - y
+    return true
+}
+
+MarkupRaisePalette() {
+    g := MarkupState.Palette
+    if (!g || !MarkupState.Active)
+        return
+    if !DllCall('IsWindowVisible', 'Ptr', g.Hwnd)
+        return
+    DllCall('SetWindowPos', 'Ptr', g.Hwnd, 'Ptr', -1      ; HWND_TOPMOST
+          , 'Int', 0, 'Int', 0, 'Int', 0, 'Int', 0
+          , 'UInt', 0x0013)                               ; NOSIZE|NOMOVE|NOACTIVATE
+}
+
+; WM_ACTIVATE on the snip being marked up.  Registered only for the duration of
+; a markup session (see MarkupBegin / MarkupEnd), and it ignores every window
+; except the one snip in markup mode — a snip being created or activated while
+; markup runs on a DIFFERENT snip falls straight through.
+MarkupOnActivate(wParam, lParam, msg, hwnd) {
+    if (hwnd = MarkupState.Active && (wParam & 0xFFFF) != 0)   ; WA_ACTIVE|WA_CLICKACTIVE
+        MarkupRaisePalette()
 }
 
 MarkupHidePalette() {
     if MarkupState.Palette {
         try {
-            MarkupState.Palette.GetPos(&px, &py)
-            MarkupState.PalX := px, MarkupState.PalY := py
+            ; Physical, to match WinMove in MarkupPositionPalette.  Storing a
+            ; Gui.GetPos reading here would drift the palette by the DPI factor
+            ; every time it was hidden and reshown.
+            if MarkupWinRect(MarkupState.Palette.Hwnd, &px, &py) {
+                MarkupState.PalX := px, MarkupState.PalY := py
+                MarkupState.PalOwner := MarkupState.Active
+            }
         }
         MarkupState.Palette.Hide()
     }
 }
 
-; Park the palette beside the snip: left if there is room, otherwise right,
-; otherwise clamped onto the monitor. A position the user has dragged it to is
-; remembered for the rest of the session and wins over both.
+; Park the palette beside the snip, PaletteGap pixels clear of it: left if there
+; is room, right if not, and below (or above) if neither side fits.
+;
+; A position the user has dragged it to is remembered, but only for the snip it
+; was dragged against — PalOwner.  Remembering it globally was wrong: the
+; palette would reappear wherever it happened to sit last, which for a snip
+; somewhere else on screen usually meant straight on top of the new snip, and
+; made PaletteGap look like it was being ignored entirely.
 MarkupPositionPalette() {
     global guiSnips
     g := MarkupState.Palette
     if (!g || !MarkupState.Active || !guiSnips.Has(MarkupState.Active))
         return
-    if (MarkupState.PalX != '') {
-        g.Move(MarkupState.PalX, MarkupState.PalY)
+    if (MarkupState.PalX != '' && MarkupState.PalOwner = MarkupState.Active) {
+        WinMove(MarkupState.PalX, MarkupState.PalY, , , 'ahk_id ' g.Hwnd)
         return
     }
-    g.GetPos(, , &pw, &ph)
-    rect := Buffer(16, 0)
-    DllCall('GetWindowRect', 'Ptr', MarkupState.Active, 'Ptr', rect)
-    sl := NumGet(rect, 0, 'Int'), st := NumGet(rect,  4, 'Int')
-    sr := NumGet(rect, 8, 'Int')
+    ; Physical pixels on both sides — see MarkupWinRect.  The fallback is only
+    ; reached if GetWindowRect fails outright, and is scaled to match, since a
+    ; logical-unit fallback would reintroduce the very mismatch this avoids.
+    if (!MarkupWinRect(g.Hwnd, , , &pw, &ph) || !pw || !ph) {
+        sc := A_ScreenDPI / 96.0
+        pw := Round(210 * sc), ph := Round(540 * sc)
+    }
+    if !MarkupWinRect(MarkupState.Active, &sl, &st, &sw, &sh)
+        return
+    sr := sl + sw, sb := st + sh
     GetVirtualScreen(&vx, &vy, &vw, &vh)
     gap := MarkupCfg.PaletteGap
-    x := sl - pw - gap
-    if (x < vx)
+
+    x := sl - pw - gap, y := st
+    if (x < vx) {                          ; no room on the left — try the right
         x := sr + gap
-    if (x + pw > vx + vw)
-        x := Max(vx, vx + vw - pw)
-    y := Max(vy, Min(st, vy + vh - ph))
-    g.Move(x, y)
+        if (x + pw > vx + vw) {            ; nor the right — go under the snip
+            x := sl
+            y := sb + gap
+            if (y + ph > vy + vh)          ; nor under — go above it
+                y := st - ph - gap
+        }
+    }
+    x := Max(vx, Min(x, vx + vw - pw))
+    y := Max(vy, Min(y, vy + vh - ph))
+    WinMove(x, y, , , 'ahk_id ' g.Hwnd)
+    MarkupState.PalOwner := MarkupState.Active
 }
 
 ; Reflect the current selection (or, with nothing selected, the defaults for the
@@ -2580,6 +3111,7 @@ r::         MarkupSetTool('rect') ; hide
 e::         MarkupSetTool('ellipse') ; hide
 l::         MarkupSetTool('line') ; hide
 a::         MarkupSetTool('arrow') ; hide
+d::         MarkupSetTool('path') ; hide     ; D for dogleg — P is taken by Pen
 p::         MarkupSetTool('pen') ; hide
 h::         MarkupSetTool('highlight') ; hide
 t::         MarkupSetTool('text') ; hide

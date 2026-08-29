@@ -1,5 +1,4 @@
 {
-  "_VersionDate": "8-28-2026",
   "_Comment": "Metadata for snipSettings.ini (ScreenSnip).  Every key carries restart:..\\ScreenSnip.exe because settings are read once at load: the SnipCfg() loader caches the whole INI on first read, and the add-on modules' class statics initialise before the auto-execute section.  NOTE: a restart closes all open snips.  Keys typed 'text' with a decimal validation regex are FLOATS awaiting a float type in SettingsManager; their intended ranges are stated in the help text.",
   "Capture.SelectionColor": {
     "label": "SelectionColor",
@@ -1383,6 +1382,33 @@
     "min": 0,
     "max": 200,
     "default": "12",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.PathTurnTolerance": {
+    "label": "PathTurnTolerance",
+    "help": "How far the cursor must travel ACROSS the current segment, in pixels, before the Path Arrow tool commits a corner and starts a new segment at right angles.\n\nThis is the one Markup setting whose right value depends on you rather than on the image: too low and ordinary hand jitter spawns phantom elbows mid-drag, too high and a deliberate short jog gets swallowed. Somewhere around 10 to 20 suits most people; try moving it a few pixels at a time rather than in big jumps.\n\nThe same number decides what happens when you change direction almost immediately: a segment shorter than this is treated as you changing your mind, so the path turns on the spot instead of leaving a stub behind.\n\nMeasured in screen pixels during the drag, so on a high-DPI display it covers less of the image and may feel tighter than the number suggests. Values below 4 are ignored.",
+    "type": "integer",
+    "min": 4,
+    "max": 60,
+    "default": "14",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.PathCornerRadius": {
+    "label": "PathCornerRadius",
+    "help": "Radius in pixels of the rounded elbows on a Path Arrow. Rounding is applied when the path is drawn, not baked into it, so changing this restyles existing paths rather than reshaping them.\n\nSetting this to 0 does NOT give you square corners: the stroke width is used as a floor, because a thick path with tight corners looks pinched against its own line weight. To get genuinely sharp elbows you would need a hairline Width as well.\n\nThe radius is also capped at half of the shorter of the two segments meeting at each corner, so a tight jog degrades to a sharp turn instead of overshooting into its neighbour. That means very short segments will look less rounded than the rest of the path, which is correct rather than a glitch.",
+    "type": "integer",
+    "min": 0,
+    "max": 40,
+    "default": "7",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.PathMaxSegments": {
+    "label": "PathMaxSegments",
+    "help": "Upper limit on how many segments one Path Arrow can have, so that a wild or shaky drag cannot produce a path with hundreds of corners in it.\n\nOn reaching the limit the tool stops committing new corners and simply keeps extending the segment you are on, so the drag carries on working rather than stopping dead.\n\nThe default is far more than a readable annotation needs - a path with more than about six turns is usually telling you the arrow should have started somewhere else. Raise it only if you genuinely draw long routed paths. Values below 2 are ignored.",
+    "type": "integer",
+    "min": 2,
+    "max": 100,
+    "default": "24",
     "restart": "..\\ScreenSnip.exe"
   }
 }
