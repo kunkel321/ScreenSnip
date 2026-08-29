@@ -3,7 +3,7 @@
 
 ; ============================================================================
 ; Settings Manager - Standalone GUI for editing INI configuration files
-; Version: 8-11-2026
+; Version: 8-12-2026
 ; 
 ; A dedicated GUI application for viewing and editing INI settings with
 ; metadata-driven features: type-specific editing, auto-generation, validation,
@@ -13,7 +13,7 @@
 ; ============================================================================
 ; 1. UPDATE CONFIGURATION (see below):
 ;    - Change AppName, IniFileName, MetadataFileName, ExpectedDataDir
-;    - Set EditorPath (optional, auto-detects VS Code)
+;    - Set EditorCmd (optional, auto-detects VS Code)
 ;
 ; 2. RUN: If metadata file doesn't exist, script offers to auto-generate
 ;    skeleton based on INI structure
@@ -104,11 +104,70 @@ IniFileName := "snipSettings.ini"
 MetadataFileName := "snipSettingsMetadata.json"
 ExpectedDataDir := "..\Data"  ; Relative path to expected data directory
 
-; Path to your preferred editor. Will be used by "Go To" button to open metadata file.
-; If path is blank or invalid, defaults to VS Code.
-; Examples: "C:\Program Files\Notepad++\notepad++.exe"
-;           "C:\Program Files\Microsoft VS Code\Code.exe"
-EditorPath := ""  ; Leave blank to auto-detect VS Code, or set your own path
+; ----------------------------------------------------------------------------
+; "Go To" button — command used to open the metadata JSON AT the selected key.
+;
+; Two placeholders are substituted: {file} (full path) and {line} (line number).
+; The key's line is found by scanning the JSON at click time, so it stays right
+; even after the file has been edited behind SettingsManager's back.
+;
+; LEAVE BLANK to auto-detect VS Code (per-user install, then Program Files,
+; then `code` on PATH) and use its -r -g form. Set it explicitly to use a
+; different editor. Unlike the INI-stored EditorCmd used elsewhere in the
+; suite, this is an AHK string literal, so it needs NO extra pair of quotes —
+; write it exactly as you would type it at a command prompt. Single-quoted
+; here so the double quotes around the paths can be typed literally.
+;
+; Replace <user> with your Windows user name, and correct any version-numbered
+; folders for your install.
+;
+; VS Code (per-user install) — also VS Code Insiders, VSCodium, Cursor and
+; Windsurf; same flags, different exe:
+;   '"C:\Users\<user>\AppData\Local\Programs\Microsoft VS Code\Code.exe" -r -g "{file}:{line}"'
+;
+; VS Code (system-wide install):
+;   '"C:\Program Files\Microsoft VS Code\Code.exe" -r -g "{file}:{line}"'
+;
+; Notepad++:
+;   '"C:\Program Files\Notepad++\notepad++.exe" -n{line} "{file}"'
+;
+; SciTE / SciTE4AutoHotkey — the file name MUST come before -goto:, since SciTE
+; processes arguments left to right and the file has to be open first:
+;   '"C:\Program Files\AutoHotkey\SciTE\SciTE.exe" "{file}" -goto:{line}'
+;
+; Sublime Text:
+;   '"C:\Program Files\Sublime Text\sublime_text.exe" "{file}:{line}"'
+;
+; UltraEdit / UEStudio:
+;   '"C:\Program Files\IDM Computer Solutions\UltraEdit\uedit64.exe" "{file}" -l{line}'
+;
+; EmEditor — the switch is a lowercase L, and EmEditor's options are case
+; sensitive:
+;   '"C:\Program Files\EmEditor\EmEditor.exe" "{file}" /l {line}'
+;
+; jEdit:
+;   '"C:\Program Files\jEdit\jedit.exe" "{file}" +line:{line}'
+;
+; gVim — the vim91 folder name changes with each version:
+;   '"C:\Program Files\Vim\vim91\gvim.exe" +{line} "{file}"'
+;
+; JetBrains IDEs — swap idea64.exe for pycharm64.exe, webstorm64.exe,
+; rider64.exe, etc:
+;   '"C:\Program Files\JetBrains\IntelliJ IDEA\bin\idea64.exe" --line {line} "{file}"'
+;
+; Emacs — requires a running Emacs server; the version folder varies:
+;   '"C:\Program Files\Emacs\emacs-30.1\bin\emacsclientw.exe" -n +{line} "{file}"'
+;
+; Windows Notepad — has no goto-line switch, so {line} is simply left out and
+; the file opens at the top:
+;   '"C:\Windows\System32\notepad.exe" "{file}"'
+;
+; Editors with no known goto-line switch (TextPad, EditPlus, PSPad, AkelPad)
+; can use that plain-open form too, substituting only {file}. Omitting {line}
+; is supported everywhere — the line number is simply reported in a tooltip
+; instead, so you can jump to it yourself.
+; ----------------------------------------------------------------------------
+EditorCmd := ""  ; Leave blank to auto-detect VS Code, or set your own command
 
 ; ============================================================================
 ; Global variables
@@ -172,27 +231,40 @@ TraySetIcon("shell32.dll", 70)
 ; COLOR PICKER FUNCTION based on work by Teadrinker
 ; ============================================================================
 
-ValidateAndInitializeEditorPath() {
-    global EditorPath
-    
-    ; If EditorPath is blank or file doesn't exist, try to find VS Code
-    if (EditorPath = "" || !FileExist(EditorPath)) {
-        ; Try default VS Code location
-        defaultVSCode := "C:\Users\" A_UserName "\AppData\Local\Programs\Microsoft VS Code\Code.exe"
-        
-        if (FileExist(defaultVSCode)) {
-            EditorPath := defaultVSCode
-        } else {
-            ; If still not found, try Program Files location
-            altVSCode := "C:\Program Files\Microsoft VS Code\Code.exe"
-            if (FileExist(altVSCode)) {
-                EditorPath := altVSCode
-            } else {
-                ; Last resort: try to find it in PATH or just use "code"
-                EditorPath := "code"
-            }
+; Fill in EditorCmd when the user left it blank, by locating VS Code and
+; wrapping its path in the -r -g form:
+;   -r  reuse the existing window instead of opening a second one
+;   -g  "go to" — the file:line syntax that follows
+; Falls back to the bare `code` shim on PATH, which covers installs in unusual
+; folders. That last resort is NOT verified with FileExist (it's a .cmd on the
+; PATH, not an absolute path), so it may still fail at Run() time — Btn_GoTo
+; catches that and degrades to opening the file with its default handler.
+ResolveEditorCmd() {
+    global EditorCmd
+
+    if (Trim(EditorCmd) != "")
+        return
+
+    ; A_AppData is Roaming; VS Code's per-user install lives under Local, so
+    ; that one is read from the environment rather than derived with a "\.."
+    ; traversal, which would work for FileExist but bake an ugly path into the
+    ; command line.
+    localApp := EnvGet("LOCALAPPDATA")
+
+    candidates := [
+        (localApp != "" ? localApp "\Programs\Microsoft VS Code\Code.exe" : ""),
+        "C:\Program Files\Microsoft VS Code\Code.exe",
+        "C:\Program Files (x86)\Microsoft VS Code\Code.exe"
+    ]
+
+    for path in candidates {
+        if (path != "" && FileExist(path)) {
+            EditorCmd := '"' path '" -r -g "{file}:{line}"'
+            return
         }
     }
+
+    EditorCmd := 'code -r -g "{file}:{line}"'
 }
 
 ChooseColor(initColor := 0, hWnd := 0, customColorsArr := '', flags := 3) { 
@@ -2310,8 +2382,43 @@ Btn_ValidateMetadata(GuiCtrlObj := "", Info := "") {
     ValidateMetadata()
 }
 
+; Scan a metadata JSON for the line that OPENS the given entry, i.e.
+;     "Section.Key": {
+; Returns the 1-based line number, or 0 if not found.
+;
+; The file is re-read on every call rather than line numbers being cached at
+; load time, because the whole point of the button is to go and edit the file —
+; so by the second click the cached numbers would be stale.
+;
+; The match is anchored to the start of the trimmed line, which is what keeps a
+; key NAME appearing inside some other entry's help text from stealing the
+; jump: a help line always begins with "help", never with the key. JSON string
+; values can't contain a raw newline (they use \n), so every line is
+; self-contained and a line-at-a-time scan is safe here.
+FindKeyLineInJson(filePath, fullKey) {
+    if !FileExist(filePath)
+        return 0
+
+    try {
+        content := FileRead(filePath)
+    } catch {
+        return 0
+    }
+
+    needle := '"' fullKey '": {'
+
+    lineNum := 0
+    loop parse content, "`n", "`r" {
+        lineNum++
+        if (SubStr(Trim(A_LoopField), 1, StrLen(needle)) = needle)
+            return lineNum
+    }
+
+    return 0
+}
+
 Btn_GoTo(GuiCtrlObj := "", Info := "") {
-    global lvSettings, currentSection, metadataPath, EditorPath
+    global lvSettings, currentSection, metadataPath, EditorCmd
     
     ; Check if an item is selected
     item := lvSettings.GetNext(0, "Checked")
@@ -2343,38 +2450,40 @@ Btn_GoTo(GuiCtrlObj := "", Info := "") {
         return
     }
     
-    ; Open the file in editor
+    ; Locate the entry. A miss is not an error worth blocking on -- the key may
+    ; genuinely have no metadata yet (see the Manage Missing Keys dialog), so
+    ; the file still opens, just at the top.
+    lineNum := FindKeyLineInJson(metadataPath, fullKey)
+    notice := (lineNum > 0)
+        ? fullKey "  (line " lineNum ")"
+        : fullKey " has no entry yet - opening at top of file"
+    if (lineNum = 0)
+        lineNum := 1
+    
+    ; Build the command. Editors without a goto-line switch simply have no
+    ; {line} in their template, so the substitution is a harmless no-op there.
+    cmd := StrReplace(EditorCmd, "{file}", metadataPath)
+    cmd := StrReplace(cmd, "{line}", lineNum)
+    
     try {
-        Run(EditorPath " " chr(34) metadataPath chr(34))
-    } catch as err {
-        ToolTip("Error opening editor: " err.What)
+        Run(cmd)
+        ToolTip(notice)
         SetTimer(() => ToolTip(), 3000)
-        return
+    } catch as err {
+        ; The configured editor could not be launched -- most likely a stale
+        ; path in EditorCmd, or the `code` PATH shim not being present. Rather
+        ; than leaving the person with nothing, hand the file to whatever is
+        ; associated with .json and report the line so they can jump manually.
+        try {
+            Run(metadataPath)
+            ToolTip("Could not run EditorCmd - opened with the default app.`n"
+                . fullKey " is on line " lineNum)
+            SetTimer(() => ToolTip(), 5000)
+        } catch {
+            ToolTip("Could not open the metadata file.`n" err.Message)
+            SetTimer(() => ToolTip(), 5000)
+        }
     }
-    
-    ; Wait for editor to open and settle
-    Sleep(800)
-    
-    ; Try to activate the editor window (works for most editors)
-    WinActivate("ahk_exe Code.exe")  ; For VS Code
-    Sleep(200)
-    
-    ; Open Find dialog
-    Send("^f")
-    Sleep(300)
-    
-    ; Type the search string in quotes to match JSON format exactly
-    ; Using single quotes to wrap double quotes is cleaner in AHK v2
-    searchString := '"' fullKey '"'
-    SendText(searchString)
-    
-    Sleep(200)
-    
-    ; Press Enter to find the first occurrence
-    Send("{Enter}")
-    
-    ToolTip("Found: " fullKey)
-    SetTimer(() => ToolTip(), 2000)
 }
 
 EditSetting(itemRow) {
@@ -2646,8 +2755,8 @@ Tray_Exit(ItemName, ItemPos, MyMenu) {
 ; MAIN EXECUTION
 ; ============================================================================
 
-; Initialize editor path (with fallback to VS Code)
-ValidateAndInitializeEditorPath()
+; Fill in EditorCmd if it was left blank (auto-detects VS Code)
+ResolveEditorCmd()
 
 ; Find INI file
 iniPath := FindINIFile()
