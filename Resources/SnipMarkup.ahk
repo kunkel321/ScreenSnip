@@ -1,6 +1,6 @@
 ; ==============================================================================
 ; SnipMarkup.ahk  —  annotation / markup layer for ScreenSnip
-;                       Version Date: 8-29-2026 2pm
+;                       Version Date: 8-30-2026
 ; ==============================================================================
 ;
 ; An optional add-on on the same contract as SnipOCR / SnipAI / SnipImgur /
@@ -205,6 +205,7 @@ class MarkupState {
     static Dragging := false
     static Band     := 0          ; live rubber-band rect (display coords) or 0
     static Ctl      := Map()      ; palette control name → control object
+    static ThickList := ''        ; which ladder the Width box is loaded with
 
     ; Per-tool line style, seeded from MarkupCfg on first use.  Changing a
     ; palette control with NOTHING selected edits the entry for the current
@@ -227,6 +228,56 @@ class MarkupState {
         get => this.Sels.Length ? this.Sels[1] : 0
         set => this.Sels := value ? [value] : []
     }
+
+    ; The snip's own FRAME, selected as if it were an object.  It deliberately
+    ; is NOT one: pushing it into Objs would mean teaching undo, Ctrl+A, the
+    ; marquee, delete, duplicate, z-order and the master-space compose pass to
+    ; each make an exception for a thing that has no geometry.  A flag beside
+    ; Sels costs one test in the four places that actually care.
+    static BorderSel := false
+}
+
+; The frame and the objects are mutually exclusive, and the rule is enforced
+; HERE rather than at every assignment site: a border selection only counts
+; while Sels is empty.  So anything that adds an object — Shift+click, the
+; marquee, Ctrl+A, a fresh draw — drops the frame automatically, and only the
+; paths that end with NOTHING selected have to clear the flag by hand.
+MarkupBorderSelected() {
+    return MarkupState.BorderSel && !MarkupState.Sels.Length
+}
+
+; The snip whose frame is selected, or 0.
+MarkupBorderSnip() {
+    global guiSnips
+    if (!MarkupBorderSelected() || !guiSnips.Has(MarkupState.Active))
+        return 0
+    return guiSnips[MarkupState.Active]
+}
+
+; Is a click (in Picture-control display coords) on the frame rather than the
+; image?  MarkupCursorPos measures from the Picture's own rect, so anything
+; outside its extent is border — which makes this a bounds test rather than
+; geometry, and correct at any DPI and any frame width for free.  A rotated
+; snip has no frame drawn (RenderSnip suppresses it), so it can't be hit.
+MarkupHitBorder(snip, dx, dy) {
+    if (!snip.HasBorder || Mod(snip.Angle, 90) != 0)
+        return false
+    if !MarkupPicSize(snip, &pw, &ph)
+        return false
+    return (dx < 0 || dy < 0 || dx >= pw || dy >= ph)
+}
+
+MarkupPicSize(snip, &w, &h) {
+    w := h := 0
+    rect := Buffer(16, 0)
+    try {
+        if !DllCall('GetWindowRect', 'Ptr', snip.GuiObj.Pic.Hwnd, 'Ptr', rect)
+            return false
+    } catch
+        return false
+    w := NumGet(rect, 8, 'Int') - NumGet(rect, 0, 'Int')
+    h := NumGet(rect, 12, 'Int') - NumGet(rect, 4, 'Int')
+    return (w > 0 && h > 0)
 }
 
 MarkupIsSelected(o) {
@@ -256,7 +307,8 @@ MarkupSelectAll(hwnd := 0) {
     snip := guiSnips[hwnd]
     if !snip.HasProp('Markup')
         return
-    MarkupState.Sels := []
+    MarkupState.Sels      := []
+    MarkupState.BorderSel := false
     for o in snip.Markup.Objs
         MarkupState.Sels.Push(o)
     MarkupSyncPalette()
@@ -409,9 +461,10 @@ MarkupBegin(hwnd := 0) {
         MarkupEnd(false)                       ; retarget: one session at a time
 
     MarkupEnsure(guiSnips[hwnd])
-    MarkupState.Active := hwnd
-    MarkupState.Tool   := 'select'
-    MarkupState.Sel    := 0
+    MarkupState.Active    := hwnd
+    MarkupState.Tool      := 'select'
+    MarkupState.Sel       := 0
+    MarkupState.BorderSel := false
     ; Only while a session is running — see MarkupOnActivate.  Re-registering
     ; the same callback is harmless in v2; it does not stack.
     OnMessage(0x0006, MarkupOnActivate)          ; WM_ACTIVATE
@@ -431,10 +484,11 @@ MarkupEnd(leaveTip := true) {
     OnMessage(0x0006, MarkupOnActivate, 0)       ; stop watching WM_ACTIVATE
     MarkupWheelHotkeys(false)                    ; and leave the mouse hook alone
     MarkupHidePalette()                          ; before Active is cleared, so
-    MarkupState.Active   := 0                    ; the position is filed against
-    MarkupState.Sel      := 0                    ; the right snip
-    MarkupState.Tool     := 'select'
-    MarkupState.Borrowed := ''                   ; no tool survives the session
+    MarkupState.Active    := 0                   ; the position is filed against
+    MarkupState.Sel       := 0                   ; the right snip
+    MarkupState.BorderSel := false
+    MarkupState.Tool      := 'select'
+    MarkupState.Borrowed  := ''                  ; no tool survives the session
     if (hwnd && guiSnips.Has(hwnd))
         MarkupRender(guiSnips[hwnd])           ; redraw without selection chrome
     if leaveTip {
@@ -453,8 +507,9 @@ MarkupEscape(hwnd) {
     if (MarkupState.Active != hwnd)
         return false
     global guiSnips
-    if MarkupState.Sels.Length {
+    if (MarkupState.Sels.Length || MarkupState.BorderSel) {
         MarkupState.Sels := []
+        MarkupState.BorderSel := false
         MarkupSyncPalette()
         if guiSnips.Has(hwnd)
             MarkupRender(guiSnips[hwnd])
@@ -481,8 +536,9 @@ MarkupEscape(hwnd) {
 ; image.  Dropping the selection and re-rendering first is the whole fix.
 MarkupBeforeExport(hwnd) {
     global guiSnips
-    if (MarkupState.Active = hwnd && MarkupState.Sels.Length) {
+    if (MarkupState.Active = hwnd && (MarkupState.Sels.Length || MarkupState.BorderSel)) {
         MarkupState.Sels := []
+        MarkupState.BorderSel := false
         MarkupSyncPalette()
         if guiSnips.Has(hwnd)
             MarkupRender(guiSnips[hwnd])
@@ -494,8 +550,9 @@ MarkupBeforeExport(hwnd) {
 MarkupOnSnipClosed(snip, hwnd) {
     if (MarkupState.Active = hwnd) {
         OnMessage(0x0006, MarkupOnActivate, 0)   ; stop watching WM_ACTIVATE
-        MarkupState.Active := 0
-        MarkupState.Sel    := 0
+        MarkupState.Active    := 0
+        MarkupState.Sel       := 0
+        MarkupState.BorderSel := false
         MarkupHidePalette()
         ; The snip this position was measured against is gone, so drop it and
         ; let the next session place the palette against its own snip.
@@ -523,7 +580,8 @@ MarkupClearAll(hwnd := 0) {
     MarkupPushUndo(snip)
     snip.Markup.Objs := []
     snip.Markup.NextNum := 1
-    MarkupState.Sel := 0
+    MarkupState.Sel       := 0
+    MarkupState.BorderSel := false
     MarkupRender(snip)
 }
 
@@ -684,16 +742,32 @@ MarkupCloneObj(o) {
     return c
 }
 
-MarkupSnapshot(mk) {
+; The snip's FRAME rides along in the snapshot even though it isn't an object.
+; Without it, recolouring the border and then pressing Ctrl+Z would silently
+; undo whatever object edit came before instead — the most confusing possible
+; answer to "undo that".  Two numbers per snapshot is a cheap price.
+MarkupSnapshot(mk, snip) {
     out := []
     for o in mk.Objs
         out.Push(MarkupCloneObj(o))
-    return { Objs: out, NextNum: mk.NextNum }
+    return { Objs: out, NextNum: mk.NextNum
+           , BorderColor: SnipBorderColor(snip), BorderW: SnipBorderW(snip) }
+}
+
+; Restoring the frame goes through SetSnipBorder rather than a bare assignment,
+; because putting a width back means resizing the window — and SetSnipBorder
+; returns early when nothing actually differs, so the common undo (objects only)
+; costs one comparison.
+MarkupRestoreSnapshot(snip, snap) {
+    mk := snip.Markup
+    mk.Objs := snap.Objs, mk.NextNum := snap.NextNum
+    if snap.HasProp('BorderW')
+        SetSnipBorder(snip.GuiObj.Hwnd, snap.BorderColor, snap.BorderW)
 }
 
 MarkupPushUndo(snip) {
     mk := MarkupEnsure(snip)
-    mk.Undo.Push(MarkupSnapshot(mk))
+    mk.Undo.Push(MarkupSnapshot(mk, snip))
     if (mk.Undo.Length > MarkupCfg.UndoDepth)
         mk.Undo.RemoveAt(1)
     mk.Redo := []                      ; a new edit invalidates the redo branch
@@ -709,9 +783,8 @@ MarkupUndo(hwnd := 0) {
     if !snip.HasProp('Markup') || !snip.Markup.Undo.Length
         return
     mk := snip.Markup
-    mk.Redo.Push(MarkupSnapshot(mk))
-    snap := mk.Undo.Pop()
-    mk.Objs := snap.Objs, mk.NextNum := snap.NextNum
+    mk.Redo.Push(MarkupSnapshot(mk, snip))
+    MarkupRestoreSnapshot(snip, mk.Undo.Pop())
     MarkupState.Sel := 0
     MarkupSyncPalette()
     MarkupRender(snip)
@@ -727,9 +800,8 @@ MarkupRedo(hwnd := 0) {
     if !snip.HasProp('Markup') || !snip.Markup.Redo.Length
         return
     mk := snip.Markup
-    mk.Undo.Push(MarkupSnapshot(mk))
-    snap := mk.Redo.Pop()
-    mk.Objs := snap.Objs, mk.NextNum := snap.NextNum
+    mk.Undo.Push(MarkupSnapshot(mk, snip))
+    MarkupRestoreSnapshot(snip, mk.Redo.Pop())
     MarkupState.Sel := 0
     MarkupSyncPalette()
     MarkupRender(snip)
@@ -2119,6 +2191,10 @@ MarkupComposeOverlay(snip, pBmp, wantChrome := true) {
     isActive := wantChrome && (MarkupState.Active = snip.GuiObj.Hwnd)
     if (!mk.Objs.Length && !isActive)
         return
+    ; The frame ring is drawn on the outermost pixels of THIS bitmap, so the
+    ; chrome pass needs its size.  Read once here rather than per-call.
+    DllCall('gdiplus\GdipGetImageWidth',  'UPtr', pBmp, 'UInt*', &bmpW := 0)
+    DllCall('gdiplus\GdipGetImageHeight', 'UPtr', pBmp, 'UInt*', &bmpH := 0)
 
     DllCall('gdiplus\GdipGetImageGraphicsContext', 'UPtr', pBmp, 'UPtr*', &pGfx := 0)
     if !pGfx
@@ -2156,7 +2232,7 @@ MarkupComposeOverlay(snip, pBmp, wantChrome := true) {
     }
 
     if isActive
-        MarkupDrawChrome(pGfx, snip, m)
+        MarkupDrawChrome(pGfx, snip, m, bmpW, bmpH)
 
     if m
         DllCall('gdiplus\GdipDeleteMatrix', 'UPtr', m)
@@ -2294,7 +2370,33 @@ MarkupHandleList(snip, o, m) {
 ; The selection box and its handles.  Drawn into the DISPLAY bitmap only —
 ; MarkupComposeOverlay is called with wantChrome := false on the save and
 ; clipboard paths, so none of this can reach an exported image.
-MarkupDrawChrome(pGfx, snip, m) {
+; bmpW/bmpH are the display bitmap's own dimensions, needed only by the frame
+; ring below — everything else works in coordinates the matrix supplies.
+MarkupDrawChrome(pGfx, snip, m, bmpW := 0, bmpH := 0) {
+    ; The FRAME, when it is what's selected.  It sits outside this bitmap
+    ; entirely, so it cannot be outlined where it actually is; instead a dashed
+    ; ring runs along the image's outermost pixels, immediately inside the
+    ; frame, which reads as "the thing just beyond this edge is selected".
+    ;
+    ; No handles, deliberately.  A frame has no geometry to drag — its only two
+    ; properties are the swatches and the Width box on the palette — and drawing
+    ; grab squares for something that cannot be grabbed would be a lie.
+    if (MarkupBorderSelected() && bmpW > 1 && bmpH > 1) {
+        ; Two passes: a solid dark under-stroke so the ring stays visible on a
+        ; light image, then the dashed HandleColor over it.  Inset by half a
+        ; pen width so neither stroke is clipped by the bitmap edge.
+        us := MarkupPen(0x000000, 90, 3)
+        DllCall('gdiplus\GdipDrawRectangle', 'UPtr', pGfx, 'UPtr', us
+              , 'Float', 1.5, 'Float', 1.5, 'Float', bmpW - 3.0, 'Float', bmpH - 3.0)
+        MarkupDelPen(us)
+        rp := MarkupPen(MarkupCfg.HandleColor, 255, 3)
+        DllCall('gdiplus\GdipSetPenDashStyle', 'UPtr', rp, 'Int', 1)   ; 1 = Dash
+        DllCall('gdiplus\GdipDrawRectangle', 'UPtr', pGfx, 'UPtr', rp
+              , 'Float', 1.5, 'Float', 1.5, 'Float', bmpW - 3.0, 'Float', bmpH - 3.0)
+        MarkupDelPen(rp)
+        return                       ; frame and objects are mutually exclusive
+    }
+
     ; Rubber band first, so it sits under any selection boxes it is sweeping up.
     if MarkupState.Band {
         b  := MarkupState.Band
@@ -2512,6 +2614,12 @@ MarkupOnLButton(hwnd) {
         }
         obj := MarkupHitTest(snip, dx, dy)
         if !obj {
+            ; A plain press on the FRAME is the window move, same as ever — but
+            ; it is not "empty canvas", so it must not sweep a marquee, must not
+            ; hand a borrowed tool a click at negative coordinates, and must not
+            ; deselect a frame the user just selected in order to drag it.
+            if MarkupHitBorder(snip, dx, dy)
+                return false
             ; Shift+drag on empty canvas sweeps a rubber band.  A PLAIN drag on
             ; empty canvas is still the window move it always was — that is the
             ; behaviour worth protecting, so the marquee took the modifier.
@@ -2531,8 +2639,9 @@ MarkupOnLButton(hwnd) {
                 MarkupStartDraw(snip, dx, dy)
                 return true
             }
-            if MarkupState.Sels.Length {
+            if (MarkupState.Sels.Length || MarkupState.BorderSel) {
                 MarkupState.Sels := []
+                MarkupState.BorderSel := false
                 MarkupSyncPalette()
                 MarkupRender(snip)
             }
@@ -2569,14 +2678,20 @@ MarkupOnLButton(hwnd) {
 ; annotations stay on the snip after Esc, so clicking one reopens the session
 ; with that object already selected.
 MarkupBorrowSelect(snip, hwnd) {
-    ; No annotations at all — don't steal the click from the window move.
-    if (!snip.HasProp('Markup') || !snip.Markup.Objs.Length)
+    MarkupCursorPos(snip, &dx, &dy)
+
+    ; The frame is reachable even on a snip with no annotations, so the
+    ; no-objects bail has to let a border hit through.  Ctrl is required for
+    ; exactly the reason it is required for objects: a PLAIN drag on the frame
+    ; is still the window move, and with a fat border that is the best drag
+    ; handle the snip has.
+    onBorder := MarkupHitBorder(snip, dx, dy)
+    if (!onBorder && (!snip.HasProp('Markup') || !snip.Markup.Objs.Length))
         return false
     wasActive := (MarkupState.Active = hwnd)
 
-    MarkupCursorPos(snip, &dx, &dy)
-    obj := MarkupHitTest(snip, dx, dy)
-    if !obj
+    obj := onBorder ? 0 : MarkupHitTest(snip, dx, dy)
+    if (!onBorder && !obj)
         return false
 
     ; Order matters: MarkupBegin resets both the tool and the selection, so the
@@ -2592,6 +2707,16 @@ MarkupBorrowSelect(snip, hwnd) {
     ; nothing to return.
     if (MarkupCfg.StickyTool && prev != '' && prev != 'select')
         MarkupState.Borrowed := prev
+
+    if onBorder {
+        MarkupState.Sels      := []
+        MarkupState.BorderSel := true
+        MarkupSyncPalette()
+        MarkupRender(snip)
+        MarkupToast('Frame selected — swatches and Width now edit the border')
+        return true
+    }
+
     MarkupState.Sel := obj
     MarkupSyncPalette()
     MarkupRender(snip)
@@ -3407,6 +3532,7 @@ MarkupShowPalette() {
     g.MarginX := 10, g.MarginY := 10
     g.SetFont('s9', 'Segoe UI')
     ctl := MarkupState.Ctl := Map()
+    MarkupState.ThickList := ''
 
     ; Absolute x/y throughout.  Relative positioning (y+8 / yp) is tidier to
     ; read but it makes the swatch grid, which wraps mid-row, a nuisance — and a
@@ -3629,6 +3755,23 @@ MarkupPositionPalette() {
     MarkupState.PalOwner := MarkupState.Active
 }
 
+; The Width box serves two ladders — object stroke widths and frame widths —
+; and a DropDownList shows blank for a value that isn't one of its items, so
+; the list itself has to swap when the frame is selected.  Reloaded only on an
+; actual change of ladder; doing it on every sync would flicker the control.
+MarkupSetThickList(border) {
+    ctl  := MarkupState.Ctl
+    want := border ? 'border' : 'obj'
+    if (MarkupState.ThickList = want || !ctl.Has('thick'))
+        return
+    MarkupState.ThickList := want
+    try {
+        ctl['thick'].Delete()
+        ctl['thick'].Add(MarkupStepStrings(border ? MarkupBorderSteps()
+                                                  : MarkupThickSteps()))
+    }
+}
+
 ; Reflect the current selection (or, with nothing selected, the defaults for the
 ; NEXT object) in the style controls.  One control set doing both jobs is the
 ; whole trick that keeps "draw an arrow, then recolour it" from needing a
@@ -3637,6 +3780,17 @@ MarkupSyncPalette() {
     if !MarkupState.Palette
         return
     ctl := MarkupState.Ctl
+
+    ; Frame selected: Width shows the border, everything else keeps showing the
+    ; current tool so the palette still describes the next object you draw.
+    if (snip := MarkupBorderSnip()) {
+        MarkupSetThickList(true)
+        try ctl['thick'].Text := String(SnipBorderW(snip))
+        try ctl['tools'].Value := 1                     ; Select
+        MarkupUpdatePreview()
+        return
+    }
+
     ; With a group selected the controls show the PRIMARY (first) object, but
     ; changing one applies to the whole group — see MarkupApplyStyle.
     o   := MarkupState.Sel
@@ -3645,6 +3799,7 @@ MarkupSyncPalette() {
     try ctl['fill'].Value    := (o ? o.Fill    : false) ? 1 : 0
     try ctl['outline'].Value := (o ? o.Outline : MarkupCfg.Outline) ? 1 : 0
     try ctl['shadow'].Value  := (o ? o.Shadow  : MarkupCfg.Shadow)  ? 1 : 0
+    MarkupSetThickList(false)
     try ctl['thick'].Text    := String(thick)
     try ctl['font'].Text     := String(fsize)
 
@@ -3706,6 +3861,17 @@ MarkupFillStyleLists() {
 ; strip has no background for one to fall on.
 MarkupPreviewObj() {
     o := MarkupNewObj('line')
+    ; A plain bar in the frame's colour and width — the frame has no caps, dash
+    ; or halo, and showing the tool's would misrepresent what a click does next.
+    if (snip := MarkupBorderSnip()) {
+        o.Color := SnipBorderColor(snip)
+        o.Thick := SnipBorderW(snip)
+        o.Dash  := 'solid', o.CapStart := 'none', o.CapEnd := 'none'
+        o.Outline := false, o.Shadow := false
+        o.Thick := Min(o.Thick, 7)
+        o.X1 := 14, o.Y1 := 19, o.X2 := 192, o.Y2 := 19
+        return o
+    }
     if (sel := MarkupState.Sel) {
         o.Color   := sel.Color
         o.Thick   := sel.Thick
@@ -3790,9 +3956,10 @@ MarkupSetTool(name) {
     ; Picking a drawing tool clears the selection, so the style controls
     ; immediately describe what you are about to draw rather than what you last
     ; had selected.
-    if (name != 'select' && MarkupState.Sels.Length) {
+    if (name != 'select' && (MarkupState.Sels.Length || MarkupState.BorderSel)) {
         global guiSnips
         MarkupState.Sels := []
+        MarkupState.BorderSel := false
         if guiSnips.Has(MarkupState.Active)
             MarkupRender(guiSnips[MarkupState.Active])
     }
@@ -3806,8 +3973,9 @@ MarkupReturnTool() {
         return false
     tool := MarkupState.Borrowed
     MarkupState.Borrowed := ''
-    MarkupState.Tool := tool
-    MarkupState.Sels := []
+    MarkupState.Tool      := tool
+    MarkupState.Sels      := []
+    MarkupState.BorderSel := false
     MarkupSyncPalette()
     return true
 }
@@ -3902,10 +4070,39 @@ MarkupSaveDefaults() {
         IniWrite(MarkupToolStyle('rect').Corner,    path, 'Markup', 'RectCorner')
         IniWrite(MarkupToolStyle('callout').Corner, path, 'Markup', 'CalloutCorner')
         IniWrite(MarkupToolStyle('path').Corner,    path, 'Markup', 'PathCornerRadius')
-        MarkupToast('Markup defaults saved')
+        saved := MarkupSaveBorderDefault(path)
+        MarkupToast(saved ? 'Markup + frame defaults saved' : 'Markup defaults saved')
     } catch as e {
         MarkupToast('Could not save defaults: ' e.Message, 2500)
     }
+}
+
+; The frame is the one thing this button touches that does NOT live in
+; [Markup] — it belongs to the core, so it is written to [SnipWindow] where
+; ScreenSnip and SettingsManager both already look for it.
+;
+; The live globals are updated alongside the INI so the next snip you capture
+; wears the new frame without a restart; existing snips keep the frame they
+; have, which is the point of the properties being per-snip in the first place.
+;
+; Sourced from the ACTIVE snip rather than from a separate "default frame"
+; variable, so what you save is visibly what you were just looking at.  With no
+; markup session running there is nothing to read, and we quietly skip it rather
+; than inventing a value.
+MarkupSaveBorderDefault(path) {
+    global guiSnips, BorderColor, BorderThickness
+    if !guiSnips.Has(MarkupState.Active)
+        return false
+    snip := guiSnips[MarkupState.Active]
+    col  := SnipBorderColor(snip)
+    wid  := SnipBorderW(snip)
+    ; Six bare hex digits, no 0x and no #, matching the file's stated convention
+    ; and everything already in [SnipWindow].
+    IniWrite(Format('{:06X}', col), path, 'SnipWindow', 'BorderColor')
+    IniWrite(wid,                   path, 'SnipWindow', 'BorderThickness')
+    BorderColor     := col
+    BorderThickness := wid
+    return true
 }
 
 MarkupToast(txt, ms := 1400) {
@@ -3917,6 +4114,12 @@ MarkupToast(txt, ms := 1400) {
 ; default for the next one. Same control, two jobs, no modes to explain.
 MarkupApplyStyle(prop, value) {
     global guiSnips
+    ; Checked first: a frame selection is only live while Sels is empty, so this
+    ; and the branch below can never both be true.
+    if MarkupBorderSelected() {
+        MarkupApplyBorderStyle(prop, value)
+        return
+    }
     if MarkupState.Sels.Length {
         hwnd := MarkupState.Active
         if !guiSnips.Has(hwnd)
@@ -3951,6 +4154,36 @@ MarkupApplyStyle(prop, value) {
         case 'Dash', 'CapStart', 'CapEnd', 'Corner':
             MarkupToolStyle(MarkupState.Tool).%prop% := value
     }
+    MarkupSyncPalette()
+}
+
+; The frame has exactly two properties, so the palette controls that mean
+; nothing on it (fill, halo, dash, end caps, head, corner, font) are simply
+; ignored rather than greyed out — MarkupSyncPalette leaves them showing the
+; current TOOL's values, so they still describe what the next drawn object will
+; look like while you happen to have the frame selected.
+;
+; Width is clamped to at least 1 by SetSnipBorder: "no frame" is the Border
+; menu item's job.
+MarkupApplyBorderStyle(prop, value) {
+    snip := MarkupBorderSnip()
+    if !snip
+        return
+    hwnd := MarkupState.Active
+    switch prop {
+        case 'Color':
+            MarkupPushUndo(snip)
+            SetSnipBorder(hwnd, value)
+        case 'Thick':
+            MarkupPushUndo(snip)
+            SetSnipBorder(hwnd, '', value)
+        default:
+            return
+    }
+    ; The frame lives outside the Picture's bitmap, but the selection ring that
+    ; marks it does not — and a width change moves the image edge it is drawn
+    ; on, so the overlay has to be recomposed either way.
+    MarkupRender(snip)
     MarkupSyncPalette()
 }
 
@@ -4015,6 +4248,14 @@ MarkupFontSteps() {
     return t
 }
 
+; The frame gets its own ladder rather than borrowing the stroke widths.  A
+; 16px cap is generous for a pen line and stingy for a picture frame, which is
+; the whole reason the border is worth making adjustable — so it runs to 40.
+MarkupBorderSteps() {
+    static t := [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 30, 40]
+    return t
+}
+
 MarkupStepStrings(steps) {
     out := []
     for v in steps
@@ -4056,7 +4297,23 @@ MarkupSizeProp(o) {
 MarkupWheelSize(dir) {
     global guiSnips
     static lastTick := 0
-    if (!MarkupState.Active || !MarkupState.Sels.Length)
+    if !MarkupState.Active
+        return
+    ; Frame selected: the same gesture steps the border width, so Ctrl+Wheel
+    ; means one thing everywhere rather than going dead on the frame.  Same
+    ; ladder as the Width box, and the same don't-push-undo-on-a-no-op rule.
+    if (snip := MarkupBorderSnip()) {
+        cur := SnipBorderW(snip)
+        nxt := MarkupStepValue(MarkupBorderSteps(), cur, dir)
+        if (nxt = cur)
+            return
+        MarkupPushUndo(snip)
+        SetSnipBorder(MarkupState.Active, '', nxt)
+        MarkupRender(snip)
+        MarkupSyncPalette()
+        return
+    }
+    if !MarkupState.Sels.Length
         return
     if !guiSnips.Has(MarkupState.Active)
         return

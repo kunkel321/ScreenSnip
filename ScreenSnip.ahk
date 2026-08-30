@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 8-28-2026 
+; Version date: 8-30-2026 
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -522,6 +522,7 @@ CleanupOnExit(*) {
     try OnMessage(0x000F, WM_PAINT_BEVEL, 0)     ; deregister (MaxThreads 0)
     try OnMessage(0x0006, WM_ACTIVATE_BEVEL, 0)
     try OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW, 0)
+    try OnMessage(0x0047, WM_WINDOWPOSCHANGED_SIZESYNC, 0)
     try OnMessage(0x0006, WM_ACTIVATE_SHADOW, 0)
     try CloseAllSnips()
     try GDIp.Shutdown()
@@ -842,6 +843,7 @@ OnMessage(0x000F, WM_PAINT_BEVEL) ; re-paint the 3D bevel after any repaint
 OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 OnMessage(0x0020, WM_SETCURSOR_RESIZE) ; Alt-hover over an edge → resize cursor
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW) ; keep each snip's drop shadow glued behind it
+OnMessage(0x0047, WM_WINDOWPOSCHANGED_SIZESYNC) ; repair image/border/window size if anything outside resizes a snip
 OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (active/inactive depth)
 
 ; ── Freeze Capture triggers (see the FREEZE CAPTURE section further down) ─────
@@ -1493,9 +1495,17 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
 
     g := Gui('-Caption +AlwaysOnTop +OwnDialogs +E0x80000', 'SnipperWindow')
 
+    ; The two border properties start from the script-wide defaults but are
+    ; stored PER SNIP from here on (see SetSnipBorder), so one snip can wear a
+    ; fat red frame while its neighbour keeps the thin gold one. Normalised to a
+    ; plain 0xRRGGBB integer at birth so every later consumer — BackColor,
+    ; DrawSnipBevel, the markup palette — gets the same type.
+    snipBorderColor := ColorToHex(BorderColor)
+    snipBorderW     := Max(1, Integer(BorderThickness))
+
     if ShowSnipBorder {
-        g.MarginX := BorderThickness, g.MarginY := BorderThickness
-        g.BackColor := BorderColor
+        g.MarginX := snipBorderW, g.MarginY := snipBorderW
+        g.BackColor := Format('0x{:06X}', snipBorderColor)
     } else {
         g.MarginX := 0, g.MarginY := 0
         g.BackColor := Format('0x{:06X}', snipTransColor)
@@ -1503,7 +1513,7 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
     SetLayeredWinAttribs(g.Hwnd, snipTransColor, 255)
 
     hBitmap := GDIp.CreateHBITMAPFromBitmap(pBitmap)
-    picOffset := ShowSnipBorder ? BorderThickness : 0
+    picOffset := ShowSnipBorder ? snipBorderW : 0
     g.Pic := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
 
     ; Right-click context menu via the GUI's own ContextMenu event. This fires
@@ -1515,8 +1525,8 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
 
     g.Show('NA x' Area.X - picOffset ' y' Area.Y - picOffset)
     global Bevel3D, Bevel3DMaxThickness
-    if (ShowSnipBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
-        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(g.Hwnd), BevelDarknessFor(g.Hwnd))
+    if (ShowSnipBorder && Bevel3D && snipBorderW <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, snipBorderColor, snipBorderW, BevelStrengthFor(g.Hwnd), BevelDarknessFor(g.Hwnd))
 
     ; Drop shadow — an independent click-through window glued just behind this
     ; snip (see CreateSnipShadow / UpdateSnipShadow / WM_WINDOWPOSCHANGED_SHADOW).
@@ -1536,6 +1546,7 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
     ObjMap[g.Hwnd] := { GuiObj: g, Area: Area, Alpha: 255, pBitmap: pBitmap
                       , Angle: 0, FlipH: false, FlipV: false, Skew: 0
                       , HasBorder: ShowSnipBorder, TransColor: snipTransColor
+                      , BorderColor: snipBorderColor, BorderW: snipBorderW
                       , SrcBitmap: SrcBitmap, SrcX: masterX, SrcY: masterY
                       , MasterW: masterW, MasterH: masterH, Crop: crop
                       , SkewPivotX: crop.X + crop.W / 2
@@ -1871,7 +1882,8 @@ SaveSnipAs(hwnd := 0) {
 
 ; Rebuild a snip's picture + window from its frozen master and current state.
 RenderSnip(snip) {
-    global BorderThickness, BorderColor, Bevel3D, Bevel3DMaxThickness
+    global Bevel3D, Bevel3DMaxThickness
+    bw   := SnipBorderW(snip), bcol := SnipBorderColor(snip)
     g    := snip.GuiObj
     hwnd := g.Hwnd
     dpi  := A_ScreenDPI + 0.0
@@ -1916,7 +1928,7 @@ RenderSnip(snip) {
     DllCall('gdiplus\GdipGetImageHeight', 'UPtr', display, 'UInt*', &newH := 0)
 
     scale      := A_ScreenDPI / 96
-    physBorder := showBorder ? Round(BorderThickness * scale) : 0
+    physBorder := showBorder ? Round(bw * scale) : 0
     totalW     := newW + physBorder * 2
     totalH     := newH + physBorder * 2
 
@@ -1931,8 +1943,8 @@ RenderSnip(snip) {
     newX := centerX - totalW // 2,  newY := centerY - totalH // 2
 
     if showBorder {
-        g.BackColor := BorderColor
-        g.MarginX := BorderThickness, g.MarginY := BorderThickness
+        g.BackColor := Format('0x{:06X}', bcol)
+        g.MarginX := bw, g.MarginY := bw
     } else {
         g.BackColor := Format('0x{:06X}', snip.TransColor)
         g.MarginX := 0, g.MarginY := 0
@@ -1946,7 +1958,7 @@ RenderSnip(snip) {
     oldHbm := SendMessage(0x0173, 0, 0, g.Pic.Hwnd)   ; STM_GETIMAGE
     DllCall('DestroyWindow', 'Ptr', g.Pic.Hwnd)
     hBitmap   := GDIp.CreateHBITMAPFromBitmap(display)
-    picOffset := showBorder ? BorderThickness : 0
+    picOffset := showBorder ? bw : 0
     g.Pic     := g.Add('Picture', 'x' picOffset ' y' picOffset, 'HBITMAP:' hBitmap)
     GDIp.DisposeImage(display)
     if oldHbm
@@ -1960,8 +1972,8 @@ RenderSnip(snip) {
     DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0,
             'UInt', 0x0085)   ; RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN
 
-    if (showBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
-        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
+    if (showBorder && Bevel3D && bw <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, bcol, bw, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
 
     if snip.Alpha < 255
         SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
@@ -2053,7 +2065,8 @@ RenderSnipFast(snip) {
 ; destroying/recreating it, to keep the drag smooth. Angle is 0 during a resize,
 ; so the display size equals the crop size (flips don't change dimensions).
 RenderSnipResize(snip, winX, winY) {
-    global BorderThickness, BorderColor, Bevel3D, Bevel3DMaxThickness
+    global Bevel3D, Bevel3DMaxThickness
+    bw   := SnipBorderW(snip), bcol := SnipBorderColor(snip)
     g    := snip.GuiObj
     hwnd := g.Hwnd
     dpi  := A_ScreenDPI + 0.0
@@ -2082,21 +2095,27 @@ RenderSnipResize(snip, winX, winY) {
     DllCall('gdiplus\GdipGetImageHeight', 'UPtr', display, 'UInt*', &newH := 0)
 
     scale      := A_ScreenDPI / 96
-    physBorder := snip.HasBorder ? Round(BorderThickness * scale) : 0
+    physBorder := snip.HasBorder ? Round(bw * scale) : 0
     totalW     := newW + physBorder * 2
     totalH     := newH + physBorder * 2
 
     DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)   ; WM_SETREDRAW off
 
     if snip.HasBorder {
-        g.BackColor := BorderColor
-        g.MarginX := BorderThickness, g.MarginY := BorderThickness
+        g.BackColor := Format('0x{:06X}', bcol)
+        g.MarginX := bw, g.MarginY := bw
     }
-    ; Resize/move the window, then the Picture child, then swap its bitmap.
-    DllCall('SetWindowPos', 'Ptr', hwnd, 'Ptr', 0,
-            'Int', winX, 'Int', winY, 'Int', totalW, 'Int', totalH, 'UInt', 0x0014)
+    ; Picture FIRST, then the window. The order matters now that the shadow and
+    ; the size-sync handler both judge a snip by "window = image + 2 * border":
+    ; sizing the window first would leave that briefly false, and WM_WINDOWPOS-
+    ; CHANGED fires inside the call, so both would see a snip mid-flight. Doing
+    ; the child first means the only message either of them ever sees carries a
+    ; consistent snip. Redraws are suppressed here, so the moment where the child
+    ; is larger than its parent is never painted.
     DllCall('SetWindowPos', 'Ptr', g.Pic.Hwnd, 'Ptr', 0,
             'Int', physBorder, 'Int', physBorder, 'Int', newW, 'Int', newH, 'UInt', 0x0014)
+    DllCall('SetWindowPos', 'Ptr', hwnd, 'Ptr', 0,
+            'Int', winX, 'Int', winY, 'Int', totalW, 'Int', totalH, 'UInt', 0x0014)
     hBitmap := GDIp.CreateHBITMAPFromBitmap(display)
     GDIp.DisposeImage(display)
     oldHbm := SendMessage(0x0172, 0, hBitmap, g.Pic.Hwnd)   ; STM_SETIMAGE
@@ -2106,8 +2125,8 @@ RenderSnipResize(snip, winX, winY) {
     DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)   ; WM_SETREDRAW on
     DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0085)
 
-    if (snip.HasBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
-        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
+    if (snip.HasBorder && Bevel3D && bw <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, bcol, bw, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
     if snip.Alpha < 255
         SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
 }
@@ -2353,7 +2372,7 @@ CursorIdForEdge(edge) {
 ; capture rectangle. Uses absolute screen coords (GetCursorPos) so it's immune to
 ; whatever CoordMode is currently in effect.
 SnipEdgeAtCursor(snipHwnd) {
-    global guiSnips, EdgeGrabZone, BorderThickness
+    global guiSnips, EdgeGrabZone
     if !guiSnips.Has(snipHwnd)
         return ''
     snip := guiSnips[snipHwnd]
@@ -2370,7 +2389,7 @@ SnipEdgeAtCursor(snipHwnd) {
     if (mx < L - 2 || mx > R + 2 || my < T - 2 || my > B + 2)
         return ''
     scale := A_ScreenDPI / 96
-    z := Max(EdgeGrabZone, Round(BorderThickness * scale))
+    z := Max(EdgeGrabZone, Round(SnipBorderW(snip) * scale))
     h := (mx <= L + z) ? 'L' : (mx >= R - z) ? 'R' : ''
     v := (my <= T + z) ? 'T' : (my >= B - z) ? 'B' : ''
     return v h   ; 'T'+'L'='TL', 'B'+'R'='BR', 'T'+''='T', ''+'L'='L', ''+''=''
@@ -2443,7 +2462,7 @@ ResizeDimLabels(cmd, imgLeft := 0, imgTop := 0, w := 0, h := 0) {
 ; crop — so flips fall out naturally with no special-casing. Angle is 0 here (the
 ; gate in SnipEdgeAtCursor guarantees it), so screen px map 1:1 to crop px.
 SnipResizeDrag(snipHwnd, edge) {
-    global guiSnips, BorderThickness
+    global guiSnips
     static MINSZ := 8
     if !guiSnips.Has(snipHwnd)
         return
@@ -2457,7 +2476,7 @@ SnipResizeDrag(snipHwnd, edge) {
     winL := NumGet(rect, 0, 'Int'), winT := NumGet(rect,  4, 'Int')
     winR := NumGet(rect, 8, 'Int'), winB := NumGet(rect, 12, 'Int')
     scale      := A_ScreenDPI / 96
-    physBorder := snip.HasBorder ? Round(BorderThickness * scale) : 0
+    physBorder := snip.HasBorder ? Round(SnipBorderW(snip) * scale) : 0
     imgL := winL + physBorder, imgT := winT + physBorder
     imgR := winR - physBorder, imgB := winB - physBorder
 
@@ -2547,14 +2566,19 @@ SnipResizeDrag(snipHwnd, edge) {
 ; queue the bevel redraw on a one-shot timer so it runs once the current
 ; paint cycle has actually finished.
 WM_PAINT_BEVEL(wParam, lParam, msg, hwnd) {
-    global guiSnips, Bevel3D, Bevel3DMaxThickness, BorderThickness, BorderColor
+    global guiSnips, Bevel3D, Bevel3DMaxThickness
     static lastFire := Map()
-    if !Bevel3D || BorderThickness > Bevel3DMaxThickness
+    if !Bevel3D
         return
     if !guiSnips.Has(hwnd)
         return
     snip := guiSnips[hwnd]
     if !snip.HasBorder
+        return
+    ; Per-snip now: a frame widened past Bevel3DMaxThickness loses its bevel
+    ; while its neighbours keep theirs.
+    bw := SnipBorderW(snip), bcol := SnipBorderColor(snip)
+    if (bw > Bevel3DMaxThickness)
         return
     ; Only at cardinal angles — non-cardinal suppresses the border entirely.
     isCardinal := (snip.Angle = 0 || snip.Angle = 90 || snip.Angle = 180 || snip.Angle = 270)
@@ -2566,7 +2590,7 @@ WM_PAINT_BEVEL(wParam, lParam, msg, hwnd) {
     if (lastFire.Has(hwnd) && now - lastFire[hwnd] < 50)
         return
     lastFire[hwnd] := now
-    SetTimer(() => DrawSnipBevel(snip.GuiObj, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd)), -1)
+    SetTimer(() => DrawSnipBevel(snip.GuiObj, bcol, bw, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd)), -1)
 }
 
 ; WM_ACTIVATE fires on both the window gaining focus AND the one losing it.
@@ -2575,18 +2599,21 @@ WM_PAINT_BEVEL(wParam, lParam, msg, hwnd) {
 ; away. wParam low word: 0 = deactivated, nonzero = activated — either way
 ; we just need to repaint with whatever strength is now correct for hwnd.
 WM_ACTIVATE_BEVEL(wParam, lParam, msg, hwnd) {
-    global guiSnips, Bevel3D, Bevel3DMaxThickness, BorderThickness, BorderColor
-    if !Bevel3D || BorderThickness > Bevel3DMaxThickness
+    global guiSnips, Bevel3D, Bevel3DMaxThickness
+    if !Bevel3D
         return
     if !guiSnips.Has(hwnd)
         return
     snip := guiSnips[hwnd]
     if !snip.HasBorder
         return
+    bw := SnipBorderW(snip), bcol := SnipBorderColor(snip)
+    if (bw > Bevel3DMaxThickness)
+        return
     isCardinal := (snip.Angle = 0 || snip.Angle = 90 || snip.Angle = 180 || snip.Angle = 270)
     if !isCardinal
         return
-    SetTimer(() => DrawSnipBevel(snip.GuiObj, BorderColor, BorderThickness, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd)), -1)
+    SetTimer(() => DrawSnipBevel(snip.GuiObj, bcol, bw, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd)), -1)
 }
 
 ; Pick the bevel strength to use for a given window — full strength when
@@ -2604,6 +2631,92 @@ BevelDarknessFor(hwnd) {
     global Bevel3DInactiveDarknessFactor
     return (DllCall('GetForegroundWindow', 'Ptr') = hwnd)
         ? 0 : Bevel3DInactiveDarknessFactor
+}
+
+; ── Per-snip border accessors ─────────────────────────────────────────────────
+; A snip's frame colour and width live ON THE SNIP (see SnipArea), seeded from
+; the [SnipWindow] defaults. These two readers exist so every consumer gets the
+; same fallback in one place: any snip record built without the properties (an
+; older module, a future one) still renders with the script-wide default rather
+; than throwing. Width is logical px, matching BorderThickness; colour is a
+; plain 0xRRGGBB integer.
+SnipBorderW(snip) {
+    global BorderThickness
+    return (snip.HasProp('BorderW') && snip.BorderW >= 1)
+         ? snip.BorderW : Max(1, Integer(BorderThickness))
+}
+
+SnipBorderColor(snip) {
+    global BorderColor
+    return snip.HasProp('BorderColor') ? ColorToHex(snip.BorderColor)
+                                       : ColorToHex(BorderColor)
+}
+
+; Change a snip's frame colour and/or width at runtime.
+;
+; Pass '' for either to leave it alone. This is the generalisation of what
+; ToggleSnipBorder always did for the on/off case: the WINDOW has to grow or
+; shrink by the width delta while the IMAGE stays exactly where it is, which
+; means moving the top-left out by the delta and adding twice the delta to the
+; size. Doing it here rather than via RenderSnip keeps the crop, the display
+; bitmap and any markup composition untouched — only the frame changes.
+;
+; Returns true when something actually changed.
+SetSnipBorder(hwnd, newColor := '', newW := '') {
+    global guiSnips, Bevel3D, Bevel3DMaxThickness
+    if !guiSnips.Has(hwnd)
+        return false
+    snip := guiSnips[hwnd]
+    g    := snip.GuiObj
+
+    oldW   := SnipBorderW(snip)
+    oldCol := SnipBorderColor(snip)
+    ; Clamp rather than allow 0: "no frame" is the Border menu item's job, and
+    ; letting the width reach 0 would give two different ways to say it.
+    wantW   := (newW = '')     ? oldW   : Max(1, Integer(newW))
+    wantCol := (newColor = '') ? oldCol : ColorToHex(newColor)
+    if (wantW = oldW && wantCol = oldCol)
+        return false
+
+    snip.BorderW     := wantW
+    snip.BorderColor := wantCol
+
+    ; A frame is only actually ON the window when the snip has one AND sits at a
+    ; cardinal angle (RenderSnip suppresses it otherwise). When it isn't, we've
+    ; recorded the new values and there is no geometry to touch — the next
+    ; RenderSnip back to upright will pick them up.
+    isCardinal := (Mod(snip.Angle, 90) = 0)
+    if !(snip.HasBorder && isCardinal)
+        return true
+
+    scale   := A_ScreenDPI / 96
+    oldPhys := Round(oldW  * scale)
+    newPhys := Round(wantW * scale)
+    delta   := newPhys - oldPhys
+
+    g.BackColor := Format('0x{:06X}', wantCol)
+    if delta {
+        g.MarginX := wantW, g.MarginY := wantW
+        g.Pic.Move(wantW, wantW)          ; logical px — the Gui has +DPIScale
+
+        rect := Buffer(16, 0)
+        DllCall('GetWindowRect', 'Ptr', hwnd, 'Ptr', rect)
+        curL := NumGet(rect,  0, 'Int'), curT := NumGet(rect,  4, 'Int')
+        curR := NumGet(rect,  8, 'Int'), curB := NumGet(rect, 12, 'Int')
+        DllCall('SetWindowPos', 'Ptr', hwnd, 'Ptr', 0
+              , 'Int', curL - delta, 'Int', curT - delta
+              , 'Int', (curR - curL) + delta * 2, 'Int', (curB - curT) + delta * 2
+              , 'UInt', 0x0014)           ; SWP_NOZORDER | SWP_NOACTIVATE
+        SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
+    }
+
+    ; Force the flat BackColor fill FIRST. That is what erases a bevel the frame
+    ; has just outgrown — WM_PAINT_BEVEL only declines to draw a new one, it
+    ; can't rub out the pixels already on the window.
+    WinRedraw(hwnd)
+    if (Bevel3D && wantW <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, wantCol, wantW, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
+    return true
 }
 
 ; Set the border color of a snip (its Gui BackColor, visible around the
@@ -2959,7 +3072,183 @@ WM_WINDOWPOSCHANGED_SHADOW(wParam, lParam, msg, hwnd) {
     global guiSnips
     if !guiSnips.Has(hwnd)
         return
-    UpdateSnipShadow(guiSnips[hwnd])
+    snip := guiSnips[hwnd]
+    ; An outside tool may have just stretched this window past what the frozen
+    ; master can fill, in which case SyncSnipToWindowSize is about to put it
+    ; back. Painting a shadow to that transient size is what left an oversized
+    ; shadow behind: the picture and border stopped at the master's limit, the
+    ; shadow kept following the window. So skip while the invariant is broken —
+    ; the repair updates the shadow itself once the geometry is settled.
+    gm := SnipGeom(snip)
+    if (gm && !gm.OK)
+        return
+    UpdateSnipShadow(snip)
+}
+
+; Measure a snip's window against the invariant it always holds internally:
+; window = image + 2 * border. Returns 0 when the geometry can't be read (a
+; Picture control being swapped, a window already gone), which callers treat as
+; "don't second-guess it" rather than as a failure.
+SnipGeom(snip) {
+    hwnd := snip.GuiObj.Hwnd
+    if !DllCall('IsWindow', 'Ptr', hwnd, 'Int')
+        return 0
+    rect := Buffer(16, 0)
+    DllCall('GetWindowRect', 'Ptr', hwnd, 'Ptr', rect)
+    L := NumGet(rect, 0, 'Int'), T := NumGet(rect,  4, 'Int')
+    W := NumGet(rect, 8, 'Int') - L
+    H := NumGet(rect, 12, 'Int') - T
+    try {
+        if !DllCall('GetWindowRect', 'Ptr', snip.GuiObj.Pic.Hwnd, 'Ptr', rect)
+            return 0
+    } catch
+        return 0
+    picW := NumGet(rect, 8, 'Int') - NumGet(rect, 0, 'Int')
+    picH := NumGet(rect, 12, 'Int') - NumGet(rect, 4, 'Int')
+    if (picW < 1 || picH < 1)
+        return 0
+    scale      := A_ScreenDPI / 96
+    isCardinal := (Mod(snip.Angle, 90) = 0)
+    b := (snip.HasBorder && isCardinal) ? Round(SnipBorderW(snip) * scale) : 0
+    wantW := picW + b * 2,  wantH := picH + b * 2
+    return { X: L, Y: T, W: W, H: H, WantW: wantW, WantH: wantH
+           , OK: (W = wantW && H = wantH) }
+}
+
+; ── External resize sync ──────────────────────────────────────────────────────
+; A snip's window is always exactly image + 2 * border. Nothing inside ScreenSnip
+; can break that — but an OUTSIDE tool can, because a snip is just a window and
+; anybody's WinMove will resize it. What that used to produce was the giveaway
+; symptom: the picture stayed put and the bottom/right border grew fat (or got
+; chopped), because the Gui's BackColor was filling space the Picture control
+; never claimed.
+;
+; So rather than teaching every possible resizer about snips, the snip watches
+; its own geometry and repairs the invariant. Any external resize is read as a
+; re-crop of the frozen master — the only thing "bigger" can mean here, since a
+; snip is always 1:1 with the pixels it captured and never scales.
+;
+; This handler shares WM_WINDOWPOSCHANGED with the shadow one (AHK allows
+; several callbacks per message); it deliberately does NOT do the work inline:
+;   * SWP_NOSIZE filters out plain drags, which are most of this traffic.
+;   * The repair itself resizes the window, which would re-enter us.
+;   * ScreenSnip's own renders briefly leave window and Picture out of step
+;     (RenderSnipResize moves the window before the child), and a drag loop
+;     fires hundreds of these.
+;
+; Throttled rather than debounced, and the difference matters: an outside
+; resizer holds the mouse down and calls WinMove continuously, so a pure
+; debounce would never fire until the drag ENDED — the snip would sit there
+; visibly broken for the whole gesture and only heal on release. Throttling
+; repairs it about twenty times a second, so the picture grows under the cursor.
+; The trailing timer is still armed as well, to catch the last frame after the
+; flurry stops.
+WM_WINDOWPOSCHANGED_SIZESYNC(wParam, lParam, msg, hwnd) {
+    global guiSnips
+    static pending := Map(), last := Map()
+    if !guiSnips.Has(hwnd)
+        return
+    ; WINDOWPOS: hwnd, hwndInsertAfter (two pointers), then x, y, cx, cy as
+    ; four ints — so flags sits at 2 pointers + 16 bytes, on either bitness.
+    ; SWP_NOSIZE (0x1) means this was a move, so the invariant can't have
+    ; broken and there is nothing to check.
+    if (lParam && (NumGet(lParam, A_PtrSize * 2 + 16, 'UInt') & 0x0001))
+        return
+    ; One stable BoundFunc per window, or every message would stack a NEW timer
+    ; instead of resetting the existing one.
+    if !pending.Has(hwnd)
+        pending[hwnd] := SyncSnipToWindowSize.Bind(hwnd), last[hwnd] := 0
+    now := A_TickCount
+    if (now - last[hwnd] >= 50) {
+        last[hwnd] := now
+        SetTimer(pending[hwnd], -1)              ; keep up with the drag
+    } else
+        SetTimer(pending[hwnd], -60)             ; and settle once it stops
+}
+
+; Put the window back in agreement with the image, by re-cropping the master to
+; whatever size the window has been given. Anchors the top-left, matching what
+; a bottom-right resize gesture means (and what MoveResizeTools.ahk does).
+SyncSnipToWindowSize(hwnd) {
+    global guiSnips
+    static busy := false
+    if (busy || !guiSnips.Has(hwnd))
+        return
+    snip := guiSnips[hwnd]
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return
+    mm := 0
+    try mm := WinGetMinMax('ahk_id ' hwnd)
+    if mm                                        ; min/maximised — not our geometry
+        return
+
+    gm := SnipGeom(snip)
+    if (!gm || gm.OK)                            ; unreadable, or intact — the usual case
+        return
+
+    busy := true
+    try {
+        ; Only an upright snip can honour the resize: at 90/180/270 the window
+        ; box is the ROTATED bitmap, so window width isn't crop width and there
+        ; is no sane mapping. Same for a non-cardinal tilt. Put it back instead,
+        ; which at least never leaves a lopsided frame on screen.
+        if (Mod(snip.Angle, 360) != 0) {
+            SnipForceWinSize(hwnd, gm)
+            return
+        }
+
+        c := snip.Crop
+        SnipGrowAxis(c.X, c.W, gm.W - gm.WantW, snip.MasterW, snip.FlipH, &nx, &nw)
+        SnipGrowAxis(c.Y, c.H, gm.H - gm.WantH, snip.MasterH, snip.FlipV, &ny, &nh)
+        if (nx = c.X && ny = c.Y && nw = c.W && nh = c.H) {
+            ; Clamped solid — already showing everything the frozen master holds
+            ; in that direction. Snap the window back so the stretch doesn't
+            ; survive as a fat border.
+            SnipForceWinSize(hwnd, gm)
+            return
+        }
+        c.X := nx, c.Y := ny, c.W := nw, c.H := nh
+        ; RenderSnipResize sets the window to the exact right size for the new
+        ; crop, so a partially-clamped resize self-corrects with no extra work.
+        RenderSnipResize(snip, gm.X, gm.Y)
+        ; Explicitly, rather than trusting the WM_WINDOWPOSCHANGED that the line
+        ; above raises: that message arrives while this monitor is still on the
+        ; stack, and a message monitor already running is not re-entered. Calling
+        ; it here makes the shadow's correctness independent of that timing.
+        UpdateSnipShadow(snip)
+    } finally {
+        busy := false
+    }
+}
+
+; Put a snip's window back to the size its image and border actually require,
+; leaving the top-left where it is, and bring the shadow with it.
+SnipForceWinSize(hwnd, gm) {
+    global guiSnips
+    DllCall('SetWindowPos', 'Ptr', hwnd, 'Ptr', 0
+          , 'Int', gm.X, 'Int', gm.Y, 'Int', gm.WantW, 'Int', gm.WantH
+          , 'UInt', 0x0014)                      ; SWP_NOZORDER | SWP_NOACTIVATE
+    if guiSnips.Has(hwnd)
+        UpdateSnipShadow(guiSnips[hwnd])
+}
+
+; Resolve one axis of a re-crop that grew (or shrank) by d pixels at its FAR
+; edge in DISPLAY space — the right edge horizontally, the bottom vertically.
+;
+; The flip is the only subtlety: on a flipped snip the display's far edge is the
+; master's NEAR edge, so growing to the right means extending the crop leftwards
+; in master coordinates. Same reasoning as the anchor maths in SnipResizeDrag.
+SnipGrowAxis(origin, len, d, masterLen, flipped, &newOrigin, &newLen) {
+    static MINSZ := 8
+    far := origin + len                          ; master coord of the fixed edge
+    if flipped {
+        newOrigin := origin - d
+        newOrigin := Max(0, Min(newOrigin, far - MINSZ))
+        newLen    := far - newOrigin
+    } else {
+        newOrigin := origin
+        newLen    := Max(MINSZ, Min(len + d, masterLen - origin))
+    }
 }
 
 ; Focus changed: refresh the shadow so its offset switches between the active and
@@ -2980,14 +3269,15 @@ WM_ACTIVATE_SHADOW(wParam, lParam, msg, hwnd) {
 ; Toggle border on/off for a single snip at runtime.
 ; Resizes the window in physical pixels to add/remove the border margin.
 ToggleSnipBorder(Hwnd) {
-    global guiSnips, SnipMenu, BorderThickness, BorderColor
+    global guiSnips, SnipMenu
     if !guiSnips.Has(Hwnd)
         return
     snip := guiSnips[Hwnd]
     g    := snip.GuiObj
+    bw   := SnipBorderW(snip), bcol := SnipBorderColor(snip)
 
     scale      := A_ScreenDPI / 96
-    physBorder := Round(BorderThickness * scale)
+    physBorder := Round(bw * scale)
 
     rect := Buffer(16, 0)
     DllCall('GetWindowRect', 'Ptr', Hwnd, 'Ptr', rect)
@@ -3009,8 +3299,9 @@ ToggleSnipBorder(Hwnd) {
         ; Turn border ON — expand window, inset picture, set border color
         snip.HasBorder := true
         SnipMenu.Check('Border')
-        g.BackColor := BorderColor
-        g.Pic.Move(BorderThickness, BorderThickness)
+        g.BackColor := Format('0x{:06X}', bcol)
+        g.MarginX := bw, g.MarginY := bw
+        g.Pic.Move(bw, bw)
         newW := curW + physBorder * 2
         newH := curH + physBorder * 2
         newX := curL - physBorder
@@ -3021,10 +3312,10 @@ ToggleSnipBorder(Hwnd) {
             'Int', newX, 'Int', newY, 'Int', newW, 'Int', newH,
             'UInt', 0x0014)   ; SWP_NOZORDER | SWP_NOACTIVATE
     SetLayeredWinAttribs(Hwnd, snip.TransColor, snip.Alpha)
-    global Bevel3D, Bevel3DMaxThickness
-    if (snip.HasBorder && Bevel3D && BorderThickness <= Bevel3DMaxThickness)
-        DrawSnipBevel(g, BorderColor, BorderThickness, BevelStrengthFor(Hwnd), BevelDarknessFor(Hwnd))
     WinRedraw(Hwnd)
+    global Bevel3D, Bevel3DMaxThickness
+    if (snip.HasBorder && Bevel3D && bw <= Bevel3DMaxThickness)
+        DrawSnipBevel(g, bcol, bw, BevelStrengthFor(Hwnd), BevelDarknessFor(Hwnd))
 }
 
 ; Context-menu handler, wired to each snip's GUI via OnEvent('ContextMenu')
