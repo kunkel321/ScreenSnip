@@ -113,8 +113,18 @@ class MarkupCfg {
     static ShadowOffset := Integer(SnipCfg('Markup', 'ShadowOffset', 2))
     static ShadowAlpha  := Integer(SnipCfg('Markup', 'ShadowAlpha', 110))
 
+    ; The Highlighter's colour is remembered SEPARATELY from the stroke colour,
+    ; for the same reason the line styles are per-tool: picking cyan to highlight
+    ; a paragraph should not silently repaint the next arrow you draw.  Clicking
+    ; a swatch while the Highlighter is active edits this one instead.
     static HighlightAlpha := Integer(SnipCfg('Markup', 'HighlightAlpha', 90))
+    static HighlightColor := SnipCfgHex('Markup', 'HighlightColor', 0xFFF200)
     static ArrowHeadScale := Float(SnipCfg('Markup', 'ArrowHeadScale', 3.5))
+
+    ; Number badge disc diameter in master pixels; 0 = auto, meaning the disc is
+    ; sized from the digits as it always was.  A non-zero value decouples the
+    ; disc from the font — see MarkupNumDia.
+    static NumberDia      := Integer(SnipCfg('Markup', 'NumberDia', 0))
 
     ; Path Arrow.  TurnTolerance is how far the cursor must travel ACROSS the
     ; current segment before a corner is committed: too small and hand jitter
@@ -206,6 +216,8 @@ class MarkupState {
     static Band     := 0          ; live rubber-band rect (display coords) or 0
     static Ctl      := Map()      ; palette control name → control object
     static ThickList := ''        ; which ladder the Width box is loaded with
+    static HeadList  := 'arrow'   ; which ladder the Head box is loaded with
+    static ColorLive := true      ; do the swatches mean anything right now?
 
     ; Per-tool line style, seeded from MarkupCfg on first use.  Changing a
     ; palette control with NOTHING selected edits the entry for the current
@@ -846,14 +858,20 @@ MarkupNewObj(type) {
          , CapStart:  'none', CapEnd: 'none'   ; named end treatments
          , HeadScale: MarkupCfg.ArrowHeadScale ; head length as a multiple of Thick
          , Corner:    0                    ; corner radius; -1 = auto for the type
+         , NumDia:    MarkupCfg.NumberDia  ; number badge disc size; 0 = auto
          , ImgIdx:    0
          , Pts:       []
          , Upright:   (type = 'text' || type = 'number' || type = 'callout') }
 
+    ; A highlighter draws its fill and nothing else, so Color and FillColor are
+    ; kept equal on it: the swatches then work the same way they do on every
+    ; other object instead of needing a Ctrl+click nobody would guess at.
+    ; MarkupApplyStyle keeps the pair in step from then on.
     if (type = 'highlight') {
         o.Fill  := true
         o.Alpha := MarkupCfg.HighlightAlpha
-        o.FillColor := 0xFFF200                 ; classic highlighter yellow
+        o.Color := MarkupCfg.HighlightColor     ; default is the classic yellow
+        o.FillColor := MarkupCfg.HighlightColor
         o.Outline := false
     }
     ; The tool's remembered line style.  This lookup is the ONLY thing that
@@ -1396,6 +1414,35 @@ MarkupHeadSize(o, isHalo := false) {
 ; How far back along the shaft the stroke must stop so the cap's back edge has
 ; no nub of line poking through it, in master pixels.
 MarkupCapShrink(capId, head) => MarkupCap(capId).Shrink * head
+
+; Diameter of a number badge's disc, in master pixels.  The ONE place it is
+; worked out — the draw pass and the bounds both call it, so a badge can never
+; be drawn at a size the selection ring disagrees with.
+;
+; NumDia = 0 is auto: the historical formula, disc sized from the digits, so an
+; untouched badge and every badge drawn before this property existed look
+; exactly as they always did.  A non-zero NumDia is an ABSOLUTE size, which is
+; what decouples the disc from the font — set 48 and the disc stays 48 whether
+; the numeral is 14pt or 24pt.
+;
+; The fit floor is not negotiable in either mode: a disc that doesn't contain
+; its own digit is a bug, not a style, so cranking the font past a small fixed
+; disc grows the disc rather than letting the numeral hang out of it.
+MarkupNumDia(o) {
+    MarkupTextSize(o, &tw, &th)
+    fit  := Max(tw, th) + o.FontSize * 0.15
+    dia  := (o.HasProp('NumDia') && o.NumDia > 0) ? o.NumDia
+                                                 : Max(tw, th) + o.FontSize * 0.7
+    return Max(dia, fit)
+}
+
+; The steps the Head box offers when it is standing in for the disc size.
+; Absolute pixels, not multiples: the point of the control is that the badge
+; keeps the size you gave it no matter what the font does.
+MarkupNumDiaSteps() {
+    static t := [20, 24, 28, 32, 40, 48, 56, 64, 80, 96]
+    return t
+}
 
 ; Corner radius for a rectangle-ish object, clamped so shrinking the shape
 ; degrades to a stadium instead of overshooting into itself.
@@ -2022,8 +2069,8 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
                        , o.Outline && !isShadow)
 
     case 'number':
-        MarkupTextSize(o, &tw, &th)
-        dia := Max(tw, th) + o.FontSize * 0.7
+        MarkupTextSize(o, &tw, &th)          ; still needed to CENTRE the digits
+        dia := MarkupNumDia(o)
         cx  := o.X1 + ox, cy := o.Y1 + oy
         if !isHalo {
             br := MarkupBrush(fillCol, fillAlpha)
@@ -2263,8 +2310,7 @@ MarkupBoundsMaster(o, &x1, &y1, &x2, &y2) {
         MarkupTextSize(o, &tw, &th)
         x1 := o.X1, y1 := o.Y1, x2 := o.X1 + tw, y2 := o.Y1 + th
     case 'number':
-        MarkupTextSize(o, &tw, &th)
-        dia := Max(tw, th) + o.FontSize * 0.7
+        dia := MarkupNumDia(o)
         x1 := o.X1, y1 := o.Y1, x2 := o.X1 + dia, y2 := o.Y1 + dia
     default:
         x1 := Min(o.X1, o.X2), y1 := Min(o.Y1, o.Y2)
@@ -3533,6 +3579,7 @@ MarkupShowPalette() {
     g.SetFont('s9', 'Segoe UI')
     ctl := MarkupState.Ctl := Map()
     MarkupState.ThickList := ''
+    MarkupState.HeadList  := 'arrow'   ; matches the list the Head box is built with
 
     ; Absolute x/y throughout.  Relative positioning (y+8 / yp) is tidier to
     ; read but it makes the swatch grid, which wraps mid-row, a nuisance — and a
@@ -3544,7 +3591,8 @@ MarkupShowPalette() {
     ctl['tools'] := g.Add('ListBox', 'x10 y10 w210 h206 Choose1', items)
     ctl['tools'].OnEvent('Change', MarkupPal_Tool)
 
-    g.Add('Text', 'x10 y224 w210 h16', 'Color  (Ctrl+click sets fill)')
+    ctl['lblcolor'] := g.Add('Text', 'x10 y224 w210 h16'
+                           , 'Color  (Ctrl+click sets fill)')
     i := 0
     for col in MarkupSwatches() {
         xx := 10 + Mod(i, 6) * 27
@@ -3561,10 +3609,10 @@ MarkupShowPalette() {
     ctl['outline'].OnEvent('Click', MarkupPal_Check.Bind('Outline'))
     ctl['shadow'].OnEvent('Click',  MarkupPal_Check.Bind('Shadow'))
 
-    g.Add('Text', 'x10 y376 w44 h22 +0x200', 'Width')
+    ctl['lblthick'] := g.Add('Text', 'x10 y376 w44 h22 +0x200', 'Width')
     ctl['thick'] := g.Add('DropDownList', 'x58 y373 w56'
                         , MarkupStepStrings(MarkupThickSteps()))
-    g.Add('Text', 'x122 y376 w34 h22 +0x200', 'Font')
+    ctl['lblfont'] := g.Add('Text', 'x122 y376 w34 h22 +0x200', 'Font')
     ctl['font']  := g.Add('DropDownList', 'x160 y373 w60'
                         , MarkupStepStrings(MarkupFontSteps()))
     ctl['thick'].OnEvent('Change', MarkupPal_Num.Bind('Thick'))
@@ -3575,20 +3623,20 @@ MarkupShowPalette() {
     ; stays in proportion when the line gets fatter.  Corner is the rounding on
     ; a Rectangle, Highlighter or Callout box and the elbow radius on a Path
     ; Arrow; 'auto' keeps whatever the type derived before the setting existed.
-    g.Add('Text', 'x10 y404 w44 h22 +0x200', 'Head')
+    ctl['lblhead'] := g.Add('Text', 'x10 y404 w44 h22 +0x200', 'Head')
     ctl['head'] := g.Add('DropDownList', 'x58 y401 w56'
                        , ['1.5','2','2.5','3','3.5','4','4.5','5','6','8'])
-    g.Add('Text', 'x120 y404 w46 h22 +0x200', 'Corner')
+    ctl['lblcorner'] := g.Add('Text', 'x120 y404 w46 h22 +0x200', 'Corner')
     ctl['corner'] := g.Add('DropDownList', 'x170 y401 w50'
                          , ['auto','0','2','3','4','6','8','10','12','16','20','24','32'])
     ctl['head'].OnEvent('Change',   MarkupPal_Head)
     ctl['corner'].OnEvent('Change', MarkupPal_Corner)
 
-    g.Add('Text', 'x10 y432 w44 h22 +0x200', 'Dash')
+    ctl['lbldash'] := g.Add('Text', 'x10 y432 w44 h22 +0x200', 'Dash')
     ctl['dash'] := g.Add('DropDownList', 'x58 y429 w162', [])
     ctl['dash'].OnEvent('Change', MarkupPal_Style.Bind('Dash'))
 
-    g.Add('Text', 'x10 y460 w44 h22 +0x200', 'Ends')
+    ctl['lblends'] := g.Add('Text', 'x10 y460 w44 h22 +0x200', 'Ends')
     ctl['capstart'] := g.Add('DropDownList', 'x58 y457 w70', [])
     ctl['swap']     := g.Add('Button', 'x132 y457 w22 h22', Chr(0x21C4))
     ctl['capend']   := g.Add('DropDownList', 'x158 y457 w62', [])
@@ -3772,6 +3820,112 @@ MarkupSetThickList(border) {
     }
 }
 
+; The Head box serves two ladders as well — arrowhead scale for anything that
+; strokes, disc diameter for a number badge.  Same reload-only-on-change rule as
+; the Width box, and for the same reason.
+MarkupSetHeadList(mode) {
+    ctl := MarkupState.Ctl
+    if (MarkupState.HeadList = mode || !ctl.Has('head'))
+        return
+    MarkupState.HeadList := mode
+    try {
+        ctl['head'].Delete()
+        if (mode = 'number') {
+            list := ['auto']
+            for v in MarkupNumDiaSteps()
+                list.Push(String(v))
+            ctl['head'].Add(list)
+        } else
+            ctl['head'].Add(['1.5','2','2.5','3','3.5','4','4.5','5','6','8'])
+    }
+}
+
+; WHAT the palette is currently describing: the frame, the primary selected
+; object, or — with nothing selected — the tool about to be used.  A borrowed
+; tool reports the tool you get back, matching what the tool list highlights.
+;
+; A mixed group reports its primary, which is the same rule the style controls
+; already follow; changing a control still applies to the whole group.
+MarkupSubjectType() {
+    if MarkupBorderSelected()
+        return 'border'
+    if (o := MarkupState.Sel)
+        return o.Type
+    return (MarkupState.Borrowed != '') ? MarkupState.Borrowed : MarkupState.Tool
+}
+
+; Which controls mean anything for which subject.  A space-delimited list per
+; type, because the alternative — a Map of Maps — is more machinery than a
+; fourteen-row lookup deserves and reads worse.
+;
+; Anything absent is GREYED, never hidden.  Hiding would reflow a palette laid
+; out in absolute coordinates, so every switch of tool would move the buttons
+; under the pointer; and a dimmed Fill box still tells you Fill is a thing the
+; Blur tool hasn't got, where a missing one just looks like a bug.
+;
+; Notes on the less obvious rows:
+;   highlight — strokes nothing, so Width does nothing; Fill is forced on and
+;               the halo pass skips the type outright.
+;   number    — Fill is forced on and FillColor tracks Color, so the checkbox is
+;               a no-op; Head is the disc size (see MarkupNumDia).
+;   ellipse   — has no corners to round.
+;   blur      — has no style at all.  Deliberately the empty string, not a
+;               missing row: absent means "unknown type, leave everything on".
+MarkupApplyTable() {
+    static t := Map(
+        'select',    'color fill outline shadow thick font head corner dash ends'
+      , 'rect',      'color fill outline shadow thick corner dash'
+      , 'ellipse',   'color fill outline shadow thick dash'
+      , 'line',      'color outline shadow thick head dash ends'
+      , 'arrow',     'color outline shadow thick head dash ends'
+      , 'path',      'color outline shadow thick head corner dash ends'
+      , 'pen',       'color outline shadow thick head dash ends'
+      , 'highlight', 'color shadow corner'
+      , 'text',      'color outline shadow font'
+      , 'number',    'color outline shadow thick font head'
+      , 'callout',   'color fill outline shadow thick font corner dash'
+      , 'blur',      ''
+      , 'image',     'shadow'
+      , 'border',    'color thick')
+    return t
+}
+
+; Grey the controls the current subject has no use for.
+;
+; The colour swatches are Static controls with a Background style, and a
+; disabled Static still paints its background — so there is nothing to dim.
+; Their LABEL greys instead, and MarkupPal_Color refuses the click, which is the
+; part that actually matters.  (Blur is the only subject this affects.)
+MarkupSyncEnable() {
+    static groups := Map('lblcolor', 'color'
+                       , 'fill',     'fill'
+                       , 'outline',  'outline'
+                       , 'shadow',   'shadow'
+                       , 'thick',    'thick',  'lblthick',  'thick'
+                       , 'font',     'font',   'lblfont',   'font'
+                       , 'head',     'head',   'lblhead',   'head'
+                       , 'corner',   'corner', 'lblcorner', 'corner'
+                       , 'dash',     'dash',   'lbldash',   'dash'
+                       , 'capstart', 'ends',   'capend',    'ends'
+                       , 'swap',     'ends',   'lblends',   'ends')
+    if !MarkupState.Palette
+        return
+    ctl  := MarkupState.Ctl
+    tbl  := MarkupApplyTable()
+    subj := MarkupSubjectType()
+    ; An unlisted type is left fully enabled rather than fully greyed: a new
+    ; object type someone forgets to add here degrades to today's behaviour.
+    live := ' ' (tbl.Has(subj) ? tbl[subj] : tbl['select']) ' '
+    for key, grp in groups
+        if ctl.Has(key)
+            try ctl[key].Enabled := InStr(live, ' ' grp ' ') ? true : false
+    MarkupState.ColorLive := InStr(live, ' color ') ? true : false
+
+    ; The Head box means something different on a badge, so it says so.
+    if ctl.Has('lblhead')
+        try ctl['lblhead'].Text := (subj = 'number') ? 'Disc' : 'Head'
+}
+
 ; Reflect the current selection (or, with nothing selected, the defaults for the
 ; NEXT object) in the style controls.  One control set doing both jobs is the
 ; whole trick that keeps "draw an arrow, then recolour it" from needing a
@@ -3787,6 +3941,7 @@ MarkupSyncPalette() {
         MarkupSetThickList(true)
         try ctl['thick'].Text := String(SnipBorderW(snip))
         try ctl['tools'].Value := 1                     ; Select
+        MarkupSyncEnable()
         MarkupUpdatePreview()
         return
     }
@@ -3814,8 +3969,19 @@ MarkupSyncPalette() {
     try ctl['dash'].Text     := MarkupDash(dash).Name
     try ctl['capstart'].Text := MarkupCap(cs).Name
     try ctl['capend'].Text   := MarkupCap(ce).Name
-    try ctl['head'].Text     := MarkupNumText(hsc)
     try ctl['corner'].Text   := (corn < 0) ? 'auto' : MarkupNumText(corn)
+
+    ; Head wears two hats.  On a badge it is the disc diameter in pixels, which
+    ; needs its own ladder AND its own 'auto'; everywhere else it stays the
+    ; arrowhead scale it always was.
+    if (MarkupSubjectType() = 'number') {
+        MarkupSetHeadList('number')
+        nd := (o && o.HasProp('NumDia')) ? o.NumDia : MarkupCfg.NumberDia
+        try ctl['head'].Text := (nd > 0) ? String(Integer(nd)) : 'auto'
+    } else {
+        MarkupSetHeadList('arrow')
+        try ctl['head'].Text := MarkupNumText(hsc)
+    }
 
     ; With a tool on loan the list highlights the tool you will GET BACK, not
     ; the Select you are temporarily using — otherwise the palette would say
@@ -3826,6 +3992,7 @@ MarkupSyncPalette() {
             try ctl['tools'].Value := i
             break
         }
+    MarkupSyncEnable()
     MarkupUpdatePreview()
 }
 
@@ -3890,6 +4057,19 @@ MarkupPreviewObj() {
     }
     o.Shadow := false
     o.Thick  := Min(o.Thick, 7)
+
+    ; A Highlighter strokes nothing, so a thin opaque line is a poor likeness of
+    ; it.  Show what it actually lays down: a fat translucent bar in its own
+    ; remembered colour.
+    if (MarkupSubjectType() = 'highlight') {
+        sel := MarkupState.Sel
+        o.Color   := sel ? sel.FillColor : MarkupCfg.HighlightColor
+        o.Alpha   := sel ? sel.Alpha     : MarkupCfg.HighlightAlpha
+        o.Thick   := 16
+        o.Dash    := 'solid'
+        o.CapStart := 'none', o.CapEnd := 'none'
+        o.Outline := false
+    }
     pad := MarkupHeadSize(o) * 0.6
     o.X1 := 14 + pad, o.Y1 := 19
     o.X2 := 192 - pad, o.Y2 := 19
@@ -3981,10 +4161,18 @@ MarkupReturnTool() {
 }
 
 ; Ctrl+click a swatch to set the FILL colour instead of the stroke.
+;
+; The swatches can't be greyed (a disabled Static still paints its Background),
+; so the refusal lives here instead — see MarkupSyncEnable.
 MarkupPal_Color(col, *) {
+    if !MarkupState.ColorLive
+        return
     prop := GetKeyState('Ctrl', 'P') ? 'FillColor' : 'Color'
     MarkupApplyStyle(prop, col)
-    if (prop = 'FillColor')
+    ; A highlighter is already fill-only, so turning the global Fill default on
+    ; as a side effect of picking its colour would be a surprise aimed at every
+    ; OTHER tool.
+    if (prop = 'FillColor' && MarkupSubjectType() != 'highlight')
         MarkupApplyStyle('Fill', true)
 }
 
@@ -3995,7 +4183,12 @@ MarkupPal_Num(prop, ctrl, *)   => MarkupApplyStyle(prop, Integer(ctrl.Text))
 ; here is the whole of the conversion, which is why a cap's id is defined as the
 ; lowercase of its name rather than as a separate field the user could get wrong.
 MarkupPal_Style(prop, ctrl, *) => MarkupApplyStyle(prop, StrLower(ctrl.Text))
-MarkupPal_Head(ctrl, *)        => MarkupApplyStyle('HeadScale', Float(ctrl.Text))
+MarkupPal_Head(ctrl, *) {
+    if (MarkupSubjectType() = 'number')
+        MarkupApplyStyle('NumDia', (ctrl.Text = 'auto') ? 0 : Integer(ctrl.Text))
+    else
+        MarkupApplyStyle('HeadScale', Float(ctrl.Text))
+}
 MarkupPal_Corner(ctrl, *)      => MarkupApplyStyle('Corner'
                                                  , (ctrl.Text = 'auto') ? -1 : Integer(ctrl.Text))
 
@@ -4059,6 +4252,9 @@ MarkupSaveDefaults() {
         IniWrite(MarkupCfg.Shadow     ? 1 : 0, path, 'Markup', 'Shadow')
         IniWrite(MarkupNumText(MarkupCfg.ArrowHeadScale)
                , path, 'Markup', 'ArrowHeadScale')
+        IniWrite(Format('{:06X}', MarkupCfg.HighlightColor)
+               , path, 'Markup', 'HighlightColor')
+        IniWrite(Integer(MarkupCfg.NumberDia), path, 'Markup', 'NumberDia')
 
         for tool, prefix in Map('line', 'Line', 'arrow', 'Arrow'
                               , 'path', 'Path', 'pen',  'Pen') {
@@ -4129,25 +4325,44 @@ MarkupApplyStyle(prop, value) {
         ; Applied to EVERY selected object — select three arrows, click a
         ; swatch, all three change.
         for o in MarkupState.Sels {
+            ; Disc size is meaningless on anything but a badge, and writing it
+            ; anyway would leave a stray property on every object in a mixed
+            ; group.  Skip rather than pollute.
+            if (prop = 'NumDia' && o.Type != 'number')
+                continue
             o.%prop% := value
             ; A number badge's disc IS its colour, so recolouring the stroke on
             ; one that has never been given a separate fill recolours the badge.
-            if (prop = 'Color' && o.Type = 'number')
+            ; A highlighter is the same case for the same reason: it draws only
+            ; its fill, so a stroke colour it never paints would be a dead end.
+            if (prop = 'Color' && (o.Type = 'number' || o.Type = 'highlight'))
                 o.FillColor := value
+            if (prop = 'FillColor' && o.Type = 'highlight')
+                o.Color := value
         }
         MarkupRender(snip)
         MarkupSyncPalette()
         return
     }
     switch prop {
-        case 'Color':     MarkupCfg.Color     := value
-        case 'FillColor': MarkupCfg.FillColor := value
+        ; The Highlighter keeps its own colour, like it keeps its own line
+        ; style: picking cyan to highlight a paragraph shouldn't repaint the
+        ; next arrow.  Both swatch gestures land on it, since a highlighter's
+        ; stroke and fill are the same thing.
+        case 'Color', 'FillColor':
+            if (MarkupState.Tool = 'highlight')
+                MarkupCfg.HighlightColor := value
+            else if (prop = 'Color')
+                MarkupCfg.Color := value
+            else
+                MarkupCfg.FillColor := value
         case 'Fill':      MarkupCfg.FillShapes := value
         case 'Thick':     MarkupCfg.Thickness := value
         case 'FontSize':  MarkupCfg.FontSize  := value
         case 'Outline':   MarkupCfg.Outline   := value
         case 'Shadow':    MarkupCfg.Shadow    := value
         case 'HeadScale': MarkupCfg.ArrowHeadScale := value
+        case 'NumDia':    MarkupCfg.NumberDia := value
         ; These four are per TOOL, not per script — see MarkupToolStyle.  So
         ; setting a chevron end while the Line tool is active changes what Line
         ; draws next and leaves Arrow exactly as it was.
@@ -4157,11 +4372,12 @@ MarkupApplyStyle(prop, value) {
     MarkupSyncPalette()
 }
 
-; The frame has exactly two properties, so the palette controls that mean
-; nothing on it (fill, halo, dash, end caps, head, corner, font) are simply
-; ignored rather than greyed out — MarkupSyncPalette leaves them showing the
-; current TOOL's values, so they still describe what the next drawn object will
-; look like while you happen to have the frame selected.
+; The frame has exactly two properties.  The controls that mean nothing on it
+; (fill, halo, dash, end caps, head, corner, font) are greyed by MarkupSyncEnable
+; — see the 'border' row of MarkupApplyTable — but they keep SHOWING the current
+; tool's values rather than blanking, so they still describe what the next drawn
+; object will look like while you happen to have the frame selected.  Anything
+; that reaches here anyway is ignored rather than trusted.
 ;
 ; Width is clamped to at least 1 by SetSnipBorder: "no frame" is the Border
 ; menu item's job.
