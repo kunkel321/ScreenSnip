@@ -363,6 +363,15 @@
     "default": "6",
     "restart": "..\\ScreenSnip.exe"
   },
+  "Gestures.ResizeDragDivisor": {
+    "label": "ResizeDragDivisor",
+    "help": "Alt+Right-drag resize sensitivity: how many pixels of resize map to ONE pixel of region drag.\n\nHigher is finer and slower, which suits nudging an edge into place. 1 gives 1:1 tracking.\n\nThe fractional remainder is carried between frames, so even a slow drag resizes smoothly instead of stair-stepping.",
+    "type": "integer",
+    "min": 1,
+    "max": 20,
+    "default": "3",
+    "restart": "..\\ScreenSnip.exe"
+  },
   "Straighten.StraightenStep": {
     "label": "StraightenStep",
     "help": "Degrees of deskew per Alt+comma / Alt+period.\n\nStraighten rotates the IMAGE inside a fixed rectangular frame - for example to square up a skewed table before OCR. Unlike Rotate, which turns the whole snip frame and all, Straighten leaves the frame axis-aligned and only tilts the content within it. You then trim the exposed corners with an Alt+drag resize.\n\nThe content pivots about the centre of the crop AS IT WAS when you began straightening, and that pivot is held fixed until you return to level. So panning slides the frame over one stable rotated image with no swirl, while the tilt still turns about what you are actually looking at.",
@@ -1490,5 +1499,30 @@
     "label": "StickyTool",
     "help": "After a Ctrl+click borrows the Select tool, remember the drawing tool that was in hand and give it back at the next click on bare image. A click with no drag still just deselects, so only a drag actually draws. Set to 0 and the Ctrl+click is a one-way trip to Select.",
     "type": "boolean"
+  },
+  "MarkupCaps.Fletch": {
+    "label": "Fletch",
+    "help": "Help for Fletch goes here",
+    "type": "text"
+  },
+  "MarkupCaps.Ring": {
+    "label": "Ring",
+    "help": "Help for Ring goes here",
+    "type": "text"
+  },
+  "MarkupDashes.Railroad": {
+    "label": "Railroad",
+    "help": "Help for Railroad goes here",
+    "type": "text"
+  },
+  "MarkupDashes.Sparse": {
+    "label": "Sparse",
+    "help": "Help for Sparse goes here",
+    "type": "text"
+  },
+  "MarkupDashes.Increment": {
+    "label": "Increment",
+    "help": "Help for Increment goes here",
+    "type": "text"
   }
 }

@@ -1,6 +1,6 @@
 ; ==============================================================================
 ; SnipMarkup.ahk  —  annotation / markup layer for ScreenSnip
-;                       Version Date: 8-30-2026
+;                       Version Date: 9-5-2026
 ; ==============================================================================
 ;
 ; An optional add-on on the same contract as SnipOCR / SnipAI / SnipImgur /
@@ -381,6 +381,8 @@ MarkupGroupHandleList(snip, m) {
 ;  5. Esc hotkey           →  MarkupEscape()           staged escape
 ;  6. SnipToClipboard      →  MarkupBeforeExport()     drop selection chrome
 ;  7. CloseSnip            →  MarkupOnSnipClosed()     free per-snip resources
+;  8. WM_SETCURSOR /       →  MarkupSessionOn()        "is this snip mine?"
+;     WM_LBUTTONDOWN
 ;
 ; Every one is a no-op when this snip has no markup and markup mode is off, so
 ; the cost on an un-annotated snip is a property test.
@@ -390,6 +392,21 @@ MarkupGroupHandleList(snip, m) {
 ; a bare "R" can never fire anywhere else.
 MarkupActive() {
     return MarkupState.Active && WinActive('ahk_id ' MarkupState.Active)
+}
+
+; True when THIS snip has an open markup session — regardless of which window is
+; active, and regardless of which tool is in hand.
+;
+; The core asks before it treats a bare press on the frame as a resize, and
+; before it shows a resize cursor there.  While annotating, the frame is the
+; snip's drag-to-move handle (see MarkupHitBorder, which declines a plain press
+; on it for exactly that reason) and the image is drawing canvas, so a bare
+; edge-drag must keep meaning "move", with Alt+edge-drag left as the way to
+; resize.  Deliberately NOT tool-sensitive: the answer would then flip every time
+; the tool changed, and a resize cursor that comes and goes while the pointer sits
+; still is worse than one that is consistently absent for the session.
+MarkupSessionOn(hwnd) {
+    return (MarkupState.Active = hwnd)
 }
 
 ; The submenu added to SnipMenu.  Built fresh on each call (like ImgurBuildMenu)

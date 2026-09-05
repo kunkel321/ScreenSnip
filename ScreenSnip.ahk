@@ -60,8 +60,9 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
 
   ON A SNIP  (mouse — click a snip first)
   Left-drag                    Move the window
+  Drag an edge / corner        Resize (trim / grow the capture)
   Right-drag                   Pan the image within the frame
-  Alt + drag edge / corner     Resize (trim / grow the capture)
+  Alt + right-drag             Resize — drag right/down to grow
   Right-click                  Context menu
   Esc                          Close this snip
 
@@ -82,7 +83,7 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   ADJUST CAPTURE REGION  (re-crops the frozen snapshot)
   Ctrl + Alt + Arrow           Pan  ± 1 px    (or right-drag)
   Ctrl + Shift + Alt + Arrow   Pan  ± 10 px
-  Win + Alt + Arrow            Resize ± 1 px  (or Alt-drag an edge)
+  Win + Alt + Arrow            Resize ± 1 px  (or drag an edge)
   Win + Shift + Alt + Arrow    Resize ± 10 px (grow = Right / Down)
   Range is limited by CaptureAdjustMargin (top of script).
 
@@ -94,7 +95,7 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Alt + , / .                  Straighten ± 1°  (CCW / CW)
   Shift + Alt + , / .          Straighten ± 0.5°  (fine)
   Squares up a skewed table before OCR: straighten,
-  then Alt-drag an edge to trim the exposed corners.
+  then drag an edge to trim the exposed corners.
 
   FLIP
   Shift + Left / Right         Flip horizontal
@@ -208,6 +209,12 @@ ShadowAlpha          := SnipCfg('SnipShadow', 'ShadowAlpha', 105)
 PanDragDivisor := SnipCfg('Gestures', 'PanDragDivisor', 3)
 PanClickSlop   := SnipCfg('Gestures', 'PanClickSlop', 5)
 EdgeGrabZone   := SnipCfg('Gestures', 'EdgeGrabZone', 6)
+; Alt+right-drag resize, same idea as PanDragDivisor: cursor travel is divided by
+; this before it becomes pixels, so a bigger number means a slower, finer drag.
+; 1 = the corner tracks the cursor 1:1. Kept separate from the pan divisor
+; because the two gestures want different feels — panning hunts for a detail and
+; wants damping, resizing usually knows where it's going.
+ResizeDragDivisor := SnipCfg('Gestures', 'ResizeDragDivisor', 1)
 
 ; ── Straighten ────────────────────────────────────────────────────────────────
 StraightenStep     := SnipCfg('Straighten', 'StraightenStep', 1)
@@ -841,7 +848,7 @@ OnMessage(0x200, WM_MOUSEMOVE)    ; keep selection overlay from stealing focus
 OnMessage(0x201, WM_LBUTTONDOWN)  ; allow dragging snip windows
 OnMessage(0x000F, WM_PAINT_BEVEL) ; re-paint the 3D bevel after any repaint
 OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
-OnMessage(0x0020, WM_SETCURSOR_RESIZE) ; Alt-hover over an edge → resize cursor
+OnMessage(0x0020, WM_SETCURSOR_RESIZE) ; hover over an edge → resize cursor
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW) ; keep each snip's drop shadow glued behind it
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SIZESYNC) ; repair image/border/window size if anything outside resizes a snip
 OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (active/inactive depth)
@@ -851,16 +858,56 @@ OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (ac
 ; part of the auto-execute section.
 ;
 ; The trigger key goes through Hotkey() rather than a literal double-colon line
-; so it stays configurable from the settings block. The '~' prefix passes the key
-; through (so a toggle key's two presses cancel out and leave the lock state
-; untouched); '*' fires regardless of stray modifiers.
+; so it stays configurable from the settings block. '*' fires regardless of
+; stray modifiers.
+;
+; The '~' prefix — pass the key through so it keeps its normal function — is
+; used for every trigger key EXCEPT a CapsLock that we've been told to nullify.
+; There, passing it through IS the bug:
+;
+;   With '~', Windows gets the press and toggles the lock on its own schedule,
+;   and the script is left trying to undo that afterwards. Every version of
+;   "undo it afterwards" is a race with something. A per-press
+;   SetCapsLockState('Off') is a read-then-toggle that no-ops if it reads the
+;   state before Windows has applied the press. AlwaysOff has the hook correct
+;   the state instead, but that correction and a per-press correction can both
+;   fire for one press and cancel each other out — and neither is reliable while
+;   a full-screen modal capture is up, which is exactly where the last failure
+;   reproduced (a third CapsLock press during freeze mode).
+;
+; Dropping the '~' removes the whole class of problem instead of racing it: the
+; hook swallows the key, Windows never sees a CapsLock event at all, and there
+; is no toggle left to undo. Presses one, two, three or thirty — inside a freeze
+; or outside one — cannot change the lock state, because nothing downstream of
+; this hook ever learns the key was pressed. The hotkey itself still fires
+; normally, so the trigger keeps working.
+;
+; Trade-off worth knowing: a suppressed key is invisible to every hook loaded
+; after this one, so no other script can bind CapsLock while this is active.
+; That's the intent of FreezeNullifyCapsLock, but it's also why the suppression
+; is guarded on the key NAME as well as the setting — anyone who picked a
+; different trigger key gets the pass-through '~' form and keeps their key.
+FreezeCapsNullified := (FreezeNullifyCapsLock && FreezeCaptureKey = 'CapsLock')
+
 if (FreezeCaptureKey != '') {
-    try Hotkey('~*' FreezeCaptureKey, FreezeHotkeyPressed)
+    try Hotkey((FreezeCapsNullified ? '*' : '~*') FreezeCaptureKey, FreezeHotkeyPressed)
     catch as e
         MsgBox('Could not register the Freeze Capture key "' FreezeCaptureKey '".'
              . '`n`n' e.Message
              . '`n`nCheck FreezeCaptureKey at the top of the script.', appName, 4096)
 }
+
+; One-time clear, not a forced mode. Suppression above stops the KEY from ever
+; toggling the lock, but it can't clear a lock that was already on when this
+; script started — and with the key swallowed, the user would have no way to
+; turn it off. So turn it off once, here.
+;
+; Deliberately NOT SetCapsLockState('AlwaysOff'): that installs a continuous
+; hook-level correction which is both redundant now (there's nothing left to
+; correct) and a second corrector that can fight the per-press one in
+; FreezeHotkeyPressed. One mechanism, not two.
+if FreezeCapsNullified
+    SetCapsLockState('Off')
 
 ; Cross-script trigger. RegisterWindowMessage returns the same id in every
 ; process for a given string, so another script can start a Freeze Capture with
@@ -872,7 +919,7 @@ if (FreezeCaptureKey != '') {
 ; that already owns the key keep it and have it broadcast this message. E.g. in
 ; PersonalHotstrings.ahk, which nullifies CapsLock:
 ;
-;     ~CapsLock:: {
+;     *CapsLock:: {          ; no '~' — the key is swallowed, so it can't toggle
 ;         static lastTick := 0, msg := DllCall('RegisterWindowMessage'
 ;                                     , 'Str', 'AHK_ScreenSnip_FreezeCapture', 'UInt')
 ;         if (A_TickCount - lastTick <= 400) {
@@ -880,8 +927,16 @@ if (FreezeCaptureKey != '') {
 ;             try PostMessage(msg, 0, 0, , 'ahk_id 0xFFFF')
 ;         } else
 ;             lastTick := A_TickCount
-;         SetCapsLockState('Off')      ; keep CapsLock nullified as before
 ;     }
+;
+; Note what that example does NOT do: call SetCapsLockState('Off') per press.
+; Only ONE script should be touching the lock state, or the two read-then-toggle
+; sequences race — both read "on", both send a correction, and the second one
+; turns it back on. When ScreenSnip owns the key it nullifies it by SUPPRESSION
+; (see the Hotkey() registration above), which leaves nothing for anyone else to
+; correct. When some other script owns the key, that script should do the same:
+; bind CapsLock without the '~' prefix so the key is swallowed outright, rather
+; than passing it through and trying to undo the toggle afterwards.
 ;
 ; Harmless no-op when ScreenSnip isn't running, so it can live in the library
 ; unconditionally.
@@ -966,30 +1021,41 @@ FreezeCaptureMessage(*) {
 ; Trigger-key handler: fire immediately, or on the second press within
 ; FreezeDoublePressTime when FreezeDoublePress is on.
 ;
-; The CapsLock reset runs on EVERY press, whether or not it triggered a capture,
-; so single and double presses both end with the lock state off. That's what
-; makes FreezeNullifyCapsLock behave like a plain "CapsLock does nothing" binding
-; while still leaving the key usable as a trigger. The hotkey is non-suppressing
-; ('~'), so the key event itself still reaches every other hook in the chain —
-; only the resulting lock state is undone.
+; The lock state is mostly not this function's job: when CapsLock is the trigger
+; and FreezeNullifyCapsLock is on, the hotkey is registered WITHOUT '~', so the
+; key is swallowed by the hook and can't toggle anything in the first place. The
+; per-press reset kept here is a cheap safety net for a lock turned on by some
+; OTHER means — a second keyboard, a remote session, another app — while
+; ScreenSnip is running. It is the only corrector in the script, so it has
+; nothing to race.
+;
+; When the trigger is anything else the hotkey keeps its '~' prefix, the key
+; passes through untouched, and this reset stays inert.
 FreezeHotkeyPressed(*) {
     global FreezeDoublePress, FreezeDoublePressTime
     global FreezeCaptureKey, FreezeNullifyCapsLock
     static lastTick := 0
 
-    ; Reset FIRST, not last: FreezeCapture() below blocks for the entire capture
-    ; (backdrop up, waiting on the selection drag), so resetting afterwards would
-    ; leave the caps light on for the whole time. Guarded on the key name as well
-    ; as the setting, so it stays inert for anyone who chose a different trigger
-    ; and can't quietly disable a CapsLock they actually use.
     if (FreezeNullifyCapsLock && FreezeCaptureKey = 'CapsLock')
         SetCapsLockState('Off')
 
+    ; Hand the capture off to a one-shot timer instead of calling it here.
+    ;
+    ; FreezeCapture() blocks for the ENTIRE capture — backdrop up, waiting on the
+    ; selection drag — and a hotkey that is still running its own thread cannot
+    ; fire again (#MaxThreadsPerHotkey is 1 by default), so every trigger-key
+    ; press during those seconds used to be discarded outright: no handler, no
+    ; reset, and a stray press left the caps light on. A -1 timer ends this
+    ; thread immediately, keeps the hotkey live for the whole capture, and fires
+    ; on the next message check — during the wait loop's Sleep 10 if a capture is
+    ; already up, where FreezeCapture()'s own FreezeActive guard rejects it.
+    ;
+    ; Same reasoning, and the same one-line fix, as FreezeCaptureMessage above.
     if !FreezeDoublePress
-        FreezeCapture()
+        SetTimer(FreezeCapture, -1)
     else if (A_TickCount - lastTick <= FreezeDoublePressTime) {
         lastTick := 0            ; consume the pair, so a 3rd press starts fresh
-        FreezeCapture()
+        SetTimer(FreezeCapture, -1)
     } else
         lastTick := A_TickCount
 }
@@ -1345,8 +1411,13 @@ F1::            ShowHelp() ; hide
 ; hotkey, so on a snip it takes over the right-drag gesture — which also means
 ; AC2's global DragTools right-drag is suppressed HERE (on snips) but untouched
 ; everywhere else. A right-CLICK with no meaningful travel still opens the menu.
+;
+; Alt + right-drag is the RESIZE variant of the same gesture (see
+; SnipAltRightButton below). A bare 'RButton::' hotkey only fires with NO
+; modifiers held, so the two never compete for the same press.
 #HotIf SnipUnderCursor()
 RButton::       SnipRightButton() ; hide
+!RButton::      SnipAltRightButton() ; hide
 #HotIf
 
 ; True when the mouse is over one of our snip windows. Used as the #HotIf
@@ -1355,6 +1426,38 @@ SnipUnderCursor() {
     global guiSnips
     MouseGetPos(, , &win)
     return guiSnips.Has(win)
+}
+
+; Alt + right-drag anywhere on a snip = resize the capture region.
+;
+; Plain right-drag is already the pan (hand) tool, so resize takes the Alt
+; variant. This is ScreenSnip's in-process answer to the same gesture AC2's
+; MoveResizeTools.ahk offers from outside (^!RButton): because it runs in HERE it
+; re-crops the frozen master through the normal path, so the live W/H labels
+; appear, the border and drop shadow stay in step, and there's no external resize
+; for WM_WINDOWPOSCHANGED_SIZESYNC to repair afterwards. The two gestures don't
+; collide either — MoveResizeTools wants Ctrl+Alt, and '!RButton' won't fire
+; while Ctrl is also down.
+;
+; It deliberately copies MoveResizeTools' FEEL rather than the edge-drag's:
+; nothing jumps to the cursor. Wherever you press, the top-left corner stays put
+; and the bottom-right follows your travel, so dragging 50px left on a 300x300
+; snip makes it 250 wide. That's what makes the gesture usable from the middle of
+; a snip, where there's no edge to "grab" and no sensible corner to snap to.
+SnipAltRightButton() {
+    global guiSnips
+    MouseGetPos(, , &win)
+    if !guiSnips.Has(win)
+        return
+    snip := guiSnips[win]
+    ; Same gate the edge drag relies on: a rotated snip's screen axes don't
+    ; correspond to the capture rectangle, so cursor travel has no sane mapping
+    ; onto a crop. Leave it alone rather than resizing the wrong axis.
+    if (Mod(snip.Angle, 360) != 0)
+        return
+    WinActivate('ahk_id ' win)   ; as with the pan gesture — focus the snip so the
+                                 ; keyboard adjustments work straight afterwards
+    SnipResizeDragRelative(win)
 }
 
 ; Handle a right-button press over a snip: drag to pan (image follows the
@@ -1493,7 +1596,14 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
     ; Transparent color key for the corners — always the fixed TransColor.
     snipTransColor := Integer(TransColor)
 
-    g := Gui('-Caption +AlwaysOnTop +OwnDialogs +E0x80000', 'SnipperWindow')
+    ; +0x02000000 = WS_CLIPCHILDREN. Excludes the Picture child's rectangle from
+    ; everything the PARENT paints, so the window's background — which for a
+    ; bordered snip is the BORDER COLOUR — can never be painted over the image,
+    ; not on an erase, not during a resize, not on any repaint. Without it every
+    ; erase of the client area briefly floods the whole snip with the border
+    ; colour before the child repaints on top, which is the flicker seen during
+    ; live resizes. The parent legitimately owns only the frame; this says so.
+    g := Gui('-Caption +AlwaysOnTop +OwnDialogs +0x02000000 +E0x80000', 'SnipperWindow')
 
     ; The two border properties start from the script-wide defaults but are
     ; stored PER SNIP from here on (see SetSnipBorder), so one snip can wear a
@@ -2099,10 +2209,34 @@ RenderSnipResize(snip, winX, winY) {
     totalW     := newW + physBorder * 2
     totalH     := newH + physBorder * 2
 
-    DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)   ; WM_SETREDRAW off
+    ; WM_SETREDRAW off — on BOTH windows, which is the fix for the resize flicker.
+    ;
+    ; WM_SETREDRAW is per-window: silencing only the parent leaves the Picture
+    ; free to repaint itself when SetWindowPos resizes it below, and a SS_BITMAP
+    ; static fills whatever its bitmap does not cover with its background brush.
+    ; For a bordered snip that brush is the BORDER COLOUR, and the bitmap does
+    ; not cover the control for the moment between "control is now the new size"
+    ; and "control now has the new bitmap" — so every frame of the drag painted
+    ; one border-coloured flash through the image. Silencing the child collapses
+    ; that pair of intermediate paints into nothing; the single RedrawWindow at
+    ; the end then paints the finished state once.
+    ;
+    ; This is also why panning never flickered: RenderSnipFast changes no window
+    ; sizes, so the child has no intermediate state to paint.
+    DllCall('SendMessage', 'Ptr', hwnd,       'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)
+    DllCall('SendMessage', 'Ptr', g.Pic.Hwnd, 'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)
 
     if snip.HasBorder {
-        g.BackColor := Format('0x{:06X}', bcol)
+        ; Assigning BackColor rebuilds the brush and invalidates the window, so
+        ; doing it unconditionally added a full erase to every drag frame for a
+        ; colour that cannot change mid-drag. Compare against what the Gui
+        ; already holds rather than caching it on the snip: BackColor is written
+        ; from half a dozen places (RenderSnip, the border-colour setter, the
+        ; border toggle), and a cache would go stale behind every one of them.
+        ; If the comparison ever fails to match types it simply assigns, which is
+        ; the old behaviour — the fallback is the previous cost, not a bug.
+        if (g.BackColor != bcol)
+            g.BackColor := Format('0x{:06X}', bcol)
         g.MarginX := bw, g.MarginY := bw
     }
     ; Picture FIRST, then the window. The order matters now that the shadow and
@@ -2122,8 +2256,13 @@ RenderSnipResize(snip, winX, winY) {
     if oldHbm
         DllCall('DeleteObject', 'Ptr', oldHbm)
 
-    DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)   ; WM_SETREDRAW on
-    DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0085)
+    ; Redraw back on, child first so it is ready to paint when the parent's
+    ; RedrawWindow reaches it. RDW_ERASE stays in the flags — a snip that GREW
+    ; has newly exposed frame that genuinely needs filling — and is now safe to
+    ; keep, because WS_CLIPCHILDREN confines that erase to the frame.
+    DllCall('SendMessage', 'Ptr', g.Pic.Hwnd, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)
+    DllCall('SendMessage', 'Ptr', hwnd,       'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)
+    DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0085)   ; INVALIDATE|ERASE|ALLCHILDREN
 
     if (snip.HasBorder && Bevel3D && bw <= Bevel3DMaxThickness)
         DrawSnipBevel(g, bcol, bw, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
@@ -2147,6 +2286,32 @@ ResizeSnipRegion(dw, dh, hwnd := 0) {
     if (nw = c.W && nh = c.H)                 ; clamped — nothing changed
         return
     c.W := nw, c.H := nh
+
+    ; Take the in-place path when it applies. RenderSnip DESTROYS and recreates
+    ; the Picture control; the replacement paints itself the instant it is added,
+    ; before the window has been resized around it, so a held-down arrow key
+    ; flickers for the same reason a drag used to. RenderSnipResize reuses the
+    ; control, so there is no such moment.
+    ;
+    ; Gated to RenderSnipResize's documented precondition — upright and unskewed,
+    ; where the display size is exactly the crop size. Anything else (rotated,
+    ; straightened) still goes the long way round.
+    ;
+    ; The geometry below reproduces RenderSnip's centring exactly, so the
+    ; keystroke still grows the snip symmetrically about its centre rather than
+    ; suddenly anchoring a corner.
+    if (Mod(snip.Angle, 360) = 0 && snip.Skew = 0) {
+        scale      := A_ScreenDPI / 96
+        physBorder := snip.HasBorder ? Round(SnipBorderW(snip) * scale) : 0
+        rect := Buffer(16, 0)
+        DllCall('GetWindowRect', 'Ptr', hwnd, 'Ptr', rect)
+        curL := NumGet(rect, 0, 'Int'), curT := NumGet(rect,  4, 'Int')
+        curR := NumGet(rect, 8, 'Int'), curB := NumGet(rect, 12, 'Int')
+        totalW := nw + physBorder * 2,  totalH := nh + physBorder * 2
+        RenderSnipResize(snip, (curL + curR) // 2 - totalW // 2
+                             , (curT + curB) // 2 - totalH // 2)
+        return
+    }
     RenderSnip(snip)
 }
 
@@ -2312,8 +2477,9 @@ WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
     if !guiSnips.Has(snipHwnd)
         return
     ; Alt + press on an edge/corner = resize the capture region; the opposite
-    ; edge stays anchored. Anything else (no Alt, or Alt away from an edge) keeps
-    ; the original "left-drag moves the window" behaviour.
+    ; edge stays anchored. Checked BEFORE markup so Alt is the unambiguous
+    ; override: it resizes from an edge even when a drawing tool is active and
+    ; would otherwise swallow the click.
     if GetKeyState('Alt', 'P') {
         edge := SnipEdgeAtCursor(snipHwnd)
         if (edge != '') {
@@ -2324,29 +2490,68 @@ WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
     ; Markup gets first refusal on the click.  It returns TRUE only when it
     ; actually used the press (drawing, or grabbing an object/handle); a click
     ; on empty canvas with the Select tool comes back FALSE and falls through to
-    ; the window-move below, so the drag-to-move muscle memory survives markup
-    ; mode.  Everything is behind IsSet(MarkupCfg), so with the module deleted
-    ; this is one variable test.
+    ; the edge-resize and window-move below, so the drag-to-move muscle memory
+    ; survives markup mode.  Everything is behind IsSet(MarkupCfg), so with the
+    ; module deleted this is one variable test.
     if IsSet(MarkupCfg) {
         markupClickFn := 'MarkupOnLButton'
         if %markupClickFn%(snipHwnd)
             return
     }
+    ; Bare press on an edge/corner = resize too, but NOT while a markup session
+    ; owns this snip. Markup's contract makes the frame the snip's drag-to-move
+    ; handle (see MarkupHitBorder: a plain press on the frame is declined
+    ; precisely so the move below happens), and with a fat border that's the best
+    ; handle an annotated snip has — the image itself is drawing canvas. So while
+    ; annotating, the frame keeps meaning "move" and resizing wants Alt (above);
+    ; WM_SETCURSOR_RESIZE stays quiet to match, so the cursor never promises a
+    ; resize that this branch won't perform.
+    ;
+    ; Everywhere else the resize arrow shows on any edge hover with no modifier
+    ; held, so a plain drag from there has to do what the arrow says.
+    if !SnipMarkupOnSnip(snipHwnd) {
+        edge := SnipEdgeAtCursor(snipHwnd)
+        if (edge != '') {
+            SnipResizeDrag(snipHwnd, edge)
+            return
+        }
+    }
     PostMessage(0xA1, 2, , snipHwnd)   ; WM_NCLBUTTONDOWN, HTCAPTION → move
 }
 
-; While Alt is held and the cursor is over a snip's edge/corner, show the
-; matching resize cursor. This is PER-WINDOW (SetCursor on our own window only) —
-; deliberately NOT SetSystemCursor — so there's nothing to own, restore, or leave
-; stuck: the next WM_SETCURSOR (any mouse move off the edge, or Alt released)
-; falls through to the default arrow on its own. Returns 1 to tell Windows we
-; handled it (suppresses the default arrow); returns nothing to allow default.
+; True when SnipMarkup.ahk is present AND has an open markup session on this
+; snip. The module stays optional in the usual two ways: IsSet(MarkupCfg) means
+; a missing module costs one variable test, and the dynamic-name call is wrapped
+; in try so an OLDER SnipMarkup.ahk without this hook degrades to false (bare
+; edge-drag resize stays on) instead of throwing.
+SnipMarkupOnSnip(snipHwnd) {
+    if !IsSet(MarkupCfg)
+        return false
+    fnSession := 'MarkupSessionOn'
+    try
+        return %fnSession%(snipHwnd)
+    catch
+        return false
+}
+
+; When the cursor is over a snip's edge/corner, show the matching resize cursor —
+; no modifier needed, the way a normal resizable window behaves. This is
+; PER-WINDOW (SetCursor on our own window only) — deliberately NOT
+; SetSystemCursor — so there's nothing to own, restore, or leave stuck: the next
+; WM_SETCURSOR (any mouse move off the edge) falls through to the default arrow
+; on its own. Returns 1 to tell Windows we handled it (suppresses the default
+; arrow); returns nothing to allow default.
+;
+; The arrow is a promise, so it's shown only where a bare drag will actually
+; keep it — which is why a snip with a markup session open gets no arrow: there
+; the frame is markup's drag-to-move handle and resizing wants Alt. Same test on
+; both sides, so the cursor and WM_LBUTTONDOWN can't disagree.
 WM_SETCURSOR_RESIZE(wParam, lParam, msg, hwnd) {
     global guiSnips
-    if !GetKeyState('Alt', 'P')
-        return
     snipHwnd := guiSnips.Has(hwnd) ? hwnd : DllCall("GetParent", "Ptr", hwnd, "Ptr")
     if !guiSnips.Has(snipHwnd)
+        return
+    if SnipMarkupOnSnip(snipHwnd)
         return
     edge := SnipEdgeAtCursor(snipHwnd)
     if (edge = '')
@@ -2461,7 +2666,12 @@ ResizeDimLabels(cmd, imgLeft := 0, imgTop := 0, w := 0, h := 0) {
 ; flips), pairs it with the fixed anchor edge, and takes min/max to get the new
 ; crop — so flips fall out naturally with no special-casing. Angle is 0 here (the
 ; gate in SnipEdgeAtCursor guarantees it), so screen px map 1:1 to crop px.
-SnipResizeDrag(snipHwnd, edge) {
+;
+; `btn` is which button the drag is held with — 'LButton' for the edge drag
+; started from WM_LBUTTONDOWN, 'RButton' for the Alt+right-drag. It only changes
+; which key the loop watches; everything else about the drag is identical, which
+; is the whole point of sharing one function between the two gestures.
+SnipResizeDrag(snipHwnd, edge, btn := 'LButton') {
     global guiSnips
     static MINSZ := 8
     if !guiSnips.Has(snipHwnd)
@@ -2499,7 +2709,7 @@ SnipResizeDrag(snipHwnd, edge) {
     ; ShowDimensionLabels master switch is off).
     ResizeDimLabels('update', imgL, imgT, imgR - imgL, imgB - imgT)
 
-    while GetKeyState('LButton', 'P') {
+    while GetKeyState(btn, 'P') {
         if !guiSnips.Has(snipHwnd) {
             ResizeDimLabels('hide')
             return
@@ -2553,6 +2763,87 @@ SnipResizeDrag(snipHwnd, edge) {
         newImgT := dragT ? (imgB - nh) : imgT
         RenderSnipResize(snip, newImgL - physBorder, newImgT - physBorder)
         ResizeDimLabels('update', newImgL, newImgT, nw, nh)
+        Sleep 8
+    }
+    ResizeDimLabels('hide')   ; drag released — clear the labels
+}
+
+; Resize by cursor TRAVEL rather than by grabbing an edge — the Alt+right-drag.
+;
+; The visible top-left corner is nailed down and the size follows the cursor:
+; total travel since the press, divided by ResizeDragDivisor, added to the crop
+; size the snip had when the drag began. Measuring from the START each frame
+; (rather than accumulating per-frame deltas the way the pan does) is what keeps
+; it exact — no rounding drift over a long drag, and putting the cursor back
+; where it started puts the snip back at its original size.
+;
+; The pan needs accumulation because PanSnipRegionFast moves the crop by a step;
+; here the crop is recomputed absolutely every frame, so from-start is both
+; simpler and better behaved.
+;
+; Flips: the visible top-left maps to a different master corner once an axis is
+; flipped, so the ANCHORED master edge changes with it. Unflipped, the crop's X
+; is fixed and width grows to the right; flipped, the crop's right master edge
+; (X+W) is fixed and X slides as the width changes. Same for Y/H under FlipV.
+; Angle is 0 here — SnipAltRightButton gates on it.
+SnipResizeDragRelative(snipHwnd) {
+    global guiSnips, ResizeDragDivisor
+    static MINSZ := 8
+    if !guiSnips.Has(snipHwnd)
+        return
+    snip := guiSnips[snipHwnd]
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return
+
+    ; Start geometry (physical px). The window's top-left never moves during this
+    ; drag, so it's read once and reused as the render origin every frame.
+    rect := Buffer(16, 0)
+    DllCall('GetWindowRect', 'Ptr', snipHwnd, 'Ptr', rect)
+    winL := NumGet(rect, 0, 'Int'), winT := NumGet(rect, 4, 'Int')
+    scale      := A_ScreenDPI / 96
+    physBorder := snip.HasBorder ? Round(SnipBorderW(snip) * scale) : 0
+    imgL := winL + physBorder, imgT := winT + physBorder
+
+    sc := { X: snip.Crop.X, Y: snip.Crop.Y, W: snip.Crop.W, H: snip.Crop.H }   ; start crop
+
+    ; Fixed master edges, chosen by flip state (see the comment block above).
+    anchorMX := snip.FlipH ? sc.X + sc.W : sc.X
+    anchorMY := snip.FlipV ? sc.Y + sc.H : sc.Y
+
+    pt := Buffer(8, 0)
+    DllCall('GetCursorPos', 'Ptr', pt)
+    startX := NumGet(pt, 0, 'Int'), startY := NumGet(pt, 4, 'Int')
+
+    divisor := Max(1, ResizeDragDivisor)
+    ResizeDimLabels('update', imgL, imgT, sc.W, sc.H)
+
+    while GetKeyState('RButton', 'P') {
+        if !guiSnips.Has(snipHwnd) {          ; snip closed mid-gesture — bail cleanly
+            ResizeDimLabels('hide')
+            return
+        }
+        DllCall('GetCursorPos', 'Ptr', pt)
+        mx := NumGet(pt, 0, 'Int'), my := NumGet(pt, 4, 'Int')
+
+        nw := Max(MINSZ, sc.W + Round((mx - startX) / divisor))
+        nh := Max(MINSZ, sc.H + Round((my - startY) / divisor))
+
+        ; Clamp to what the frozen master can actually supply, measured from the
+        ; anchored edge — growing past it would show nothing but empty pixels.
+        nw := snip.FlipH ? Min(nw, anchorMX) : Min(nw, snip.MasterW - anchorMX)
+        nh := snip.FlipV ? Min(nh, anchorMY) : Min(nh, snip.MasterH - anchorMY)
+        nw := Max(MINSZ, nw), nh := Max(MINSZ, nh)
+        nx := snip.FlipH ? anchorMX - nw : anchorMX
+        ny := snip.FlipV ? anchorMY - nh : anchorMY
+
+        ; No change this frame — skip the re-render.
+        if (nx = snip.Crop.X && ny = snip.Crop.Y && nw = snip.Crop.W && nh = snip.Crop.H) {
+            Sleep 8
+            continue
+        }
+        snip.Crop.X := nx, snip.Crop.Y := ny, snip.Crop.W := nw, snip.Crop.H := nh
+        RenderSnipResize(snip, winL, winT)
+        ResizeDimLabels('update', imgL, imgT, nw, nh)
         Sleep 8
     }
     ResizeDimLabels('hide')   ; drag released — clear the labels
@@ -3931,3 +4222,4 @@ Class GDIp {
 ; merely loading it creates one hidden tooltip window (a class static), which is
 ; harmless but not literally zero-cost.  Nothing is subclassed until Init() runs.
 #Include *i Resources\ToolTipOptions.ahk
+
