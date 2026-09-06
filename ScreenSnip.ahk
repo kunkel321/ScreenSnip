@@ -849,6 +849,7 @@ OnMessage(0x201, WM_LBUTTONDOWN)  ; allow dragging snip windows
 OnMessage(0x000F, WM_PAINT_BEVEL) ; re-paint the 3D bevel after any repaint
 OnMessage(0x0006, WM_ACTIVATE_BEVEL) ; refresh bevel strength on focus change
 OnMessage(0x0020, WM_SETCURSOR_RESIZE) ; hover over an edge → resize cursor
+OnMessage(0x0138, WM_CTLCOLORSTATIC_SNIP) ; stop a snip's image control self-erasing
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW) ; keep each snip's drop shadow glued behind it
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SIZESYNC) ; repair image/border/window size if anything outside resizes a snip
 OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (active/inactive depth)
@@ -1495,13 +1496,17 @@ SnipRightButton() {
     MouseGetPos(&startX, &startY)
 
     divisor := Max(1, PanDragDivisor)
+    relayer := false
     accX := 0.0, accY := 0.0
     lastX := startX, lastY := startY
     travel   := 0
     dragging := false
     while GetKeyState('RButton', 'P') {
-        if !guiSnips.Has(win)          ; snip closed mid-gesture — bail cleanly
+        if !guiSnips.Has(win) {        ; snip closed mid-gesture — bail cleanly
+            if relayer
+                SnipDragRelayer(snip, win)
             return
+        }
         MouseGetPos(&cx, &cy)
         ddx := cx - lastX, ddy := cy - lastY
         if (ddx || ddy) {
@@ -1509,8 +1514,17 @@ SnipRightButton() {
             travel += Abs(ddx) + Abs(ddy)
             ; Wait until we've cleared the click slop before panning, so a plain
             ; right-click never nudges the region. The slop itself isn't applied.
-            if (!dragging && travel >= PanClickSlop)
+            if (!dragging && travel >= PanClickSlop) {
                 dragging := true
+                ; Same colour-key removal the resize drags use. Panning changes
+                ; no window size, so it never hit the surface-reallocation
+                ; problem and the win here is small — but a colour-keyed window
+                ; is recomposited every frame either way, so there's no reason to
+                ; pay for it mid-gesture. Done HERE rather than before the loop
+                ; so a plain right-CLICK, which only opens the menu, never
+                ; touches the window's styles at all.
+                relayer := SnipDragUnlayer(snip, win)
+            }
             if dragging {
                 ; Image follows the cursor → the crop moves the OTHER way, /divisor.
                 accX -= ddx / divisor
@@ -1525,6 +1539,8 @@ SnipRightButton() {
         }
         Sleep 8
     }
+    if relayer
+        SnipDragRelayer(snip, win)
     if !dragging                        ; it was a click, not a drag → show menu
         ShowSnipMenuFor(win)
 }
@@ -2161,11 +2177,28 @@ RenderSnipFast(snip) {
         return
     hBitmap := GDIp.CreateHBITMAPFromBitmap(display)
     GDIp.DisposeImage(display)
+    ; Swap the bitmap with the control's own redraws suppressed, then repaint it
+    ; once WITHOUT an erase.
+    ;
+    ; Left to itself, STM_SETIMAGE invalidates the static with the erase flag
+    ; set, so the control gets a WM_ERASEBKGND that floods it with its background
+    ; brush — the parent's, i.e. the BORDER COLOUR — and only then a WM_PAINT that
+    ; blits the new bitmap over the top. Composition can catch the gap between
+    ; those two, which is the border-coloured leak seen while panning. Neither
+    ; step is needed: the bitmap covers the control exactly (pan never changes
+    ; the display size), so painting it straight over the old one is enough.
+    ;
+    ; RDW_INVALIDATE|RDW_UPDATENOW, with no RDW_ERASE, gives exactly that — a
+    ; synchronous WM_PAINT and no WM_ERASEBKGND at all.
+    pic := snip.GuiObj.Pic.Hwnd
+    DllCall('SendMessage', 'Ptr', pic, 'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)   ; WM_SETREDRAW off
     ; STM_SETIMAGE both installs the new bitmap and returns the previous one,
     ; which we own and must delete to avoid a GDI handle leak during fast pans.
-    oldHbm := SendMessage(0x0172, 0, hBitmap, snip.GuiObj.Pic.Hwnd)   ; STM_SETIMAGE, IMAGE_BITMAP
+    oldHbm := SendMessage(0x0172, 0, hBitmap, pic)   ; STM_SETIMAGE, IMAGE_BITMAP
     if oldHbm
         DllCall('DeleteObject', 'Ptr', oldHbm)
+    DllCall('SendMessage', 'Ptr', pic, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)   ; WM_SETREDRAW on
+    DllCall('RedrawWindow', 'Ptr', pic, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0101)  ; INVALIDATE|UPDATENOW
 }
 
 ; Render for a live edge-drag resize: like RenderSnipFast, but the window (and
@@ -2246,8 +2279,13 @@ RenderSnipResize(snip, winX, winY) {
     ; the child first means the only message either of them ever sees carries a
     ; consistent snip. Redraws are suppressed here, so the moment where the child
     ; is larger than its parent is never painted.
+    ; SWP_NOREDRAW (0x0400) on the CHILD: we repaint it ourselves via RDW_ALL-
+    ; CHILDREN below, so there is no reason to let Windows invalidate it here as
+    ; well. Deliberately NOT used on the parent — there it would also suppress
+    ; the invalidation of the screen area a SHRINKING snip uncovers, and the
+    ; windows behind would be left with stale pixels.
     DllCall('SetWindowPos', 'Ptr', g.Pic.Hwnd, 'Ptr', 0,
-            'Int', physBorder, 'Int', physBorder, 'Int', newW, 'Int', newH, 'UInt', 0x0014)
+            'Int', physBorder, 'Int', physBorder, 'Int', newW, 'Int', newH, 'UInt', 0x0414)
     DllCall('SetWindowPos', 'Ptr', hwnd, 'Ptr', 0,
             'Int', winX, 'Int', winY, 'Int', totalW, 'Int', totalH, 'UInt', 0x0014)
     hBitmap := GDIp.CreateHBITMAPFromBitmap(display)
@@ -2262,7 +2300,17 @@ RenderSnipResize(snip, winX, winY) {
     ; keep, because WS_CLIPCHILDREN confines that erase to the frame.
     DllCall('SendMessage', 'Ptr', g.Pic.Hwnd, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)
     DllCall('SendMessage', 'Ptr', hwnd,       'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)
-    DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0085)   ; INVALIDATE|ERASE|ALLCHILDREN
+    ;
+    ; RDW_UPDATENOW|RDW_ERASENOW (0x0300) make this SYNCHRONOUS, and that matters
+    ; more than anything else in this function. Without them RedrawWindow only
+    ; POSTS a WM_PAINT and returns, so the snip is already at its new size while
+    ; the new area still holds nothing — and on a colour-keyed layered window
+    ; (+E0x80000) "nothing" reads as the transparent colour, i.e. you see the
+    ; desktop straight through the snip until the paint is finally serviced. The
+    ; drag loop then resizes again and re-invalidates, so the paint keeps getting
+    ; pushed back. Painting inside this call closes the gap: the window is never
+    ; visible at a size it has not yet been painted at.
+    DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0385)   ; INVALIDATE|ERASE|ALLCHILDREN|UPDATENOW|ERASENOW
 
     if (snip.HasBorder && Bevel3D && bw <= Bevel3DMaxThickness)
         DrawSnipBevel(g, bcol, bw, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
@@ -2519,6 +2567,37 @@ WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
     PostMessage(0xA1, 2, , snipHwnd)   ; WM_NCLBUTTONDOWN, HTCAPTION → move
 }
 
+; A snip's image control paints its own background before it blits the bitmap.
+;
+; For SS_BITMAP the static asks its parent for a brush (WM_CTLCOLORSTATIC) and
+; fills with it, then draws — inside one WM_PAINT, so suppressing WM_ERASEBKGND
+; does not prevent it. That fill is the parent's background brush: the BORDER
+; COLOUR. Fill-then-blit is a two-stage update, and when the screen refreshes
+; between the stages you see part of the fill — which is why the leak shows up as
+; a horizontal BAND of border colour (whatever had not been blitted yet when the
+; scanout caught it) rather than a whole-image flash.
+;
+; Handing back a null brush removes the fill entirely, leaving a single-stage
+; update with nothing partial to catch. Nothing is lost: our render paths always
+; install a bitmap exactly the size of the control, so the fill was only ever
+; painting pixels that were about to be overwritten.
+;
+; Scoped hard — snip windows only, and only their image control — so every other
+; static in every other Gui (dimension labels, freeze hint, palettes) keeps the
+; default behaviour.
+WM_CTLCOLORSTATIC_SNIP(wParam, lParam, msg, hwnd) {
+    global guiSnips
+    if !guiSnips.Has(hwnd)
+        return
+    try {
+        if (lParam != guiSnips[hwnd].GuiObj.Pic.Hwnd)
+            return
+    } catch                                  ; Pic mid-rebuild (RenderSnip) — let
+        return                               ; the default brush handle this one
+    DllCall('SetBkMode', 'Ptr', wParam, 'Int', 1)        ; TRANSPARENT
+    return DllCall('GetStockObject', 'Int', 5, 'Ptr')    ; NULL_BRUSH
+}
+
 ; True when SnipMarkup.ahk is present AND has an open markup session on this
 ; snip. The module stays optional in the usual two ways: IsSet(MarkupCfg) means
 ; a missing module costs one variable test, and the dynamic-name call is wrapped
@@ -2660,6 +2739,51 @@ ResizeDimLabels(cmd, imgLeft := 0, imgTop := 0, w := 0, h := 0) {
         ov.InfoH.Visible := false
 }
 
+; ── Live-resize flicker: drop the colour key for the duration of the drag ─────
+;
+; Every snip is created WS_EX_LAYERED (+E0x80000) with a colour key, because a
+; rotated snip has bare corners and a translucent one needs alpha. A layered
+; window is composited by DWM from a redirection surface, and that surface is
+; reallocated on every size change — so any part of it not yet painted composites
+; as the key colour, i.e. as a hole straight through to the desktop. That is the
+; residual resize flicker: not something being painted wrong, but the window
+; being briefly transparent at its new size, hundreds of times a second.
+;
+; It also explains the two things that made no difference: the border and the
+; shadow are not involved, and it explains why panning is clean — pan never
+; changes the window size, so the surface is never reallocated.
+;
+; An UPRIGHT, UNSKEWED, FULLY OPAQUE snip has nothing transparent on it: the
+; Picture covers the whole client area, and the frame (when shown) is painted
+; solid. For those, the layered style is pure cost during a drag, so it comes off
+; at the start and goes back on at the end — two style changes for the whole
+; gesture instead of one surface reallocation per frame. Rotated or translucent
+; snips genuinely need it and keep it, flicker included; there is no way to draw
+; those without a colour key.
+;
+; Returns true when the style was removed, i.e. when the caller must restore it.
+SnipDragUnlayer(snip, hwnd) {
+    if (snip.Alpha < 255 || Mod(snip.Angle, 360) != 0 || snip.Skew != 0)
+        return false
+    ex := DllCall('GetWindowLong', 'Ptr', hwnd, 'Int', -20, 'Int')   ; GWL_EXSTYLE
+    if !(ex & 0x80000)                                               ; WS_EX_LAYERED
+        return false
+    DllCall('SetWindowLong', 'Ptr', hwnd, 'Int', -20, 'Int', ex & ~0x80000)
+    return true
+}
+
+; Put the colour key back and repaint once. Must be called on EVERY exit from a
+; drag that unlayered — including the snip-closed-mid-gesture bail — or the snip
+; is left unable to show transparency for the rest of its life.
+SnipDragRelayer(snip, hwnd) {
+    if !DllCall('IsWindow', 'Ptr', hwnd, 'Int')
+        return
+    ex := DllCall('GetWindowLong', 'Ptr', hwnd, 'Int', -20, 'Int')
+    DllCall('SetWindowLong', 'Ptr', hwnd, 'Int', -20, 'Int', ex | 0x80000)
+    SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
+    DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0385)
+}
+
 ; Drag an edge/corner to resize the capture region. The dragged edge follows the
 ; cursor; the opposite edge stays nailed to its start screen position. Works in
 ; MASTER coordinates: each frame maps the cursor to a master-x/-y (accounting for
@@ -2708,10 +2832,13 @@ SnipResizeDrag(snipHwnd, edge, btn := 'LButton') {
     ; Show the live W/H labels immediately at the starting size (no-op if the
     ; ShowDimensionLabels master switch is off).
     ResizeDimLabels('update', imgL, imgT, imgR - imgL, imgB - imgT)
+    relayer := SnipDragUnlayer(snip, snipHwnd)
 
     while GetKeyState(btn, 'P') {
         if !guiSnips.Has(snipHwnd) {
             ResizeDimLabels('hide')
+            if relayer
+                SnipDragRelayer(snip, snipHwnd)
             return
         }
         DllCall("SetCursor", "Ptr", resizeCursor)   ; hold the cursor through the drag
@@ -2766,6 +2893,8 @@ SnipResizeDrag(snipHwnd, edge, btn := 'LButton') {
         Sleep 8
     }
     ResizeDimLabels('hide')   ; drag released — clear the labels
+    if relayer
+        SnipDragRelayer(snip, snipHwnd)
 }
 
 ; Resize by cursor TRAVEL rather than by grabbing an edge — the Alt+right-drag.
@@ -2816,10 +2945,13 @@ SnipResizeDragRelative(snipHwnd) {
 
     divisor := Max(1, ResizeDragDivisor)
     ResizeDimLabels('update', imgL, imgT, sc.W, sc.H)
+    relayer := SnipDragUnlayer(snip, snipHwnd)
 
     while GetKeyState('RButton', 'P') {
         if !guiSnips.Has(snipHwnd) {          ; snip closed mid-gesture — bail cleanly
             ResizeDimLabels('hide')
+            if relayer
+                SnipDragRelayer(snip, snipHwnd)
             return
         }
         DllCall('GetCursorPos', 'Ptr', pt)
@@ -2847,6 +2979,8 @@ SnipResizeDragRelative(snipHwnd) {
         Sleep 8
     }
     ResizeDimLabels('hide')   ; drag released — clear the labels
+    if relayer
+        SnipDragRelayer(snip, snipHwnd)
 }
 
 ; Whenever a snip window repaints (focus change, drag, restore-from-minimize,
