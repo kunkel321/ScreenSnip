@@ -1,6 +1,6 @@
 ; ==============================================================================
 ; SnipMarkup.ahk  —  annotation / markup layer for ScreenSnip
-;                       Version Date: 9-5-2026
+;                       Version Date: 9-6-2026
 ; ==============================================================================
 ;
 ; An optional add-on on the same contract as SnipOCR / SnipAI / SnipImgur /
@@ -86,7 +86,7 @@
 ; same trick SnipWinDetect.ahk uses.
 class MarkupCfg {
     ; Default style for a newly drawn object.  Selecting an object and changing
-    ; a control on the palette edits THAT object; changing it with nothing
+    ; a control on the pallet edits THAT object; changing it with nothing
     ; selected changes these, i.e. what the next object will look like.
     static Color      := SnipCfgHex('Markup', 'Color',      0xE81123)   ; stroke
     static FillColor  := SnipCfgHex('Markup', 'FillColor',  0xFFFFFF)   ; used when Fill is on
@@ -195,10 +195,10 @@ class MarkupCfg {
     ; the double-click a one-way trip to Select, as it was before.
     static StickyTool := Integer(SnipCfg('Markup', 'StickyTool', 1)) ? true : false
 
-    ; Palette window.  AutoShow false = hotkey-only operation for people who
+    ; Pallet window.  AutoShow false = hotkey-only operation for people who
     ; know the letters and don't want a second window on screen.
-    static PaletteAutoShow := Integer(SnipCfg('Markup', 'PaletteAutoShow', 1)) ? true : false
-    static PaletteGap      := Integer(SnipCfg('Markup', 'PaletteGap', 12))
+    static PalletAutoShow := Integer(SnipCfg('Markup', 'PalletAutoShow', 1)) ? true : false
+    static PalletGap      := Integer(SnipCfg('Markup', 'PalletGap', 12))
 }
 
 ; ── Mutable state ─────────────────────────────────────────────────────────────
@@ -208,22 +208,22 @@ class MarkupCfg {
 class MarkupState {
     static Active   := 0
     static Tool     := 'select'
-    static Palette  := ''         ; Gui object, or '' when never built
-    static PalX     := ''         ; palette position, remembered per snip
+    static Pallet  := ''         ; Gui object, or '' when never built
+    static PalX     := ''         ; pallet position, remembered per snip
     static PalY     := ''
     static PalOwner := 0          ; which snip PalX/PalY were remembered for
     static Dragging := false
     static Band     := 0          ; live rubber-band rect (display coords) or 0
-    static Ctl      := Map()      ; palette control name → control object
+    static Ctl      := Map()      ; pallet control name → control object
     static ThickList := ''        ; which ladder the Width box is loaded with
     static HeadList  := 'arrow'   ; which ladder the Head box is loaded with
     static ColorLive := true      ; do the swatches mean anything right now?
 
     ; Per-tool line style, seeded from MarkupCfg on first use.  Changing a
-    ; palette control with NOTHING selected edits the entry for the current
+    ; pallet control with NOTHING selected edits the entry for the current
     ; tool; with a selection it edits the objects.  See MarkupApplyStyle.
     static ToolStyle  := Map()
-    static PreviewBmp := 0        ; HBITMAP behind the palette preview strip
+    static PreviewBmp := 0        ; HBITMAP behind the pallet preview strip
 
     ; The drawing tool a double-click borrowed Select from, or '' when Select
     ; was chosen deliberately.  See MarkupArmSticky.
@@ -323,7 +323,7 @@ MarkupSelectAll(hwnd := 0) {
     MarkupState.BorderSel := false
     for o in snip.Markup.Objs
         MarkupState.Sels.Push(o)
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
 }
 
@@ -418,7 +418,7 @@ MarkupSessionOn(hwnd) {
 MarkupBuildMenu() {
     m := Menu()
     m.Add('Annotate…`tM',              MarkupMenu_Handler)
-    m.Add('Show/Hide Tool Palette`tF3', MarkupMenu_Handler)
+    m.Add('Show/Hide Tool Pallet`tF3', MarkupMenu_Handler)
     m.Add('')
     m.Add('Paste Image`tCtrl+V',       MarkupMenu_Handler)
     m.Add('Add Image From File…',      MarkupMenu_Handler)
@@ -444,7 +444,7 @@ MarkupMenu_Handler(ItemName, ItemPos, *) {
     hwnd := SnipMenu._targetHwnd
     switch StrSplit(ItemName, "`t")[1] {
         case 'Annotate…':              MarkupBegin(hwnd)
-        case 'Show/Hide Tool Palette': MarkupPaletteMenuItem(hwnd)
+        case 'Show/Hide Tool Pallet': MarkupPalletMenuItem(hwnd)
         case 'Paste Image':            MarkupPasteImage(hwnd)
         case 'Add Image From File…':   MarkupImageFromFile(hwnd)
         case 'Swap Line Ends':         MarkupSwapEnds()
@@ -499,8 +499,8 @@ MarkupBegin(hwnd := 0) {
     OnMessage(0x0006, MarkupOnActivate)          ; WM_ACTIVATE
     MarkupWheelHotkeys(true)
     WinActivate('ahk_id ' hwnd)
-    if MarkupCfg.PaletteAutoShow
-        MarkupShowPalette()
+    if MarkupCfg.PalletAutoShow
+        MarkupShowPallet()
     MarkupRender(guiSnips[hwnd])
     ToolTip('Markup mode — Esc to leave')
     SetTimer(() => ToolTip(), -1400)
@@ -512,7 +512,7 @@ MarkupEnd(leaveTip := true) {
     hwnd := MarkupState.Active
     OnMessage(0x0006, MarkupOnActivate, 0)       ; stop watching WM_ACTIVATE
     MarkupWheelHotkeys(false)                    ; and leave the mouse hook alone
-    MarkupHidePalette()                          ; before Active is cleared, so
+    MarkupHidePallet()                          ; before Active is cleared, so
     MarkupState.Active    := 0                   ; the position is filed against
     MarkupState.Sel       := 0                   ; the right snip
     MarkupState.BorderSel := false
@@ -539,7 +539,7 @@ MarkupEscape(hwnd) {
     if (MarkupState.Sels.Length || MarkupState.BorderSel) {
         MarkupState.Sels := []
         MarkupState.BorderSel := false
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         if guiSnips.Has(hwnd)
             MarkupRender(guiSnips[hwnd])
         return true
@@ -548,7 +548,7 @@ MarkupEscape(hwnd) {
         ; Esc after a double-click means "never mind the tool either", so the
         ; loan is cancelled rather than silently waiting for the next click.
         MarkupState.Borrowed := ''
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         return true
     }
     if (MarkupState.Tool != 'select') {
@@ -568,7 +568,7 @@ MarkupBeforeExport(hwnd) {
     if (MarkupState.Active = hwnd && (MarkupState.Sels.Length || MarkupState.BorderSel)) {
         MarkupState.Sels := []
         MarkupState.BorderSel := false
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         if guiSnips.Has(hwnd)
             MarkupRender(guiSnips[hwnd])
     }
@@ -582,9 +582,9 @@ MarkupOnSnipClosed(snip, hwnd) {
         MarkupState.Active    := 0
         MarkupState.Sel       := 0
         MarkupState.BorderSel := false
-        MarkupHidePalette()
+        MarkupHidePallet()
         ; The snip this position was measured against is gone, so drop it and
-        ; let the next session place the palette against its own snip.
+        ; let the next session place the pallet against its own snip.
         MarkupState.PalX := '', MarkupState.PalY := '', MarkupState.PalOwner := 0
     }
     if !snip.HasProp('Markup')
@@ -815,7 +815,7 @@ MarkupUndo(hwnd := 0) {
     mk.Redo.Push(MarkupSnapshot(mk, snip))
     MarkupRestoreSnapshot(snip, mk.Undo.Pop())
     MarkupState.Sel := 0
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
 }
 
@@ -832,7 +832,7 @@ MarkupRedo(hwnd := 0) {
     mk.Undo.Push(MarkupSnapshot(mk, snip))
     MarkupRestoreSnapshot(snip, mk.Redo.Pop())
     MarkupState.Sel := 0
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
 }
 
@@ -939,7 +939,7 @@ MarkupDeleteSel(hwnd := 0) {
     }
     MarkupState.Sels := []
     MarkupRenumber(mk)
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
 }
 
@@ -997,7 +997,7 @@ MarkupDuplicateSel(hwnd) {
     ; The copies become the selection, so a duplicate-then-drag is one gesture.
     MarkupState.Sels := copies
     MarkupRenumber(mk)
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
 }
 
@@ -1068,7 +1068,7 @@ MarkupDefCap(def) {
     MarkupStyles.Caps[def.Id] := def
     ; A leading underscore marks a SCRATCH entry — the style editor registers
     ; one to draw its live preview from half-typed numbers.  It is lookupable
-    ; but never listed, so an in-progress definition can't leak into the palette.
+    ; but never listed, so an in-progress definition can't leak into the pallet.
     if (isNew && SubStr(def.Id, 1, 1) != '_')
         MarkupStyles.CapOrder.Push(def.Id)
 }
@@ -1307,7 +1307,7 @@ MarkupReloadStyles() {
     global guiSnips
     MarkupLoadStyles()
     MarkupFillStyleLists()
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     if (MarkupState.Active && guiSnips.Has(MarkupState.Active))
         MarkupRender(guiSnips[MarkupState.Active])
 }
@@ -2442,7 +2442,7 @@ MarkupDrawChrome(pGfx, snip, m, bmpW := 0, bmpH := 0) {
     ; frame, which reads as "the thing just beyond this edge is selected".
     ;
     ; No handles, deliberately.  A frame has no geometry to drag — its only two
-    ; properties are the swatches and the Width box on the palette — and drawing
+    ; properties are the swatches and the Width box on the pallet — and drawing
     ; grab squares for something that cannot be grabbed would be a lie.
     if (MarkupBorderSelected() && bmpW > 1 && bmpH > 1) {
         ; Two passes: a solid dark under-stroke so the ring stays visible on a
@@ -2705,14 +2705,14 @@ MarkupOnLButton(hwnd) {
             if (MarkupState.Sels.Length || MarkupState.BorderSel) {
                 MarkupState.Sels := []
                 MarkupState.BorderSel := false
-                MarkupSyncPalette()
+                MarkupSyncPallet()
                 MarkupRender(snip)
             }
             return false                     ; empty canvas → core moves the window
         }
         if extend {                          ; Shift+click toggles one object
             MarkupToggleSel(obj)
-            MarkupSyncPalette()
+            MarkupSyncPallet()
             MarkupRender(snip)
             return true
         }
@@ -2721,7 +2721,7 @@ MarkupOnLButton(hwnd) {
         ; just that object.
         if !MarkupIsSelected(obj)
             MarkupState.Sel := obj
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         MarkupRender(snip)
         MarkupDragMove(snip)
         return true
@@ -2737,7 +2737,7 @@ MarkupOnLButton(hwnd) {
 ;
 ; Two things make this worth having.  With a drawing tool active it is the
 ; escape hatch: you can grab the thing you just drew without going back to the
-; palette or remembering V.  With markup mode off it is the way back in —
+; pallet or remembering V.  With markup mode off it is the way back in —
 ; annotations stay on the snip after Esc, so clicking one reopens the session
 ; with that object already selected.
 MarkupBorrowSelect(snip, hwnd) {
@@ -2774,14 +2774,14 @@ MarkupBorrowSelect(snip, hwnd) {
     if onBorder {
         MarkupState.Sels      := []
         MarkupState.BorderSel := true
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         MarkupRender(snip)
         MarkupToast('Frame selected — swatches and Width now edit the border')
         return true
     }
 
     MarkupState.Sel := obj
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
 
     ; Text-bearing objects get the editor too, which is what a double-click
@@ -2891,7 +2891,7 @@ MarkupMarquee(snip, dx, dy) {
             }
             DllCall('gdiplus\GdipDeleteMatrix', 'UPtr', m)
         }
-        MarkupSyncPalette()
+        MarkupSyncPallet()
     }
     MarkupRender(snip)
 }
@@ -3223,7 +3223,7 @@ MarkupStartDraw(snip, dx, dy) {
         }
         mk.Objs.Push(o)
         MarkupState.Sel := o
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         MarkupRender(snip)
         return
     }
@@ -3289,7 +3289,7 @@ MarkupStartDraw(snip, dx, dy) {
         txt := MarkupTextPrompt('', 'Callout text')
         o.Text := txt
     }
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
 }
 
@@ -3413,7 +3413,7 @@ MarkupTextPrompt(initial := '', title := 'Text') {
     ; Centre it on the snip and clamp to the desktop, so it lands where the user
     ; is already looking rather than wherever Windows would have cascaded it.
     ; Physical pixels via MarkupWinRect / WinMove, for the same reason as the
-    ; palette: this Gui keeps DPI scaling on for its layout, so Gui.Show's x/y
+    ; pallet: this Gui keeps DPI scaling on for its layout, so Gui.Show's x/y
     ; would be logical units measured against a physical snip rect.
     g.Show('Hide')
     if (!MarkupWinRect(g.Hwnd, , , &pw, &ph) || !pw || !ph) {
@@ -3545,19 +3545,19 @@ MarkupImageFromFile(hwnd := 0) {
 }
 
 ; ==============================================================================
-; TOOL PALETTE
+; TOOL Pallet
 ; ==============================================================================
 ;
 ; A SEPARATE always-on-top window, not a toolbar bolted onto the snip.  That is
 ; deliberate: the snip window's whole identity is "a picture floating there with
 ; no chrome", and docking controls inside it would fight the border, bevel,
 ; shadow and margin code and fall apart on a small snip.  As a separate window
-; the palette also serves whichever snip is active rather than needing one copy
+; the pallet also serves whichever snip is active rather than needing one copy
 ; per snip, and RenderSnip never learns it exists — structurally the same
 ; arrangement as the drop shadow.
 ;
 ; WS_EX_NOACTIVATE (0x08000000) is the detail that makes it feel right: clicking
-; a palette control does NOT take focus away from the snip, so the single-letter
+; a pallet control does NOT take focus away from the snip, so the single-letter
 ; tool keys keep working and the snip stays the active window throughout.
 
 ; label, internal name, key hint — one row of the tool list.
@@ -3583,12 +3583,12 @@ MarkupSwatches() {
     return c
 }
 
-MarkupShowPalette() {
-    if MarkupState.Palette {
-        MarkupPositionPalette()
-        MarkupState.Palette.Show('NoActivate')
-        MarkupRaisePalette()
-        MarkupSyncPalette()
+MarkupShowPallet() {
+    if MarkupState.Pallet {
+        MarkupPositionPallet()
+        MarkupState.Pallet.Show('NoActivate')
+        MarkupRaisePallet()
+        MarkupSyncPallet()
         return
     }
     g := Gui('+AlwaysOnTop +ToolWindow +E0x08000000', 'Markup')
@@ -3600,7 +3600,7 @@ MarkupShowPalette() {
 
     ; Absolute x/y throughout.  Relative positioning (y+8 / yp) is tidier to
     ; read but it makes the swatch grid, which wraps mid-row, a nuisance — and a
-    ; palette that lays itself out differently under a non-default system font
+    ; pallet that lays itself out differently under a non-default system font
     ; is worse than a few explicit numbers.
     items := []
     for row in MarkupToolTable()
@@ -3682,46 +3682,46 @@ MarkupShowPalette() {
     ctl['done'].OnEvent('Click', (*) => MarkupEnd())
 
     g.OnEvent('Close', (*) => MarkupEnd())
-    MarkupState.Palette := g
-    ; After Palette is set, not before: MarkupFillStyleLists (and the preview
-    ; inside MarkupSyncPalette) both bail out when there is no palette, so
+    MarkupState.Pallet := g
+    ; After Pallet is set, not before: MarkupFillStyleLists (and the preview
+    ; inside MarkupSyncPallet) both bail out when there is no pallet, so
     ; filling the cap and dash lists earlier would silently do nothing.
     MarkupFillStyleLists()
     ; Show('Hide') creates the window without displaying it, so GetPos in
-    ; MarkupPositionPalette has real dimensions to work with. Positioning after
-    ; a visible Show would make the palette jump on first open.
+    ; MarkupPositionPallet has real dimensions to work with. Positioning after
+    ; a visible Show would make the pallet jump on first open.
     ; Placed once while hidden (so it never flashes at the wrong spot) and again
     ; once visible, because a Show with no coordinates can re-centre a window
     ; that is being displayed for the first time.  The second call is idempotent.
     g.Show('Hide')
-    MarkupPositionPalette()
+    MarkupPositionPallet()
     g.Show('NoActivate')
-    MarkupPositionPalette()
-    MarkupRaisePalette()
-    MarkupSyncPalette()
+    MarkupPositionPallet()
+    MarkupRaisePallet()
+    MarkupSyncPallet()
 }
 
-; Lift the palette to the top of the topmost band.
+; Lift the pallet to the top of the topmost band.
 ;
-; WHY THIS IS NEEDED: snip windows are +AlwaysOnTop, and the palette is
+; WHY THIS IS NEEDED: snip windows are +AlwaysOnTop, and the pallet is
 ; WS_EX_NOACTIVATE so that clicking its controls doesn't steal focus from the
 ; snip.  That combination has a nasty consequence — activating the snip raises
 ; it within the topmost band, and a NOACTIVATE window can never be raised by
-; activation, so the palette ends up buried under the very snip it belongs to.
+; activation, so the pallet ends up buried under the very snip it belongs to.
 ;
 ; WHAT THIS DOES NOT DO: it never calls SetWindowPos on a snip.  Only the
-; palette's own z-order changes, with NOMOVE | NOSIZE | NOACTIVATE, so nothing
+; pallet's own z-order changes, with NOMOVE | NOSIZE | NOACTIVATE, so nothing
 ; here can demote a snip or disturb the ordering the core sets up when a snip is
 ; created.  That matters: snips reverting behind the window they were cut from
 ; is a bug this project has already had to fix once.
 ; A window's rect in PHYSICAL screen pixels.
 ;
-; This exists because the palette is the one Gui in the project that keeps DPI
+; This exists because the pallet is the one Gui in the project that keeps DPI
 ; scaling switched on — it has an absolute-positioned layout that has to grow
 ; with the display, unlike the core's -DPIScale overlays which are positioned
 ; but not laid out.  The cost is that Gui.GetPos and Gui.Move speak SCALED
 ; logical units, while GetWindowRect (and everything the core does with snip
-; coordinates) speaks physical pixels.  Mixing the two put the palette at
+; coordinates) speaks physical pixels.  Mixing the two put the pallet at
 ; roughly 1/scale of the intended offset, which on a 125% display landed it on
 ; top of the snip instead of beside it.
 ;
@@ -3739,8 +3739,8 @@ MarkupWinRect(hwnd, &x?, &y?, &w?, &h?) {
     return true
 }
 
-MarkupRaisePalette() {
-    g := MarkupState.Palette
+MarkupRaisePallet() {
+    g := MarkupState.Pallet
     if (!g || !MarkupState.Active)
         return
     if !DllCall('IsWindowVisible', 'Ptr', g.Hwnd)
@@ -3756,35 +3756,35 @@ MarkupRaisePalette() {
 ; markup runs on a DIFFERENT snip falls straight through.
 MarkupOnActivate(wParam, lParam, msg, hwnd) {
     if (hwnd = MarkupState.Active && (wParam & 0xFFFF) != 0)   ; WA_ACTIVE|WA_CLICKACTIVE
-        MarkupRaisePalette()
+        MarkupRaisePallet()
 }
 
-MarkupHidePalette() {
-    if MarkupState.Palette {
+MarkupHidePallet() {
+    if MarkupState.Pallet {
         try {
-            ; Physical, to match WinMove in MarkupPositionPalette.  Storing a
-            ; Gui.GetPos reading here would drift the palette by the DPI factor
+            ; Physical, to match WinMove in MarkupPositionPallet.  Storing a
+            ; Gui.GetPos reading here would drift the pallet by the DPI factor
             ; every time it was hidden and reshown.
-            if MarkupWinRect(MarkupState.Palette.Hwnd, &px, &py) {
+            if MarkupWinRect(MarkupState.Pallet.Hwnd, &px, &py) {
                 MarkupState.PalX := px, MarkupState.PalY := py
                 MarkupState.PalOwner := MarkupState.Active
             }
         }
-        MarkupState.Palette.Hide()
+        MarkupState.Pallet.Hide()
     }
 }
 
-; Park the palette beside the snip, PaletteGap pixels clear of it: left if there
+; Park the pallet beside the snip, PalletGap pixels clear of it: left if there
 ; is room, right if not, and below (or above) if neither side fits.
 ;
 ; A position the user has dragged it to is remembered, but only for the snip it
 ; was dragged against — PalOwner.  Remembering it globally was wrong: the
-; palette would reappear wherever it happened to sit last, which for a snip
+; pallet would reappear wherever it happened to sit last, which for a snip
 ; somewhere else on screen usually meant straight on top of the new snip, and
-; made PaletteGap look like it was being ignored entirely.
-MarkupPositionPalette() {
+; made PalletGap look like it was being ignored entirely.
+MarkupPositionPallet() {
     global guiSnips
-    g := MarkupState.Palette
+    g := MarkupState.Pallet
     if (!g || !MarkupState.Active || !guiSnips.Has(MarkupState.Active))
         return
     if (MarkupState.PalX != '' && MarkupState.PalOwner = MarkupState.Active) {
@@ -3802,7 +3802,7 @@ MarkupPositionPalette() {
         return
     sr := sl + sw, sb := st + sh
     GetVirtualScreen(&vx, &vy, &vw, &vh)
-    gap := MarkupCfg.PaletteGap
+    gap := MarkupCfg.PalletGap
 
     x := sl - pw - gap, y := st
     if (x < vx) {                          ; no room on the left — try the right
@@ -3857,7 +3857,7 @@ MarkupSetHeadList(mode) {
     }
 }
 
-; WHAT the palette is currently describing: the frame, the primary selected
+; WHAT the pallet is currently describing: the frame, the primary selected
 ; object, or — with nothing selected — the tool about to be used.  A borrowed
 ; tool reports the tool you get back, matching what the tool list highlights.
 ;
@@ -3875,7 +3875,7 @@ MarkupSubjectType() {
 ; type, because the alternative — a Map of Maps — is more machinery than a
 ; fourteen-row lookup deserves and reads worse.
 ;
-; Anything absent is GREYED, never hidden.  Hiding would reflow a palette laid
+; Anything absent is GREYED, never hidden.  Hiding would reflow a pallet laid
 ; out in absolute coordinates, so every switch of tool would move the buttons
 ; under the pointer; and a dimmed Fill box still tells you Fill is a thing the
 ; Blur tool hasn't got, where a missing one just looks like a bug.
@@ -3925,7 +3925,7 @@ MarkupSyncEnable() {
                        , 'dash',     'dash',   'lbldash',   'dash'
                        , 'capstart', 'ends',   'capend',    'ends'
                        , 'swap',     'ends',   'lblends',   'ends')
-    if !MarkupState.Palette
+    if !MarkupState.Pallet
         return
     ctl  := MarkupState.Ctl
     tbl  := MarkupApplyTable()
@@ -3947,13 +3947,13 @@ MarkupSyncEnable() {
 ; NEXT object) in the style controls.  One control set doing both jobs is the
 ; whole trick that keeps "draw an arrow, then recolour it" from needing a
 ; properties dialog.
-MarkupSyncPalette() {
-    if !MarkupState.Palette
+MarkupSyncPallet() {
+    if !MarkupState.Pallet
         return
     ctl := MarkupState.Ctl
 
     ; Frame selected: Width shows the border, everything else keeps showing the
-    ; current tool so the palette still describes the next object you draw.
+    ; current tool so the pallet still describes the next object you draw.
     if (snip := MarkupBorderSnip()) {
         MarkupSetThickList(true)
         try ctl['thick'].Text := String(SnipBorderW(snip))
@@ -4001,7 +4001,7 @@ MarkupSyncPalette() {
     }
 
     ; With a tool on loan the list highlights the tool you will GET BACK, not
-    ; the Select you are temporarily using — otherwise the palette would say
+    ; the Select you are temporarily using — otherwise the pallet would say
     ; Select right up until an arrow appeared out of nowhere.
     shown := (MarkupState.Borrowed != '') ? MarkupState.Borrowed : MarkupState.Tool
     for i, row in MarkupToolTable()
@@ -4014,10 +4014,10 @@ MarkupSyncPalette() {
 }
 
 ; Refill the two cap lists and the dash list from the registries.  Called on
-; palette build and again after every reload, which is the whole of what the
-; palette has to do to pick up a newly defined arrowhead.
+; pallet build and again after every reload, which is the whole of what the
+; pallet has to do to pick up a newly defined arrowhead.
 MarkupFillStyleLists() {
-    if !MarkupState.Palette
+    if !MarkupState.Pallet
         return
     if !MarkupStyles.Ready
         MarkupLoadStyles()
@@ -4094,13 +4094,13 @@ MarkupPreviewObj() {
 }
 
 MarkupUpdatePreview() {
-    if (!MarkupState.Palette || !MarkupState.Ctl.Has('preview'))
+    if (!MarkupState.Pallet || !MarkupState.Ctl.Has('preview'))
         return
-    MarkupRenderStrip(MarkupState.Ctl['preview'], MarkupPreviewObj(), 206, 34, 'palette')
+    MarkupRenderStrip(MarkupState.Ctl['preview'], MarkupPreviewObj(), 206, 34, 'Pallet')
 }
 
 ; Draw one markup object into an HBITMAP and hand it to a Picture control.
-; Shared by the palette strip and both previews in the style editor, so all
+; Shared by the pallet strip and both previews in the style editor, so all
 ; three are guaranteed to agree with the snip and with each other.
 ;
 ; slot names the caller so each control's previous handle can be tracked
@@ -4130,7 +4130,7 @@ MarkupRenderStrip(ctrl, o, w, h, slot) {
     old := handles.Has(slot) ? handles[slot] : 0
     try ctrl.Value := 'HBITMAP:*' hbm
     handles[slot] := hbm
-    if (slot = 'palette')
+    if (slot = 'Pallet')
         MarkupState.PreviewBmp := hbm
     if (old && old != hbm && DllCall('gdi32\GetObjectType', 'Ptr', old))
         DllCall('DeleteObject', 'Ptr', old)
@@ -4142,7 +4142,7 @@ MarkupPal_Tool(ctrl, *) {
         MarkupSetTool(MarkupToolTable()[v][2])
 }
 
-; Every DELIBERATE tool change comes through here — palette click, hotkey, the
+; Every DELIBERATE tool change comes through here — pallet click, hotkey, the
 ; Esc ladder — so this is also where a borrowed tool is forgotten.  Choosing a
 ; tool by hand means you meant it, and nothing should hand you a different one
 ; later.  MarkupBorrowSelect arms the loan immediately AFTER calling this, which
@@ -4160,7 +4160,7 @@ MarkupSetTool(name) {
         if guiSnips.Has(MarkupState.Active)
             MarkupRender(guiSnips[MarkupState.Active])
     }
-    MarkupSyncPalette()
+    MarkupSyncPallet()
 }
 
 ; Give a borrowed drawing tool back.  Returns true if there was one, so the
@@ -4173,7 +4173,7 @@ MarkupReturnTool() {
     MarkupState.Tool      := tool
     MarkupState.Sels      := []
     MarkupState.BorderSel := false
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     return true
 }
 
@@ -4230,11 +4230,11 @@ MarkupSwapEnds() {
         tmp := st.CapStart
         st.CapStart := st.CapEnd, st.CapEnd := tmp
     }
-    MarkupSyncPalette()
+    MarkupSyncPallet()
 }
 
 ; Step to the next (or previous) entry in a registry.  Bound to [ ] and \\ so a
-; style can be tried on without going near the palette.
+; style can be tried on without going near the pallet.
 MarkupCycleStyle(prop, dir := 1) {
     if !MarkupStyles.Ready
         MarkupLoadStyles()
@@ -4252,7 +4252,7 @@ MarkupCycleStyle(prop, dir := 1) {
     MarkupApplyStyle(prop, list[Mod(idx - 1 + dir + list.Length, list.Length) + 1])
 }
 
-; Write the current palette state into the INI.
+; Write the current pallet state into the INI.
 ;
 ; A BUTTON, not a write on every click.  Colours and widths get changed
 ; constantly while annotating, and saving each one would make "my default" mean
@@ -4358,7 +4358,7 @@ MarkupApplyStyle(prop, value) {
                 o.Color := value
         }
         MarkupRender(snip)
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         return
     }
     switch prop {
@@ -4386,7 +4386,7 @@ MarkupApplyStyle(prop, value) {
         case 'Dash', 'CapStart', 'CapEnd', 'Corner':
             MarkupToolStyle(MarkupState.Tool).%prop% := value
     }
-    MarkupSyncPalette()
+    MarkupSyncPallet()
 }
 
 ; The frame has exactly two properties.  The controls that mean nothing on it
@@ -4417,23 +4417,23 @@ MarkupApplyBorderStyle(prop, value) {
     ; marks it does not — and a width change moves the image edge it is drawn
     ; on, so the overlay has to be recomposed either way.
     MarkupRender(snip)
-    MarkupSyncPalette()
+    MarkupSyncPallet()
 }
 
-; From the menu: if markup isn't running, starting it already shows the palette,
+; From the menu: if markup isn't running, starting it already shows the pallet,
 ; so don't immediately toggle it back off.
-MarkupPaletteMenuItem(hwnd) {
+MarkupPalletMenuItem(hwnd) {
     if !MarkupState.Active
         MarkupBegin(hwnd)
     else
-        MarkupTogglePalette()
+        MarkupTogglePallet()
 }
 
-MarkupTogglePalette() {
-    if (MarkupState.Palette && DllCall('IsWindowVisible', 'Ptr', MarkupState.Palette.Hwnd))
-        MarkupHidePalette()
+MarkupTogglePallet() {
+    if (MarkupState.Pallet && DllCall('IsWindowVisible', 'Ptr', MarkupState.Pallet.Hwnd))
+        MarkupHidePallet()
     else
-        MarkupShowPalette()
+        MarkupShowPallet()
 }
 
 ; ==============================================================================
@@ -4468,9 +4468,9 @@ MarkupWheelHotkeys(turnOn) {
 MarkupWheelUp(*)   => MarkupWheelSize(1)
 MarkupWheelDown(*) => MarkupWheelSize(-1)
 
-; The size ladders.  ONE definition each, shared with the palette dropdowns, so
+; The size ladders.  ONE definition each, shared with the pallet dropdowns, so
 ; the wheel can never land on a value the dropdown has no entry for — which
-; would leave the palette showing a stale number after every scroll.
+; would leave the pallet showing a stale number after every scroll.
 MarkupThickSteps() {
     static t := [1, 2, 3, 4, 5, 6, 8, 10, 12, 16]
     return t
@@ -4543,7 +4543,7 @@ MarkupWheelSize(dir) {
         MarkupPushUndo(snip)
         SetSnipBorder(MarkupState.Active, '', nxt)
         MarkupRender(snip)
-        MarkupSyncPalette()
+        MarkupSyncPallet()
         return
     }
     if !MarkupState.Sels.Length
@@ -4583,7 +4583,7 @@ MarkupWheelSize(dir) {
         if (shown = '')
             shown := (p.Prop = 'FontSize' ? 'Font ' : 'Width ') p.Val
     }
-    MarkupSyncPalette()
+    MarkupSyncPallet()
     MarkupRender(snip)
     MarkupToast(shown, 700)
 }
@@ -5013,16 +5013,16 @@ MarkupEd_DeleteDash() {
 ; the text-entry dialog (a different window, so the context is false while it is
 ; up and you can type an R into your label).
 ;
-; The palette is WS_EX_NOACTIVATE, so clicking its buttons does not take the
+; The pallet is WS_EX_NOACTIVATE, so clicking its buttons does not take the
 ; snip out of focus and these stay live throughout.
 
 #HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI') && !MarkupActive()
 m::         MarkupBegin() ; hide
 ; F3 needs a binding in BOTH contexts.  With only the MarkupActive() one it did
 ; nothing at all until a session had been started some other way — which looked
-; like "F3 doesn't work until you open the palette from the menu once".  Out
-; here it starts markup (which shows the palette); inside markup it toggles.
-F3::        MarkupPaletteMenuItem(WinGetID('A')) ; hide
+; like "F3 doesn't work until you open the pallet from the menu once".  Out
+; here it starts markup (which shows the pallet); inside markup it toggles.
+F3::        MarkupPalletMenuItem(WinGetID('A')) ; hide
 #HotIf
 
 ; Ctrl+Enter in the text dialog.  Scoped to that one window, so it can't leak.
@@ -5046,7 +5046,7 @@ c::         MarkupSetTool('callout') ; hide
 b::         MarkupSetTool('blur') ; hide
 m::         MarkupEnd() ; hide
 F2::        MarkupEditSelText() ; hide
-F3::        MarkupTogglePalette() ; hide
+F3::        MarkupTogglePallet() ; hide
 Delete::    MarkupDeleteSel() ; hide
 ^a::        MarkupSelectAll() ; hide
 ^z::        MarkupUndo() ; hide
@@ -5056,7 +5056,7 @@ Delete::    MarkupDeleteSel() ; hide
 ^v::        MarkupPasteImage() ; hide
 ^PgUp::     MarkupRaiseSel(MarkupState.Active, true) ; hide
 ^PgDn::     MarkupRaiseSel(MarkupState.Active, false) ; hide
-; Line style, without going near the palette.  Bracket keys step the two ends,
+; Line style, without going near the pallet.  Bracket keys step the two ends,
 ; backslash steps the dash; Shift reverses.  All three act on the selection when
 ; there is one and on the current tool's default when there isn't, which is the
 ; same rule every other style control follows.

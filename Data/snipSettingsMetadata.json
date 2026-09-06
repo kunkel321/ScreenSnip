@@ -1209,7 +1209,7 @@
   },
   "Markup.Color": {
     "label": "Color",
-    "help": "Default STROKE color for a new markup object: the arrow, the rectangle's outline, the callout's border. Six hex digits, RRGGBB, with no 0x or # prefix.\n\nThis is only the starting value. The palette's twelve swatches change it on the fly, and with an object selected a swatch recolors THAT object (or every object in the selection) instead of the default.\n\nShipped as a strong red because it is the one hue almost never present in application chrome, so an annotation reads as an annotation rather than as part of the screenshot.",
+    "help": "Default STROKE color for a new markup object: the arrow, the rectangle's outline, the callout's border. Six hex digits, RRGGBB, with no 0x or # prefix.\n\nThis is only the starting value. The Pallet's twelve swatches change it on the fly, and with an object selected a swatch recolors THAT object (or every object in the selection) instead of the default.\n\nShipped as a strong red because it is the one hue almost never present in application chrome, so an annotation reads as an annotation rather than as part of the screenshot.",
     "type": "color",
     "validation": "^[0-9A-Fa-f]{6}$",
     "default": "E81123",
@@ -1217,7 +1217,7 @@
   },
   "Markup.FillColor": {
     "label": "FillColor",
-    "help": "Default FILL color for shapes drawn with FillShapes on, and the body color of callout bubbles. Six hex digits, RRGGBB, no prefix.\n\nCtrl+click a palette swatch to set the fill instead of the stroke; doing so also switches the fill on.\n\nNumbered badges ignore this and take their disc color from Color, so that recoloring a badge is one click rather than two. Text drawn on a fill (badge digits, callout text) is automatically black or white, whichever contrasts with the fill.",
+    "help": "Default FILL color for shapes drawn with FillShapes on, and the body color of callout bubbles. Six hex digits, RRGGBB, no prefix.\n\nCtrl+click a Pallet swatch to set the fill instead of the stroke; doing so also switches the fill on.\n\nNumbered badges ignore this and take their disc color from Color, so that recoloring a badge is one click rather than two. Text drawn on a fill (badge digits, callout text) is automatically black or white, whichever contrasts with the fill.",
     "type": "color",
     "validation": "^[0-9A-Fa-f]{6}$",
     "default": "FFFFFF",
@@ -1225,7 +1225,7 @@
   },
   "Markup.FillShapes": {
     "label": "FillShapes",
-    "help": "Whether a newly drawn rectangle or ellipse starts filled with FillColor.\n\nOff is the usual choice for annotation: an outline lets the reader see what you are pointing AT. Turn it on when you are covering something up rather than circling it, though Blur is the better tool for hiding information.\n\nThe palette's 'Fill shape' checkbox overrides this per object.",
+    "help": "Whether a newly drawn rectangle or ellipse starts filled with FillColor.\n\nOff is the usual choice for annotation: an outline lets the reader see what you are pointing AT. Turn it on when you are covering something up rather than circling it, though Blur is the better tool for hiding information.\n\nThe Pallet's 'Fill shape' checkbox overrides this per object.",
     "type": "boolean",
     "options": [
       "0=Outline only",
@@ -1236,7 +1236,7 @@
   },
   "Markup.Thickness": {
     "label": "Thickness",
-    "help": "Default stroke width in image pixels for new objects: line and arrow shafts, shape outlines, callout borders.\n\n2 to 4 suits a normal desktop screenshot. Go heavier for a scaled-down image that will be viewed small, lighter for a dense UI where a fat outline would bury the thing it is marking.\n\nThe palette's Width list changes it, and a group resize deliberately does NOT scale it - a shrunken hairline reads as a rendering fault rather than as a smaller arrow.",
+    "help": "Default stroke width in image pixels for new objects: line and arrow shafts, shape outlines, callout borders.\n\n2 to 4 suits a normal desktop screenshot. Go heavier for a scaled-down image that will be viewed small, lighter for a dense UI where a fat outline would bury the thing it is marking.\n\nThe Pallet's Width list changes it, and a group resize deliberately does NOT scale it - a shrunken hairline reads as a rendering fault rather than as a smaller arrow.",
     "type": "integer",
     "min": 1,
     "max": 16,
@@ -1261,7 +1261,7 @@
   },
   "Markup.Outline": {
     "label": "Outline",
-    "help": "Draw a thin contrasting halo underneath each object so it stays legible against a busy background. This is what stops a red arrow disappearing into a red-ish toolbar.\n\nThe halo is black or white, chosen from the OBJECT'S own color, not by sampling the pixels behind it - sampling is expensive and makes the halo flicker between black and white while you drag a shape across a varied screenshot.\n\nOn by default because it is doing a job, unlike the shadow, which is decoration. Per object on the palette. Highlighter strokes never get one.",
+    "help": "Draw a thin contrasting halo underneath each object so it stays legible against a busy background. This is what stops a red arrow disappearing into a red-ish toolbar.\n\nThe halo is black or white, chosen from the OBJECT'S own color, not by sampling the pixels behind it - sampling is expensive and makes the halo flicker between black and white while you drag a shape across a varied screenshot.\n\nOn by default because it is doing a job, unlike the shadow, which is decoration. Per object on the Pallet. Highlighter strokes never get one.",
     "type": "boolean",
     "options": [
       "0=No halo",
@@ -1281,7 +1281,7 @@
   },
   "Markup.Shadow": {
     "label": "Shadow",
-    "help": "Give new objects a drop shadow.\n\nOff by default, for three reasons: Outline already does the legibility job that shadows do in other annotation tools, every shadowed object costs a second full draw, and the snip window may already have its own drop shadow - shadowed annotations on a shadowed snip is a lot of shadow.\n\nIt is a hard offset copy rather than a blurred one, which reads correctly at screenshot scale and costs almost nothing. Per object on the palette.",
+    "help": "Give new objects a drop shadow.\n\nOff by default, for three reasons: Outline already does the legibility job that shadows do in other annotation tools, every shadowed object costs a second full draw, and the snip window may already have its own drop shadow - shadowed annotations on a shadowed snip is a lot of shadow.\n\nIt is a hard offset copy rather than a blurred one, which reads correctly at screenshot scale and costs almost nothing. Per object on the Pallet.",
     "type": "boolean",
     "options": [
       "0=No shadow",
@@ -1373,20 +1373,20 @@
     "default": "60",
     "restart": "..\\ScreenSnip.exe"
   },
-  "Markup.PaletteAutoShow": {
-    "label": "PaletteAutoShow",
-    "help": "Whether the tool palette appears automatically when you enter markup mode.\n\nTurn it off if you know the single-letter tool keys and would rather not have a second window on screen; F3 still summons it when you want it.\n\nThe palette does not take focus when you click it, so the tool keys keep working while it is open and the snip stays the active window.",
+  "Markup.PalletAutoShow": {
+    "label": "PalletAutoShow",
+    "help": "Whether the tool Pallet appears automatically when you enter markup mode.\n\nTurn it off if you know the single-letter tool keys and would rather not have a second window on screen; F3 still summons it when you want it.\n\nThe Pallet does not take focus when you click it, so the tool keys keep working while it is open and the snip stays the active window.",
     "type": "boolean",
     "options": [
       "0=Hotkeys only",
-      "1=Show palette"
+      "1=Show Pallet"
     ],
     "default": "1",
     "restart": "..\\ScreenSnip.exe"
   },
-  "Markup.PaletteGap": {
-    "label": "PaletteGap",
-    "help": "Gap in pixels between the snip and the tool palette when the palette is first placed.\n\nIt parks to the LEFT of the snip if there is room, flipping to the right if there is not, and clamps onto the monitor either way. Once you drag it somewhere, that position is remembered for the rest of the session and this setting no longer applies.",
+  "Markup.PalletGap": {
+    "label": "PalletGap",
+    "help": "Gap in pixels between the snip and the tool Pallet when the Pallet is first placed.\n\nIt parks to the LEFT of the snip if there is room, flipping to the right if there is not, and clamps onto the monitor either way. Once you drag it somewhere, that position is remembered for the rest of the session and this setting no longer applies.",
     "type": "integer",
     "min": 0,
     "max": 200,

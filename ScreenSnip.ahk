@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 8-30-2026 
+; Version date: 9-6-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -63,6 +63,7 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Drag an edge / corner        Resize (trim / grow the capture)
   Right-drag                   Pan the image within the frame
   Alt + right-drag             Resize — drag right/down to grow
+  Ctrl + click an object       Select it (also opens markup)
   Right-click                  Context menu
   Esc                          Close this snip
 
@@ -79,6 +80,36 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Menu > Imgur > Uploader...   Formats, delete, Client ID setup
   Tray > Imgur Uploader...     Same dialog, for files already on disc
   Imgur needs a free imgur.com account — see SnipImgur.ahk.
+
+  MARKUP  (annotate the snip — see SnipMarkup.ahk)
+  M                            Start / leave markup mode
+  F3                           Show / hide the tool pallet
+  Esc                          Deselect, then tool, then leave
+  Tool keys                    V select  R rect  E ellipse  L line
+                               A arrow  D path arrow  P pen
+                               H highlighter  T text  N number
+                               C callout  B blur (redact)
+  Shift + click / drag         Extend selection / marquee
+  Ctrl + click                 Grab an object or the frame mid-tool
+  Ctrl + wheel                 Size it (stroke width or points)
+  Arrow keys                   Nudge the selection ± 1 px
+  Delete  ·  Ctrl + D          Delete  ·  Duplicate
+  Ctrl + Z / Y  ·  Ctrl + A    Undo / redo  ·  Select all
+  Ctrl + PgUp / PgDn           Bring to front / send to back
+  F2  ·  Ctrl + V              Edit text  ·  Paste an image
+  [  ]  \  (+Shift reverses)   Cycle start cap / end cap / dash
+  Ctrl + \                     Swap the two line ends
+  Annotations stay editable and survive pan, rotate and flip.
+  While markup is open an edge drag MOVES the snip; Alt + edge
+  drag resizes it.  Menu > Markup has the rest, incl. Line Styles.
+
+  GAMES  (cut the snip up — see SnipPuzzle.ahk / SnipJigsaw.ahk)
+  Menu > Games > Slide Puzzle  Classic sliding tiles
+  Menu > Games > Swap Puzzle   Trade neighbouring tiles
+  Menu > Games > Jigsaw        Interlocking pieces that snap
+  Space (hold)                 Peek at the finished picture
+  R  ·  F1  ·  Esc             New game  ·  Help  ·  Close
+  Each game has its own right-click menu and F1 help.
 
   ADJUST CAPTURE REGION  (re-crops the frozen snapshot)
   Ctrl + Alt + Arrow           Pan  ± 1 px    (or right-drag)
@@ -1625,7 +1656,7 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
     ; stored PER SNIP from here on (see SetSnipBorder), so one snip can wear a
     ; fat red frame while its neighbour keeps the thin gold one. Normalised to a
     ; plain 0xRRGGBB integer at birth so every later consumer — BackColor,
-    ; DrawSnipBevel, the markup palette — gets the same type.
+    ; DrawSnipBevel, the markup pallet — gets the same type.
     snipBorderColor := ColorToHex(BorderColor)
     snipBorderW     := Max(1, Integer(BorderThickness))
 
@@ -2583,7 +2614,7 @@ WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
 ; painting pixels that were about to be overwritten.
 ;
 ; Scoped hard — snip windows only, and only their image control — so every other
-; static in every other Gui (dimension labels, freeze hint, palettes) keeps the
+; static in every other Gui (dimension labels, freeze hint, pallets) keeps the
 ; default behaviour.
 WM_CTLCOLORSTATIC_SNIP(wParam, lParam, msg, hwnd) {
     global guiSnips
@@ -3998,8 +4029,8 @@ Class GDIp {
                        "uint", raster ? raster : 0x00CC0020)
     }
 
-    Static CreateBitmapFromHBITMAP(hBitmap, hPalette := 0) {
-        DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "UPtr", hBitmap, "UPtr", hPalette, "UPtr*", &pBitmap := 0)
+    Static CreateBitmapFromHBITMAP(hBitmap, hPallet := 0) {
+        DllCall("gdiplus\GdipCreateBitmapFromHBITMAP", "UPtr", hBitmap, "UPtr", hPallet, "UPtr*", &pBitmap := 0)
         return pBitmap
     }
 

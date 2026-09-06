@@ -3,7 +3,9 @@
 - **Project:** ScreenSnip.ahk, an AutoHotkey v2 screen capture tool
 - **Repository:** https://github.com/kunkel321/ScreenSnip
 - **Forum thread:** https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140802
-- **Based on:** *Snipper* by FanaticGuru — https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
+- **Grew out of:** *Snipper* by FanaticGuru — https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622 — which supplied the original framework and the GDI+ class ScreenSnip still ships unchanged. See [Credits](#21-credits) for the fuller lineage behind both.
+
+ScreenSnip is its own project. It borrows a couple of tools from kunkel321's other work — SettingsManager most obviously — but it is not part of AutoCorrect2, doesn't depend on it, and doesn't need it installed.
 
 ---
 
@@ -18,15 +20,18 @@
 7. [Working with a snip](#7-working-with-a-snip)
 8. [Adjusting the capture after the fact](#8-adjusting-the-capture-after-the-fact)
 9. [Rotate, Straighten, Flip](#9-rotate-straighten-flip)
-10. [Exporting](#10-exporting)
-11. [Text extraction: the local engines](#11-text-extraction-the-local-engines)
-12. [Text extraction: the AI engine](#12-text-extraction-the-ai-engine)
-13. [Imgur uploads](#13-imgur-uploads)
-14. [Menu reference](#14-menu-reference)
-15. [Keyboard and mouse reference](#15-keyboard-and-mouse-reference)
-16. [Things that will bite you](#16-things-that-will-bite-you)
-17. [Settings reference](#17-settings-reference)
-18. [Credits](#18-credits)
+10. [Markup: annotating a snip](#10-markup-annotating-a-snip)
+11. [Line styles: arrowheads and dashes](#11-line-styles-arrowheads-and-dashes)
+12. [Exporting](#12-exporting)
+13. [Text extraction: the local engines](#13-text-extraction-the-local-engines)
+14. [Text extraction: the AI engine](#14-text-extraction-the-ai-engine)
+15. [Imgur uploads](#15-imgur-uploads)
+16. [Games: the puzzle modules](#16-games-the-puzzle-modules)
+17. [Menu reference](#17-menu-reference)
+18. [Keyboard and mouse reference](#18-keyboard-and-mouse-reference)
+19. [Things that will bite you](#19-things-that-will-bite-you)
+20. [Settings reference](#20-settings-reference)
+21. [Credits](#21-credits)
 
 ---
 
@@ -38,7 +43,7 @@ ScreenSnip captures a region of your screen and leaves it floating on the deskto
 
 That "floating window" part is the whole point. Most capture tools hand you a file or a clipboard blob and get out of the way. ScreenSnip instead gives you a persistent visual reference you can park next to whatever you're working on — a phone number from an email while you fill in a form, a chart from one PDF while you write about it in another, a config value from a webpage that keeps scrolling away.
 
-Four things it does that the built-in Windows tools don't:
+Six things it does that the built-in Windows tools don't:
 
 **It keeps a frozen snapshot around the edges of your capture.** When you drag a selection, ScreenSnip actually grabs a rectangle several hundred pixels larger than what you asked for and keeps it in memory. So if you clip the bottom of a sentence, you don't re-snip — you drag the snip's bottom edge down and the missing pixels are already there. Nothing on screen has to still be showing.
 
@@ -47,6 +52,10 @@ Four things it does that the built-in Windows tools don't:
 **It can grab a whole window with one click.** During a Freeze Capture, hovering highlights the window under the cursor and a left-click takes it — no aiming at corners, no trimming afterwards.
 
 **It reads text out of the capture — three different ways.** Two OCR engines run locally: a fast built-in Windows one, and PaddleOCR for harder material. A third path sends the image to an AI vision model, which is the only one of the three that can see a table's *ruling lines*. All of them put their result on the clipboard.
+
+**Its annotations stay editable.** Arrows, boxes, numbered badges, text labels, highlighter, redaction blur — none of it is painted into the image. Every object stays selectable forever, so you can recolour an arrow you drew ten minutes ago, and the annotations follow the pixels they were drawn on when you pan, resize, rotate or flip the snip. See [section 10](#10-markup-annotating-a-snip).
+
+**It will cut your screenshot into a puzzle,** which is either the least necessary feature in the package or the best one, depending on the day. See [section 16](#16-games-the-puzzle-modules).
 
 A short animated demo lives beside this manual as [`ScreenSnipDemo.gif`](ScreenSnipDemo.gif).
 
@@ -78,6 +87,9 @@ ScreenSnip\
 │   ├─ SnipAI.ahk               AI vision module
 │   ├─ SnipImgur.ahk            Imgur upload module
 │   ├─ SnipWinDetect.ahk        window highlighting for Freeze Capture
+│   ├─ SnipMarkup.ahk           annotation / markup layer
+│   ├─ SnipPuzzle.ahk           slide and swap tile puzzles
+│   ├─ SnipJigsaw.ahk           jigsaw puzzle
 │   ├─ ToolTipOptions.ahk       just me's tooltip styling library
 │   ├─ SettingsManager.ahk      the settings editor
 │   └─ SettingsManager.exe      renamed copy of AutoHotkey64.exe
@@ -99,7 +111,9 @@ ScreenSnip\
 
 `Resources\` is inert: ScreenSnip reads from it and never writes to it. Everything that ScreenSnip or SettingsManager writes goes in `Data\` instead — your settings, your API keys, the error log, and any debug dumps.
 
-**The one file in there that must stay private is `ApiKeys.ini`.** Neither value in it is a password, but the Imgur Client ID is rate-limited against your account and the OpenAI key spends your prepaid credit. If ScreenSnip lives in a git repository, that is the file to add to `.gitignore`.
+There is one deliberate exception, and it's worth knowing about: the markup module's **Line Styles** editor and its **Save as default** button write back into `Data\snipSettings.ini`. That's still the Data folder, not Resources — but it means the INI is not purely something you edit from outside. See [section 11](#11-line-styles-arrowheads-and-dashes).
+
+**The one file that must stay private is `ApiKeys.ini`.** Neither value in it is a password, but the Imgur Client ID is rate-limited against your account and the OpenAI key spends your prepaid credit. If ScreenSnip lives in a git repository, that is the file to add to `.gitignore`.
 
 `Data\` is created on first use. If the install folder is read-only, ScreenSnip falls back to writing beside the script rather than throwing an error on every OCR run.
 
@@ -118,6 +132,9 @@ Every add-on is optional and every one is included the same way, from the bottom
 #Include *i Resources\SnipAI.ahk
 #Include *i Resources\SnipImgur.ahk
 #Include *i Resources\SnipWinDetect.ahk
+#Include *i Resources\SnipPuzzle.ahk
+#Include *i Resources\SnipJigsaw.ahk
+#Include *i Resources\SnipMarkup.ahk
 #Include *i Resources\ToolTipOptions.ahk
 ```
 
@@ -129,15 +146,18 @@ The `*i` flag means "include only if the file exists." Delete any module — or 
 | `SnipAI.ahk` | `SnipAiCfg` | OCR → Copy Text (AI) · Copy Table (AI) · Ask AI About Snip… | An OpenAI API key. **Paid, and the image leaves your machine** |
 | `SnipImgur.ahk` | `Imgur` | Imgur submenu + the Uploader dialog | A free Imgur account and Client ID |
 | `SnipWinDetect.ahk` | `WinDetectCfg` | Window highlighting during Freeze Capture | Nothing. No setup at all |
+| `SnipMarkup.ahk` | `MarkupCfg` | The Markup submenu, the tool pallet, and every annotation type | Nothing. No setup at all |
+| `SnipPuzzle.ahk` | `PuzzleCfg` | Games → Slide Puzzle · Swap Puzzle | Nothing. No setup at all |
+| `SnipJigsaw.ahk` | `JigCfg` | Games → Jigsaw Puzzle | Nothing. No setup at all |
 | `ToolTipOptions.ahk` | `ToolTipOptions` | Readable tooltips — font, colors, padding | Nothing. No setup at all |
 
 `SettingsManager` is optional on the same terms but isn't `#Include`d — it's a separate program that ScreenSnip launches. Absent from `Resources\`, the two **Settings…** menu items are simply never added. See [section 3](#3-settings).
 
+Three of those combine rather than stack. If **neither** `SnipOCR.ahk` nor `SnipAI.ahk` is present, the OCR submenu is omitted entirely rather than left on the menu empty. Likewise the **Games** submenu appears if *either* puzzle module is present and disappears when both are gone — `SnipPuzzle.ahk` and `SnipJigsaw.ahk` are independent of each other and share no code, so either can be deleted without touching the other.
+
 The mechanism behind the "sentinel class" column is worth one paragraph, because it explains an oddity you'll notice in the source. Each module declares a class, and ScreenSnip tests for it with `IsSet()` before building any menu or calling any function that depends on it. Class objects are created at load time, *before* the auto-execute section runs, regardless of where in the file the class is declared — which is why an `IsSet(OcrCfg)` test near the top of the script can see a class declared in a file that isn't `#Include`d until 3,000 lines further down. Calls into the modules then go through the `%name%()` dynamic form, because a *direct* call to a function that might not exist is a load-time error in v2, which would defeat the whole arrangement.
 
 `ToolTipOptions.ahk` is the one exception to that dynamic-call rule, and it's instructive rather than inconsistent: everything it exposes is a *method on the sentinel class itself*, so `ToolTipOptions.Init()` is a variable dereference followed by a method call. An unset variable is a runtime matter, not a load-time error, so no dance is needed.
-
-If **neither** `SnipOCR.ahk` nor `SnipAI.ahk` is present, the OCR submenu is omitted entirely rather than left on the menu empty.
 
 ### Upgrading from an older install
 
@@ -151,7 +171,7 @@ Two options, and which one you want depends on whether you need to capture eleva
 
 **Tray menu → Start with Windows** creates a shortcut in your Startup folder. Simple, works fine, and ScreenSnip will run at normal integrity.
 
-**Task Scheduler with "Run with highest privileges"** is what you need if you want to snip elevated applications. See [section 16](#16-things-that-will-bite-you) for why. A Startup-folder shortcut to an elevation-requesting program is silently skipped by Windows at logon, so the Startup folder is not a route to running elevated — Task Scheduler is.
+**Task Scheduler with "Run with highest privileges"** is what you need if you want to snip elevated applications. See [section 19](#19-things-that-will-bite-you) for why. A Startup-folder shortcut to an elevation-requesting program is silently skipped by Windows at logon, so the Startup folder is not a route to running elevated — Task Scheduler is.
 
 ---
 
@@ -174,11 +194,13 @@ Both items are present only when `Resources\SettingsManager.exe` (or `SettingsMa
 
 ScreenSnip used to keep its settings in a long commented block at the top of the script, and each setting's explanation sat in a comment beside it. Those explanations have moved into `Data\snipSettingsMetadata.json`, which supplies SettingsManager's labels, help text, value types, and valid ranges.
 
-That is the entire point of the move: the guidance is now **in front of the person changing the setting**, in a help pane that updates as you select each item, instead of in a source file they may never open. If you want to know what something does, select it in SettingsManager and read the pane. This manual's [settings reference](#17-settings-reference) is a map of the file, not a replacement for that help text.
+That is the entire point of the move: the guidance is now **in front of the person changing the setting**, in a help pane that updates as you select each item, instead of in a source file they may never open. If you want to know what something does, select it in SettingsManager and read the pane. This manual's [settings reference](#20-settings-reference) is a map of the file, not a replacement for that help text.
 
 ### Three things to know about how it loads
 
 **Settings are read once, at launch.** Nothing re-reads the file, so a change takes effect on the next start. SettingsManager offers a restart after you save; take it. Note that restarting closes any snips you have open, so finish with them first.
+
+The two exceptions are both in the markup module, and both are deliberate: the `[MarkupCaps]` and `[MarkupDashes]` sections are re-read on demand so the Line Styles editor can work without a restart, and the pallet's **Save as default** button updates the running defaults as well as the file. Everything else needs the restart.
 
 **Deleting `snipSettings.ini` is a safe factory reset.** Every setting is read through a helper that carries a coded fallback, so a missing file, a missing key, or a blank value all quietly produce the built-in default. The script starts normally and behaves as shipped.
 
@@ -200,7 +222,7 @@ A value's *type* follows its fallback rather than the file: a setting whose defa
 
 ### Tooltip appearance
 
-ScreenSnip reports OCR results, AI progress, upload status, and the Freeze Capture window readout through Windows tooltips. Left plain, those are small, pale yellow, and hard to read against a busy screenshot — which is a poor fit for a message you're meant to glance at and act on.
+ScreenSnip reports OCR results, AI progress, upload status, markup status messages, and the Freeze Capture window readout through Windows tooltips. Left plain, those are small, pale yellow, and hard to read against a busy screenshot — which is a poor fit for a message you're meant to glance at and act on.
 
 `Resources\ToolTipOptions.ahk`, by AHK forum member **just me**, fixes that. It is an unmodified copy of his library, dropped in as-is so it can be replaced wholesale whenever he posts an update. The `[Tooltips]` section of the INI feeds it a font, a size and style, foreground and background colors, four margins, and an optional title with an icon.
 
@@ -224,7 +246,7 @@ The Freeze Capture hint pill is **not** a tooltip, incidentally. It's a window o
 
 That's the core loop. Everything else in this manual is refinement.
 
-Two shortcuts worth learning immediately: add **Shift** to the capture drag (`Ctrl+Shift+RButton`) to also copy the image to the clipboard, and double-tap **CapsLock** to start a [Freeze Capture](#6-freeze-capture).
+Three shortcuts worth learning immediately: add **Shift** to the capture drag (`Ctrl+Shift+RButton`) to also copy the image to the clipboard, double-tap **CapsLock** to start a [Freeze Capture](#6-freeze-capture), and press **M** on a focused snip to start [annotating it](#10-markup-annotating-a-snip).
 
 ---
 
@@ -358,16 +380,28 @@ A snip is an ordinary window as far as your mouse is concerned — click it to f
 | Gesture | Effect |
 |---|---|
 | Left-drag | Move the window |
+| Drag an edge or corner | Resize the capture region — trim or grow |
 | Right-drag | Pan the image within the frame (hand-tool style) |
-| `Alt` + drag an edge or corner | Resize the capture region — trim or grow |
+| `Alt` + right-drag | Resize by cursor travel — top-left stays put |
 | Right-click | Context menu |
 | `Alt` + wheel | Transparency ± 10 |
+| `Ctrl` + click an annotation | Select it, and open markup if it isn't already open |
 
 ![Right-dragging inside a snip pans the image within its frame](Images/DragPanAnimated.gif)
 
 Right-drag has a small dead zone at the start (`PanClickSlop`, 5 px) so that a plain right-click opens the menu instead of nudging the image a pixel. Drag further than that and it becomes a pan.
 
 Pan sensitivity is set by `PanDragDivisor` (default 3), meaning three pixels of mouse travel move the image one pixel. That sounds sluggish until you try to nudge a single row of text into view, at which point it's exactly right. Set it to 1 for 1:1 tracking. The fractional remainder is carried between frames, so slow drags move smoothly rather than stair-stepping.
+
+### The two ways to resize with the mouse
+
+**Grab an edge.** Hover within `EdgeGrabZone` px of any edge or corner and the pointer turns into a resize arrow; drag and the opposite edge stays anchored. No modifier needed — the cursor tells you it's live. (During a markup session the frame is the snip's drag-to-move handle instead, so edge resizing wants `Alt` there and the cursor stays a plain arrow to match. See [section 10](#10-markup-annotating-a-snip).)
+
+**`Alt` + right-drag anywhere.** The visible top-left corner is nailed down and the size follows your cursor travel, divided by `ResizeDragDivisor` (default 3). This is the same feel as MoveResizeTools, and it's the gesture to use when the snip is small enough that aiming at a 6 px edge band is annoying. Because the size is recomputed from the *start* of the drag each frame rather than accumulated, putting the cursor back where you began puts the snip back at its original size exactly.
+
+Plain right-drag still pans, so the two never collide. Alt is also the unambiguous override during markup: `Alt`+press on an edge resizes even when a drawing tool would otherwise take the click.
+
+**A snip never scales.** It is always 1:1 with the pixels that were captured, so "resize" here always means re-cropping the frozen master — see [section 8](#8-adjusting-the-capture-after-the-fact). Grow past the master's edge and the resize simply stops. If another tool resizes a snip window from the outside, ScreenSnip notices and re-crops to match rather than stretching the image.
 
 ### The border and bevel
 
@@ -378,6 +412,8 @@ Each snip gets a colored border (`ShowSnipBorder`, `BorderColor`, `BorderThickne
 The **focused** snip's bevel is drawn at full strength; unfocused snips are dimmed by `Bevel3DInactiveDarknessFactor`. Same shape, same contrast, just darker overall. It's a focus cue that doesn't require a second border color.
 
 The bevel is automatically disabled above `Bevel3DMaxThickness` (default 3 px), because thick beveled frames look chunky.
+
+The border's colour and width are per-snip and can be changed on the fly — `Ctrl`+click the frame during a markup session and the pallet's swatches and Width box edit the frame instead of an object. That's covered in [section 10](#10-markup-annotating-a-snip), because the frame behaves like one more annotation once you're in there.
 
 ### The drop shadow
 
@@ -395,7 +431,7 @@ Toggle it per-snip from the right-click menu.
 
 ![A snip at reduced opacity, with the window beneath it showing through](Images/SemiTransparentSnip.png)
 
-Remember the shadow disappears below full opacity. That's intentional, not a bug.
+Remember the shadow disappears below full opacity. That's intentional, not a bug. Resizing a semi-transparent snip also flickers where an opaque one doesn't, for related reasons — the smooth-resize path drops the layered-window style, and a transparent snip has to keep it.
 
 ---
 
@@ -409,7 +445,7 @@ When you drag a selection, ScreenSnip doesn't capture just that rectangle. It ca
 
 What you see in the floating window is a crop of that snapshot. So "adjusting the capture" is really just moving the crop rectangle around inside an image you already have. The screen behind it can have scrolled, closed, or changed entirely — irrelevant. Nothing is ever re-read from the screen.
 
-![Alt-dragging a snip's edge grows the capture region into pixels that were never on screen when the drag began](Images/DragResizeAnimation.gif)
+![Dragging a snip's edge grows the capture region into pixels that were never on screen when the drag began](Images/DragResizeAnimation.gif)
 
 ### Panning the region
 
@@ -429,7 +465,8 @@ Grows or shrinks the crop. The frame changes size to match.
 |---|---|
 | `Win+Alt+Arrow` | 1 px (Right/Down grow) |
 | `Win+Shift+Alt+Arrow` | 10 px |
-| `Alt` + drag an edge/corner | Continuous, opposite edge stays put |
+| Drag an edge/corner | Continuous, opposite edge stays put |
+| `Alt` + right-drag | Continuous, top-left stays put |
 
 ### The margin tradeoff
 
@@ -454,7 +491,7 @@ Easy to conflate, so:
 | **Pan region** | The crop, over the frozen snapshot | `Ctrl+Alt+Arrow` |
 | **Resize region** | The crop's size | `Win+Alt+Arrow` |
 
-Nudging changes nothing about the image. Panning and resizing change what the image *is*.
+Nudging changes nothing about the image. Panning and resizing change what the image *is*. Annotations, if there are any, are stored against the snapshot rather than the window — so panning slides the image *and* its arrows together, and shrinking the region clips them at the frame edge instead of squashing them.
 
 ---
 
@@ -472,7 +509,7 @@ Turns the **whole snip, frame and all**. The window itself becomes a rotated rec
 | `Shift+Alt+Left` / `Right` | Snap to the next 30° |
 | Menu → Rotate | 90° CW, 180°, 90° CCW |
 
-At angles other than 0/90/180/270 the border is suppressed and the corners are keyed out with magenta (`TransColor`, `0xFF00FF` — chosen because that exact value essentially never occurs in a real screenshot). See [section 16](#16-things-that-will-bite-you) for the known halo artifact.
+At angles other than 0/90/180/270 the border is suppressed and the corners are keyed out with magenta (`TransColor`, `0xFF00FF` — chosen because that exact value essentially never occurs in a real screenshot). See [section 19](#19-things-that-will-bite-you) for the known halo artifact.
 
 ### Straighten (deskew)
 
@@ -488,7 +525,7 @@ Tilts the **image inside a fixed rectangular frame**. The frame stays axis-align
 
 Clamped to `StraightenMaxAngle` (15°), though in practice the margin runs out first.
 
-**The main use case is squaring up a skewed table before OCR.** A photographed or scanned table that sits a couple of degrees off level confuses the row-and-column clustering badly. Straighten it, then `Alt`-drag an edge to trim the exposed corners, then run Copy Table.
+**The main use case is squaring up a skewed table before OCR.** A photographed or scanned table that sits a couple of degrees off level confuses the row-and-column clustering badly. Straighten it, then drag an edge to trim the exposed corners, then run Copy Table.
 
 The pivot behaviour is subtle but deliberate: content rotates about the centre of the crop *as it was when you began straightening*, and that pivot is then held fixed until you return to level. This means you can pan around afterwards and the frame slides over one stable rotated image — no swirling — while the tilt itself still turns about what you were actually looking at.
 
@@ -501,13 +538,226 @@ The pivot behaviour is subtle but deliberate: content rotates about the centre o
 | `Shift+Left` / `Shift+Right` | Flip horizontal |
 | `Shift+Up` / `Shift+Down` | Flip vertical |
 
+Annotations turn and flip with the image, with two exceptions on purpose: **text labels and numbered badges stay upright**, because nobody wants a mirrored caption.
+
 ---
 
-## 10. Exporting
+## 10. Markup: annotating a snip
+
+`Resources\SnipMarkup.ahk` turns a snip into a drawing surface: arrows, boxes, circles, freehand pen, highlighter, text labels, numbered badges, speech callouts, blur/pixelate redaction, and pasted images.
+
+![The markup pallet beside an annotated snip, showing several annotation types at once](Images/MarkupPalletAndSnip.png)
+
+### The one big idea
+
+**Nothing is ever painted into the image.** Annotations are kept as a list of objects on the snip and redrawn from scratch on every render, in the same coordinate space the crop uses. Three things follow from that, and they're the reason the feature is worth using:
+
+- Every object stays selectable and editable forever. Recolour an arrow you drew twenty minutes ago; drag its point somewhere else; change its head from a triangle to a chevron.
+- Pan, resize-region, rotate, flip and straighten all just work. Annotations track the pixels they were drawn on rather than the window they happen to be in.
+- Annotations survive leaving markup mode. Press Esc, use the snip normally, then `Ctrl`+click any annotation to drop straight back in with that object selected.
+
+The one fixed rule is z-order between *kinds*: blur and pixelate are a pixel operation on the image and are composited before everything else, so **redaction is always underneath every other annotation**. Within the overlay, objects stack in the order you drew them, and Bring to Front / Send to Back reorder them.
+
+### Getting in and out
+
+| Way in | |
+|---|---|
+| `M` on a focused snip | Start markup |
+| Right-click → **Markup → Annotate…** | Same |
+| `F3` | Start markup and show the pallet, or toggle the pallet if already in |
+| `Ctrl` + click an existing annotation | Start markup with that object selected |
+| `Ctrl` + click the snip's frame | Start markup with the frame selected |
+
+`Esc` is deliberately staged, so it's a panic key that never destroys work. Each press does the next thing on this list:
+
+1. Clear the selection.
+2. Give back a borrowed tool (see below).
+3. Return to the Select tool.
+4. Leave markup mode.
+5. *Then* — with markup off — close the snip, as Esc always does.
+
+`M` again also leaves markup mode, as does the pallet's **Done** button and closing the pallet window.
+
+### The tool pallet
+
+A separate always-on-top window rather than a toolbar bolted onto the snip — a snip's whole identity is "a picture floating there with no chrome", and putting controls inside it would fight the border, bevel and shadow code. The pallet serves whichever snip is being annotated, and it parks itself beside that snip, `PalletGap` pixels clear, on whichever side has room. Drag it somewhere else and it will remember that spot *for that snip*.
+
+It's created with `WS_EX_NOACTIVATE`, which is the detail that makes it feel right: clicking a pallet control does **not** take focus off the snip, so the single-letter tool keys keep working the whole time.
+
+Set `PalletAutoShow` to `0` if you know the letters and would rather not have a second window on screen; `F3` still summons it.
+
+| Pallet control | What it does |
+|---|---|
+| Tool list | The twelve tools, each with its key in brackets |
+| Colour swatches | Twelve colours. Click sets the stroke colour; `Ctrl`+click sets the *fill* colour |
+| Fill shape | Fill rectangles, ellipses and callouts with the fill colour |
+| Outline (legibility halo) | A thin contrasting halo drawn under the object — on by default |
+| Drop shadow | A hard offset shadow behind the object — off by default |
+| Width | Stroke width. Loaded with the frame's own wider ladder when the frame is selected |
+| Font | Point size for Text and the numeral inside a Number badge |
+| Head / Disc | Arrowhead length as a multiple of stroke width — or, on a Number badge, the disc diameter in pixels (`auto` sizes it from the digits) |
+| Corner | Corner radius for Rectangle, Highlighter and Callout, and the elbow radius on a Path Arrow. `auto` keeps the look each type had before the setting existed |
+| Dash | Named dash pattern |
+| Ends | Start cap, a swap button, end cap |
+| Preview strip | A live sample drawn by the *same* routine the snip uses, so it can't lie to you |
+| Undo / Redo / Delete | The obvious three |
+| Save as default | Writes the current style back to the INI as the new defaults |
+| Line styles… | Opens the arrowhead and dash editor — [section 11](#11-line-styles-arrowheads-and-dashes) |
+| Done (Esc) | Leave markup mode |
+
+### One control set, two jobs
+
+This is the thing to internalise, because it's what keeps the feature free of a properties dialog:
+
+- **With something selected**, changing a control edits the selection. With a group selected, it edits the whole group.
+- **With nothing selected**, changing a control sets what the *next* object of that tool will look like.
+
+The line-style properties are remembered **per tool**, not globally. Picking a chevron end while the Line tool is in hand doesn't quietly change what Arrow draws. The Highlighter likewise remembers its own colour separately from the stroke colour, so choosing cyan to highlight a paragraph won't repaint your next arrow.
+
+Controls that don't apply to the current tool or selection are **greyed out** rather than hidden — the pallet's layout stays put, so nothing jumps around as you switch tools. Blur has no stroke, so Width and Dash grey; a Number badge has no arrowhead, so the Head box relabels itself **Disc** and takes a pixel diameter instead.
+
+### The tools
+
+| Tool | Key | Gesture | Notes |
+|---|---|---|---|
+| Select | `V` | Click / drag | Move, resize, restyle |
+| Rectangle | `R` | Drag | Optional fill; `Corner` rounds it |
+| Ellipse | `E` | Drag | Optional fill |
+| Line | `L` | Drag | Both ends stylable |
+| Arrow | `A` | Drag | A Line with an arrowhead on the end, by default |
+| Path Arrow | `D` | Drag | Right-angled multi-segment arrow — `D` for dogleg, since `P` is Pen |
+| Pen | `P` | Drag | Freehand |
+| Highlighter | `H` | Drag | Translucent band, its own remembered colour |
+| Text | `T` | Click | Opens a text box; `Ctrl+Enter` accepts |
+| Number | `N` | Click | Auto-incrementing badge, 1, 2, 3… per snip |
+| Callout | `C` | Drag | Speech bubble with a draggable tail |
+| Blur | `B` | Drag | Redaction — see below |
+
+A click with no drag is discarded rather than leaving an invisible zero-size object behind, so click-empty-space-to-deselect still works exactly as you'd expect.
+
+**Path Arrow** records corners as you drag: move across the current segment far enough (`PathTurnTolerance`) and an elbow is committed, so you draw an L or an S in one gesture instead of assembling segments. Elbows are rounded by `Corner`, interior segments get slide handles for nudging a run over, and `PathMaxSegments` caps how baroque it can get.
+
+**Callout** puts a tail on the bubble pointing back at where the drag began. Drag the tip handle to aim it anywhere; the two handles at its base widen or narrow it. The bubble's border has a gap where the tail joins, because a tail crossing a border reads as a mistake.
+
+**Text and Number** are the two objects that stay upright when the snip is flipped or rotated. Press `F2` to re-edit a selected label, or `Ctrl`+click it — a text-bearing object opens its editor when you reach into it that way.
+
+### Redaction: blur and pixelate
+
+Drag with the Blur tool over anything you don't want to publish. `Pixelate` is on by default and is the more honest of the two — a blur can sometimes be reversed, blocky pixelation of a screenshot much less so. `BlurAmount` is the block size in pixels for pixelate, or the downscale factor for blur.
+
+Because redaction is composited into the *image* stage rather than the overlay, it is glued to the pixels it hides. Pan the region and it stays over the right thing. It's also there in everything that leaves the snip: the clipboard, the saved file, an Imgur upload, and every OCR path. **The OCR engines see the redacted image, not the original** — which is what you want, but does mean you shouldn't blur something and then wonder why Copy Text skipped it.
+
+Blur rectangles are deliberately never rounded. Rounded corners on a redaction box leave a sliver of the original showing.
+
+### Selecting, moving, restyling
+
+| Gesture | Effect |
+|---|---|
+| Click an object | Select it |
+| `Shift` + click | Add / remove one object from the selection |
+| `Shift` + drag on empty canvas | Marquee — sweep up everything inside |
+| `Ctrl+A` | Select everything |
+| Drag any selected object | Move the whole selection |
+| Drag a handle | Resize (a group gets the eight box handles only) |
+| Arrow keys | Nudge the selection 1 px — hold for key repeat |
+| `Ctrl` + wheel | Step the size: stroke width, or point size on Text and Number |
+| `Ctrl+D` | Duplicate |
+| `Ctrl+PgUp` / `Ctrl+PgDn` | Bring to front / send to back |
+| `Delete` | Delete the selection |
+| `[` `]` and `\` | Cycle the start cap, end cap and dash (`Shift` reverses) |
+| `Ctrl+\` | Swap the two ends |
+
+A **plain** drag on empty canvas still moves the window, and a plain drag on the frame does too — that's why the marquee took `Shift` and why `Ctrl` is the "reach into the objects" modifier. `Ctrl` tells one story throughout: `Ctrl`+click selects an object, `Ctrl`+wheel resizes what you selected, `Ctrl`+click a swatch sets fill rather than stroke.
+
+**The borrowed tool.** `Ctrl`+clicking an object while a drawing tool is in hand lends you the Select tool rather than switching to it. Fix the thing you reached for, then click on bare image and your drawing tool comes back. The tool list highlights the tool you'll *get back*, not the Select you're temporarily using. Set `StickyTool` to `0` if you'd rather it be a one-way trip.
+
+### The snip's frame is selectable too
+
+`Ctrl`+click the snip's border and it highlights as if it were an object: the colour swatches and the Width box now edit the frame. A short tooltip says so, since it's otherwise an invisible mode.
+
+The frame gets its own width ladder running to 40 px, because 16 is generous for a pen stroke and stingy for a picture frame. The 3D bevel switches itself off above `Bevel3DMaxThickness`, and a rotated snip has no frame to hit, since the border is suppressed at non-cardinal angles anyway.
+
+The frame and the objects are mutually exclusive — selecting an object drops the frame automatically.
+
+### Undo
+
+`Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`), up to `UndoDepth` steps, per snip. Undo works on whole-list snapshots rather than command objects: the objects are small plain records, so a deep copy is cheap, and a snapshot stack can't get out of step with the model the way a hand-written undo/redo pair can.
+
+**Clear All Markup** on the Markup submenu removes everything at once, and is itself undoable.
+
+### Images
+
+**Paste Image** (`Ctrl+V`) drops whatever bitmap is on the clipboard onto the snip as a movable, resizable object. **Add Image From File…** does the same from a PNG, JPG, BMP or GIF on disk. Handy for stamping a logo, an icon, or a second snip onto the one you're annotating.
+
+### What ends up in the exported image
+
+Everything except the editing chrome. Selection handles, the marquee, and the frame highlight are drawn into the *display* bitmap only — the clipboard, Save Image As, Imgur and every OCR path go through a separate build that leaves them out. You never have to deselect before copying.
+
+---
+
+## 11. Line styles: arrowheads and dashes
+
+Any line-ish object — Line, Arrow, Path Arrow, Pen — carries three style properties: a **dash pattern**, a **start cap** and an **end cap**. Both ends of anything can be anything, so a line with a dot at one end and a chevron at the other is a normal thing to ask for rather than a special case.
+
+Built in, ready to use:
+
+| Arrowheads | `none` · `arrow` · `stealth` · `hollow` · `chevron` · `bar` · `dot` · `circle` · `square` · `diamond` |
+|---|---|
+| **Dashes** | `solid` · `dash` · `dot` · `dashdot` · `dashdotdot` |
+
+Pick them from the pallet's **Dash** and **Ends** boxes, or cycle them from the keyboard with `[`, `]` and `\`.
+
+### Adding your own
+
+**Menu → Markup → Line Styles…**, or the **Line styles…** button on the pallet, opens a two-tab editor — Arrowheads and Dashes — with a list on the left, the definition on the right, and a live preview underneath. **New**, **Copy**, **Save** and **Delete** do what they say; **Reload from INI** re-reads the file if you've been editing it by hand in another window.
+
+**No restart is needed.** This is the one part of the settings system that is genuinely live: custom styles are parsed a section at a time on demand rather than going through the load-time settings cache, precisely so the editor can work while you watch.
+
+Definitions live in two INI sections of their own, and anything the editor writes is something you could equally have typed by hand:
+
+```ini
+[MarkupCaps]
+; Name = poly|circle, fill|open|line, shrink, coordinates…
+Fletch=poly, line, 0, 0,-0.55, 0.55,0, 0,0.55, 0.55,0, 1.3,0, 0.75,0.55
+Ring=circle, open, 0.76, 0.38, 0.38
+
+[MarkupDashes]
+; Name = on, off, on, off …  (multiples of the stroke width)
+Railroad=5, 2, 1, 2
+Sparse=1, 4
+```
+
+**An arrowhead is data, not code.** Each one is a polygon (or a circle) in a normalised frame: the tip sits at `0,0`, `+x` runs back along the shaft, and the units are head-lengths. That's why "add your own arrowhead" is a parser and a dialog rather than a new branch in the renderer — the built-in triangle and something you typed go through the identical draw routine.
+
+| Field | Meaning |
+|---|---|
+| `poly` / `circle` | A polygon from x,y pairs, or a circle from a centre distance and a radius |
+| `fill` | Solid shape |
+| `open` | Stroked outline, closed |
+| `line` | Stroked polyline, *not* closed — this is what makes a chevron a chevron rather than a triangle |
+| `shrink` | How far back the shaft stops, so no nub pokes through the cap |
+
+A dash pattern is lengths alternating on, off, on, off — each a multiple of the stroke width, so a pattern keeps its proportions at any line weight. Every number must be greater than zero.
+
+Two conveniences worth knowing:
+
+**A custom entry may reuse a built-in name,** in which case it replaces the built-in in place rather than sitting next to it under the same label. Delete the override and the built-in comes back on the next reload — which is why Delete is offered even for built-in names.
+
+**A malformed line is skipped, never fatal.** A typo in `[MarkupCaps]` means that one entry doesn't appear in the list; it never stops ScreenSnip from drawing. An object referring to a style you've since deleted falls back to `none` / `solid` rather than throwing.
+
+### Save as default
+
+The pallet's **Save as default** button writes the current styling back to `Data\snipSettings.ini` — colour, fill colour, thickness, font size, the three checkboxes, arrowhead scale, highlighter colour, badge diameter, and the per-tool dash and cap choices. It's a button rather than an automatic write because you don't want every experimental colour click rewriting your config.
+
+One thing it saves is not in `[Markup]` at all: if a snip is being annotated, its **frame colour and width** are written to `[SnipWindow]`, where ScreenSnip and SettingsManager already look for them. The live values update too, so the next snip you capture wears the new frame without a restart. Snips already open keep the frame they have.
+
+---
+
+## 12. Exporting
 
 ### Clipboard
 
-`Ctrl+C`, or menu → Copy to Clipboard. Copies exactly what you see — current crop, rotation, straighten, and flips all applied.
+`Ctrl+C`, or menu → Copy to Clipboard. Copies exactly what you see — current crop, rotation, straighten, flips and annotations all applied, minus the editing chrome.
 
 ### Save to file
 
@@ -522,13 +772,13 @@ Everything goes through the same rendering pipeline (`BuildSaveBitmap`), so savi
 
 ---
 
-## 11. Text extraction: the local engines
+## 13. Text extraction: the local engines
 
 The right-click menu's **OCR** submenu is assembled from whichever text-extraction modules are installed. With both present you get six items, split by a separator.
 
 ![The OCR submenu, showing the three local actions above the separator and the three AI actions below it](Images/SnipWithOcrSubMenuShowing.png)
 
-That separator is not decoration. **Below it, the image leaves your computer.** This section covers the three items above the line; [section 12](#12-text-extraction-the-ai-engine) covers the three below.
+That separator is not decoration. **Below it, the image leaves your computer.** This section covers the three items above the line; [section 14](#14-text-extraction-the-ai-engine) covers the three below.
 
 All six copy their result to the clipboard and report with a brief tooltip. Those tooltips carry real information — a row and column count, a warning about shaky cells — so it's worth making them legible; see [tooltip appearance](#3-settings).
 
@@ -557,7 +807,7 @@ The short version: reach for Windows OCR by default, PaddleOCR when it struggles
 
 ### Setting up Windows OCR
 
-Download `OCR.ahk` from **https://github.com/Descolada/OCR** and drop it in `Resources\`, beside `SnipOCR.ahk`. It is included by that file with a plain `#Include OCR.ahk` — no path needed, and no `*i` flag, which means the file must be there. See [section 16](#16-things-that-will-bite-you) if you'd rather not have it.
+Download `OCR.ahk` from **https://github.com/Descolada/OCR** and drop it in `Resources\`, beside `SnipOCR.ahk`. It is included by that file with a plain `#Include OCR.ahk` — no path needed, and no `*i` flag, which means the file must be there. See [section 19](#19-things-that-will-bite-you) if you'd rather not have it.
 
 If the library is present but Windows OCR itself is unavailable, the menu item reports as much and everything else keeps working.
 
@@ -633,7 +883,7 @@ Files are stamped per run. They used to use fixed names, which meant each OCR cl
 
 ---
 
-## 12. Text extraction: the AI engine
+## 14. Text extraction: the AI engine
 
 `SnipAI.ahk` adds three more items to the OCR submenu, below the separator:
 
@@ -643,7 +893,7 @@ Files are stamped per run. They used to use fixed names, which meant each OCR cl
 | Copy Table (AI) | The table as TSV, ready to paste into a spreadsheet |
 | Ask AI About Snip… | A free-form question; the answer opens in a window |
 
-**Read this part first.** Unlike the two local engines, this one sends the image **off your machine** to OpenAI, and it **costs money** — fractions of a cent per snip, but not zero. It's also slower: expect several seconds. In exchange it handles multi-column layouts, tables, handwriting, math, and low-resolution antialiased text far better than either local engine.  While experimenting with complex tables, Fourteen cents USD were spent doing seven snips, but most single snips sent to OpenAI cost less than one cent. 
+**Read this part first.** Unlike the two local engines, this one sends the image **off your machine** to OpenAI, and it **costs money** — fractions of a cent per snip, but not zero. It's also slower: expect several seconds. In exchange it handles multi-column layouts, tables, handwriting, math, and low-resolution antialiased text far better than either local engine. While experimenting with complex tables, fourteen cents USD were spent doing seven snips, but most single snips sent to OpenAI cost less than one cent.
 
 ### Setup
 
@@ -702,7 +952,7 @@ Useful for the things transcription can't do: *what does this error message mean
 
 ---
 
-## 13. Imgur uploads
+## 15. Imgur uploads
 
 Entirely optional. Delete `Resources\SnipImgur.ahk` and the feature vanishes cleanly — the `#Include` uses the `*i` flag and every menu is built behind an `IsSet(Imgur)` test.
 
@@ -754,14 +1004,8 @@ Link formats offered:
 - **BBCode [img]** — the default, and what the one-click menu item always emits
 - **BBCode thumbnail linked** — a 640 px thumbnail that links to the full image, so a big screenshot doesn't blow out a forum thread's layout
 - **Markdown**
-- **HTML img tag**
-- **Page link** — Imgur's viewer page, with its nav bar and buttons
-- **Direct MP4** *(animated only)*
-- **HTML5 video tag** *(animated only)*
-
-### Page link vs direct link
-
-Imgur's API returns a link to the image's *page* (`imgur.com/7Wqu8C8`). Forum `[img]` tags and HTML `<img>` tags need the *file* (`i.imgur.com/7Wqu8C8.png`).
+- **HTML**
+- **Page link** — the imgur.com page rather than the image itself
 
 ScreenSnip derives the direct link from the response's `id` and `type` fields rather than by editing the URL text. `type` is the MIME type of the image **as Imgur stored it**, which matters because Imgur re-encodes BMP and TIFF uploads to PNG. Guessing the extension from the source filename would produce a dead link in those cases.
 
@@ -801,11 +1045,86 @@ Roughly 1,250 uploads and 12,500 requests per day per Client ID. Remaining credi
 
 ### What actually gets uploaded
 
-Exactly what you see: the snip's current crop, flips, rotation, and straighten, rendered through the same pipeline Save Image As uses. It's written to a temporary PNG in `%TEMP%`, uploaded, and deleted immediately. Orphaned temp files from a crash are swept on the next open of the dialog.
+Exactly what you see: the snip's current crop, flips, rotation, straighten and annotations, rendered through the same pipeline Save Image As uses. It's written to a temporary PNG in `%TEMP%`, uploaded, and deleted immediately. Orphaned temp files from a crash are swept on the next open of the dialog.
 
 ---
 
-## 14. Menu reference
+## 16. Games: the puzzle modules
+
+Two independent modules put a **Games** submenu on any snip: `SnipPuzzle.ahk` supplies the grid puzzles (Slide and Swap) and `SnipJigsaw.ahk` supplies the jigsaw. Delete either and the other carries on; delete both and the Games item disappears.
+
+![The Games submenu open on a snip, with a 48-piece jigsaw of that same snip scattered across its table](Images/JigsawPuzzleSnip.png)
+
+All three cut up **exactly what the snip currently shows** — crop, rotation, flips, annotations and all. Snip a photo, a spreadsheet, a friend's forum post, whatever. By default the snip stays open beside the game as your reference picture; set `CloseSnipOnStart` if you'd rather it become the puzzle.
+
+None of them is the "evil" variant that holds a window hostage. Nothing is hidden, nothing is blocked, and Esc closes the game whenever you like — though if you're partway through, it asks first, and tells you how many moves or joined pieces you're about to throw away.
+
+### Slide Puzzle
+
+The classic 15-puzzle. One tile is removed and the rest are shuffled.
+
+**Click any tile in the blank's row or column** and it slides into the gap — and so does everything between them, so a click three cells away moves three tiles at once.
+
+| Key | |
+|---|---|
+| Click a tile | Slide it and its neighbours over |
+| Arrow keys | Slide one tile that way into the gap |
+| `Ctrl+Z` | Undo the last slide |
+| `Space` (hold) | Peek at the finished picture |
+| `N` | Numbers on the tiles, on / off |
+| `R` | Shuffle and start over |
+| Right-click | Menu — grid size, puzzle type, and the above |
+| `F1` | Help |
+| `Esc` | Close |
+
+The shuffle is made of **real slides**, which is not laziness — it's the point. A randomly permuted 15-puzzle is solvable only half the time, and shuffling by legal moves sidesteps the parity problem entirely. Solve it and the seams dissolve, the numbers fade, and you get your time.
+
+### Swap Puzzle
+
+Same grid, no missing tile. Click a tile to pick it up, then click one of its four neighbours to trade places. Only neighbours — diagonals and distant tiles aren't a move, and clicking a far-away tile just moves the pick there instead. Arrow keys swap the picked tile in that direction.
+
+Every other key is the same as the slide puzzle. Any arrangement of a swap board *is* solvable, so this one gets a straight random shuffle.
+
+You can switch between Slide and Swap mid-game from the puzzle's right-click menu — it rebuilds around the same picture and grid, which is the polite way out of a slide puzzle you've made a mess of.
+
+### Jigsaw Puzzle
+
+A real jigsaw: interlocking shaped pieces, cut fresh every time, scattered across a felt table.
+
+**Drag a piece anywhere.** Let go of it near where it belongs, next to a piece it joins onto, and the two snap together and move as one from then on.
+
+| Key | |
+|---|---|
+| Drag | Move a piece, or a joined group |
+| `Space` (hold) | Peek at the finished picture |
+| `S` | Re-scatter the pieces still loose |
+| `F` | The faint assembly frame, on / off |
+| `R` | New puzzle, freshly cut |
+| Right-click | Menu — piece count, and the above |
+| `F1` | Help |
+| `Esc` | Close |
+
+Piece counts on the Games submenu run **12 (very easy) · 24 (easy) · 48 · 96 (hard) · 150 (brutal)**, plus **Custom Count…** for anything from 12 to 300. The exact number is rounded to fit the snip's shape, so a wide snip gets a wide grid. Every cut is generated fresh, so the same snip gives you a different puzzle each time.
+
+The interlock is structural rather than approximate, which is the part that makes it feel like a real jigsaw. What gets generated is the **edges**, not the pieces: two tables of them, with straight borders and a random tab direction and jitter on every interior edge. A piece then looks its four edges up rather than inventing them — its bottom edge is literally the same table entry as the top edge of the piece below, walked backwards. A tab and its socket cannot disagree, because they are the same curve.
+
+Four design decisions worth knowing:
+
+**Pieces snap only to other pieces, never to the frame.** So you can assemble the picture anywhere on the table, the way you actually do with a real jigsaw. The faint assembly frame is a hint about where the finished picture would sit, nothing more, and `F` turns it off.
+
+**The counter counts groups, not placed pieces.** `19 groups · 25 pieces · 1:48` means you have nineteen separate clusters left; at 1 you're done. A "pieces placed" number would sit still while you assembled clusters off to one side, which is most of what jigsaw play actually is.
+
+**Loose pieces are dealt onto a jittered lattice**, not scattered purely at random. Pure random looks authentic for about ten seconds and then you're hunting for a piece buried under three others. `S` re-deals whatever is still loose when the table gets messy.
+
+**Clicks land on the shape, not the bounding box.** Hit-testing reads each piece's alpha channel, so clicking in the notch beside a knob picks up the piece underneath rather than the one whose rectangle you happened to be inside. Snap tolerance follows the piece size — about a sixth of the shorter side — unless you pin it with `SnapPixels`.
+
+The **Felt** slider on the toolbar is a lightness dial for the table, not a colour picker: `FeltColor` in the INI supplies the hue and the slider walks it from black up to a fully-lit version of that same colour. It's session-only and doesn't write back — if you find a shade you like, read it off and put it in the INI.
+
+`CanvasScale` trades table space against picture size. The canvas is pinned to your screen either way, so a bigger scale means more room for loose pieces and a smaller picture. 180 is the shipped value; 140–150 is roomier for the picture and still has plenty of table, since the scatter lattice spreads pieces over the whole canvas anyway. The picture is never scaled *up* past 1:1 — enlarging a screenshot just makes a blurry puzzle — so a small snip plays at its own size with a proportionally larger table.
+
+---
+
+## 17. Menu reference
 
 ### Right-click menu (on a snip)
 
@@ -813,8 +1132,10 @@ Exactly what you see: the snip's current crop, flips, rotation, and straighten, 
 |---|---|
 | Copy to Clipboard | |
 | Save Image As… | `Ctrl+S` |
+| **Markup** → | Annotate… · Show/Hide Tool Pallet · Paste Image · Add Image From File… · Swap Line Ends · Line Styles… · Select All · Edit Text… · Duplicate · Bring to Front · Send to Back · Delete Selected · Undo · Redo · Clear All Markup *(if `SnipMarkup.ahk` is present)* |
 | **OCR** → | Copy Text (Windows) · Copy Text (PaddleOCR) · Copy Table (PaddleOCR) *(if `SnipOCR.ahk` is present)* — separator — Copy Text (AI) · Copy Table (AI) · Ask AI About Snip… *(if `SnipAI.ahk` is present)* |
 | **Imgur** → | Upload → [img] Tag · Imgur Uploader… *(if `SnipImgur.ahk` is present)* |
+| **Games** → | Slide Puzzle · Swap Puzzle *(if `SnipPuzzle.ahk` is present)* · Jigsaw Puzzle *(if `SnipJigsaw.ahk` is present)* |
 | **Rotate** → | 90° CW · 180° · 90° CCW |
 | **Flip** → | Horizontal · Vertical |
 | **Straighten** → | CW · CCW · Reset Straighten |
@@ -828,7 +1149,11 @@ Exactly what you see: the snip's current crop, flips, rotation, and straighten, 
 | Settings… | Opens SettingsManager *(only if it's in `Resources\`)* |
 | Help | `F1` |
 
+Markup sits up with the primary actions rather than down among Rotate and Flip, because it's a step in the capture → annotate → share workflow and belongs above the OCR and Imgur items that follow it.
+
 The OCR submenu disappears entirely if neither text-extraction module is installed. Everything below the separator inside it sends your image to a paid online service.
+
+The Markup submenu's editing items — Select All, Duplicate, z-order, Delete — act on whatever is currently selected. They live there rather than on a right-click-the-object menu of their own, because a snip's right-click already opens this menu, so there's no second gesture to learn.
 
 Menu items that have a hotkey display it right-aligned as a reminder. The directional submenus use a 1 px step; hold Shift with the equivalent hotkey for 10 px. Greyed-out lines like "Hold Shift → ±10 px" are hints, not clickable items.
 
@@ -848,13 +1173,13 @@ The menu acts on the snip you right-clicked, which is not necessarily the focuse
 | Settings… | Opens SettingsManager *(only if it's in `Resources\`)* |
 | ScreenSnip Help | |
 
-The `(admin)` suffix on the title is worth glancing at whenever a capture mysteriously doesn't work — see the next section.
+The `(admin)` suffix on the title is worth glancing at whenever a capture mysteriously doesn't work — see [section 19](#19-things-that-will-bite-you).
 
 ---
 
-## 15. Keyboard and mouse reference
+## 18. Keyboard and mouse reference
 
-Most snip hotkeys are context-sensitive: they only fire when a snip window is focused, so they don't interfere with anything else.
+Most snip hotkeys are context-sensitive: they only fire when a snip window is focused, so they don't interfere with anything else. The markup keys go one step further and require a markup session on the *active* snip, which is why a bare `R` can never escape onto anything else.
 
 ### Capturing
 
@@ -883,6 +1208,8 @@ Most snip hotkeys are context-sensitive: they only fire when a snip window is fo
 | `Esc` | Close this snip |
 | `Ctrl+C` | Copy image to clipboard |
 | `Ctrl+S` | Save image as… |
+| `M` | Start markup |
+| `F3` | Show / hide the markup pallet |
 
 ### Move the window
 
@@ -901,7 +1228,8 @@ Most snip hotkeys are context-sensitive: they only fire when a snip window is fo
 | Right-drag | Pan, continuous |
 | `Win+Alt+Arrow` | Resize ± 1 px |
 | `Win+Shift+Alt+Arrow` | Resize ± 10 px |
-| `Alt` + drag edge/corner | Resize, continuous |
+| Drag an edge/corner | Resize, continuous — opposite edge anchored |
+| `Alt` + right-drag | Resize by cursor travel — top-left anchored |
 
 ### Rotate, straighten, flip
 
@@ -921,9 +1249,50 @@ Most snip hotkeys are context-sensitive: they only fire when a snip window is fo
 | `Alt+Up` / `Alt+Down` | ± 25 |
 | `Alt+wheel` | ± 10 |
 
+### In markup mode
+
+Tool keys:
+
+| Key | Tool | | Key | Tool |
+|---|---|---|---|---|
+| `V` | Select | | `H` | Highlighter |
+| `R` | Rectangle | | `T` | Text |
+| `E` | Ellipse | | `N` | Number |
+| `L` | Line | | `C` | Callout |
+| `A` | Arrow | | `B` | Blur |
+| `D` | Path Arrow | | | |
+| `P` | Pen | | | |
+
+Everything else:
+
+| Keys | Action |
+|---|---|
+| `M` | Leave markup mode |
+| `Esc` | Deselect → return borrowed tool → Select tool → leave markup |
+| `F2` | Edit the selected label's text |
+| `F3` | Show / hide the pallet |
+| `Ctrl+A` | Select all objects |
+| `Shift` + click | Add / remove one object from the selection |
+| `Shift` + drag | Marquee-select |
+| `Ctrl` + click | Select an object (or the frame) without leaving your tool |
+| `Ctrl` + wheel | Step the selection's stroke width or point size |
+| Arrow keys | Nudge the selection 1 px |
+| `Delete` | Delete the selection |
+| `Ctrl+D` | Duplicate |
+| `Ctrl+V` | Paste an image from the clipboard |
+| `Ctrl+PgUp` / `Ctrl+PgDn` | Bring to front / send to back |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo (`Ctrl+Shift+Z` also redoes) |
+| `[` / `Shift+[` | Cycle the start cap forward / back |
+| `]` / `Shift+]` | Cycle the end cap forward / back |
+| `\` / `Shift+\` | Cycle the dash pattern forward / back |
+| `Ctrl+\` | Swap the two ends |
+| `Ctrl+Enter` | Accept the text-entry dialog |
+
+Two notes on what *isn't* here. `Shift+Arrow` is the core's Flip and stays that way, so markup nudging is plain arrows only — hold one down and key repeat covers the distance. And `Alt`+wheel is left alone for transparency, which is why the markup wheel gesture takes `Ctrl`.
+
 ---
 
-## 16. Things that will bite you
+## 19. Things that will bite you
 
 ### You can't snip an elevated window unless ScreenSnip is also elevated
 
@@ -947,13 +1316,29 @@ This is handled now. `ImgurAllowDropsWhenElevated()` uses `ChangeWindowMessageFi
 
 ### Deleting `OCR.ahk` while keeping `SnipOCR.ahk`
 
-The four add-on modules are all included with `*i` and can all be deleted freely. **Descolada's `OCR.ahk` is different.** `SnipOCR.ahk` pulls it in with a plain `#Include OCR.ahk` — no `*i` — so if `SnipOCR.ahk` is present and `OCR.ahk` isn't, ScreenSnip won't start.
+The add-on modules are all included with `*i` and can all be deleted freely. **Descolada's `OCR.ahk` is different.** `SnipOCR.ahk` pulls it in with a plain `#Include OCR.ahk` — no `*i` — so if `SnipOCR.ahk` is present and `OCR.ahk` isn't, ScreenSnip won't start.
 
 Two ways out: delete `Resources\SnipOCR.ahk` too (you lose the PaddleOCR items as well), or keep it and comment out its `#Include OCR.ahk` line near the top, which leaves the PaddleOCR items working and drops only the Windows OCR one.
 
 ### The AI silently tidies your text
 
-Covered in [section 12](#12-text-extraction-the-ai-engine), and repeated here because it's the kind of thing you discover at the worst moment. A vision model transcribes what it believes the text *says*. It will normalize odd spacing and can quietly fix a typo that was really there. For a license key, a hash, or anything where the exact characters matter, use Copy Text (Windows) or Copy Text (PaddleOCR).
+Covered in [section 14](#14-text-extraction-the-ai-engine), and repeated here because it's the kind of thing you discover at the worst moment. A vision model transcribes what it believes the text *says*. It will normalize odd spacing and can quietly fix a typo that was really there. For a license key, a hash, or anything where the exact characters matter, use Copy Text (Windows) or Copy Text (PaddleOCR).
+
+### Redaction is permanent in the file, not in the snip
+
+A blur or pixelate rectangle is a *object*, not a destructive edit. Everything that leaves the snip — the clipboard, a saved PNG, an Imgur upload, every OCR path — is genuinely redacted, and the hidden characters are not recoverable from those. But in the live snip the original pixels are still in the frozen master until you close it, so undo or deleting the blur object brings them straight back. Fine for publishing a screenshot; not a reason to leave a redacted snip up during a screen share.
+
+### While annotating, an edge drag moves the snip instead of resizing it
+
+Deliberate, and it takes ten seconds to get used to. During a markup session the image is drawing canvas, so the frame becomes the snip's drag-to-move handle — which, with a fat border, is the best handle an annotated snip has. Resizing from an edge wants `Alt` while a session is open, and the resize cursor stays hidden so it never promises something the drag won't do. Leave markup mode and bare edge-drag resizing comes back.
+
+### Blur always sits under everything else
+
+Redaction is composited into the image before the annotations are drawn on top, so you cannot put an arrow *under* a blur. That's a consequence of blur being a pixel operation and everything else being vector overlay, and it happens to be the order you want anyway.
+
+### Snips never scale
+
+A snip is always 1:1 with the pixels that were captured. "Resize" always means re-cropping the frozen master, which is why growing stops dead at `CaptureAdjustMargin` and why a snip can't be stretched to twice its size. If another tool resizes a snip window from the outside, ScreenSnip re-crops to match rather than stretching — but it can only give you pixels the master actually has.
 
 ### Freeze Capture can't capture ScreenSnip's own menus
 
@@ -973,7 +1358,7 @@ It's a display artifact only. **Saved PNGs and Imgur uploads are unaffected** �
 
 ### Borders disappear when you rotate
 
-Deliberate. A rectangular border doesn't map onto a tilted snip, so it's suppressed at non-cardinal angles. Same rule applies to the drop shadow and to Alt-edge-drag resizing.
+Deliberate. A rectangular border doesn't map onto a tilted snip, so it's suppressed at non-cardinal angles. Same rule applies to the drop shadow and to edge-drag resizing — and, since there's no frame to click, to selecting the frame in markup mode.
 
 ### Two scripts can't share a hotkey
 
@@ -997,13 +1382,21 @@ Only PNG carries an alpha channel. Rotate a snip and save it as JPG and the corn
 
 Settings are read once, at launch. Nothing re-reads the file, so a change needs a restart before it means anything. SettingsManager offers one after you save — take it. Restarting closes any snips you have open, so finish with them first.
 
+The exceptions are the two custom-style sections, `[MarkupCaps]` and `[MarkupDashes]`, which the Line Styles editor re-reads on demand.
+
 If a restart doesn't help either, check the value's *form*: a number where text belongs, a color with a `#` or `0x` in front, or six characters that aren't all hex digits will each be rejected in favour of the built-in default rather than applied. That's deliberate — a nonsense `TransColor` would punch holes in every snip — but it does mean an invalid value fails quietly.
 
-### Editing snipSettings.ini while SettingsManager has it open
+### Editing snipSettings.ini while something else has it open
 
 SettingsManager writes the whole file when you save, so a hand edit made in a text editor in the meantime is overwritten. Pick one or the other for a given sitting.
 
+Markup adds a second writer to keep in mind: the Line Styles editor and the pallet's **Save as default** button both write into the same INI. They write single keys rather than the whole file, so they're much less destructive than a full SettingsManager save — but a SettingsManager save that started before those writes will still stomp them. Finish one, then start the other.
+
 Relatedly, launching SettingsManager from the menu when it's already running just raises the existing window rather than starting a second copy. It's `#SingleInstance Force`, so a second launch would kill the first and take any unsaved edits with it.
+
+### Puzzle sounds ignore your volume mixer
+
+Both puzzle modules use `SoundBeep` for the snap click and the completion fanfare, which goes through the system speaker path rather than the app mixer. Turn `SoundOnSnap` / `SoundOnSolve` off if that's intrusive.
 
 ### Something threw and you want to know what
 
@@ -1011,13 +1404,13 @@ Unhandled errors are appended to `Data\ScreenSnip_error.log` with a timestamp. I
 
 ---
 
-## 17. Settings reference
+## 20. Settings reference
 
 A map of `Data\snipSettings.ini`, section by section, in file order. Values shown are as shipped.
 
 This is a reference, not a tutorial. The full explanation of any given setting lives in `Data\snipSettingsMetadata.json` and is shown in SettingsManager's help pane while you edit it — see [section 3](#3-settings).
 
-Two things apply throughout: every key falls back to a coded default if it's missing, blank, or invalid, and nothing is re-read after launch.
+Two things apply throughout: every key falls back to a coded default if it's missing, blank, or invalid, and nothing is re-read after launch (bar the two custom-style sections at the end).
 
 ### `[Capture]`
 
@@ -1072,23 +1465,26 @@ The two hint strings are separate on purpose: deleting `SnipWinDetect.ahk` has t
 | `Bevel3DInactiveDarknessFactor` | `0.2` | How much both edges dim when unfocused |
 | `TransColor` | `FF00FF` | Magenta color key for rotated corners |
 
+`BorderColor` and `BorderThickness` are the two keys the markup pallet's **Save as default** button will rewrite for you, if a snip is being annotated when you press it.
+
 ### `[SnipShadow]`
 
 | Key | Shipped | Purpose |
 |---|---|---|
 | `ShowSnipShadow` | `1` | Default for new snips |
 | `ShadowColor` | `000000` | |
-| `ShadowOffset` / `ShadowOffsetInactive` | `7` / `4` | Down/right offset, logical px |
-| `ShadowBlur` | `6` | Edge softness. Keep ≤ `ShadowOffset` for a drop rather than a halo |
+| `ShadowOffset` / `ShadowOffsetInactive` | `5` / `3` | Down/right offset, logical px |
+| `ShadowBlur` | `4` | Edge softness. Keep ≤ `ShadowOffset` for a drop rather than a halo |
 | `ShadowAlpha` | `105` | Peak opacity, 0–255 |
 
 ### `[Gestures]`
 
 | Key | Shipped | Purpose |
 |---|---|---|
-| `PanDragDivisor` | `3` | Mouse px per 1 px of pan. `1` = 1:1 |
+| `PanDragDivisor` | `3` | Mouse px per 1 px of pan on a right-drag. `1` = 1:1 |
 | `PanClickSlop` | `5` | Drag distance below which it's a plain right-click |
 | `EdgeGrabZone` | `6` | Grabbable band inward from each edge |
+| `ResizeDragDivisor` | `3` | Mouse px per 1 px of resize on an `Alt`+right-drag. `1` = 1:1 |
 
 ### `[Straighten]`
 
@@ -1167,7 +1563,7 @@ The prompts are not in the INI — they're long, multi-paragraph, and every clau
 
 | Key | Shipped | Purpose |
 |---|---|---|
-| `ImgurConfirmBeforeUpload` | `1` | Ask before the one-click upload. Read [section 13](#13-imgur-uploads) before turning this off |
+| `ImgurConfirmBeforeUpload` | `1` | Ask before the one-click upload. Read [section 15](#15-imgur-uploads) before turning this off |
 | `ImgurDefaultFormat` | `BBCode [img]` | Which "Copy as:" format the Uploader opens on |
 | `ImgurProgressDelayMs` | `500` | Delay before the progress window appears |
 | `ImgurResolveTimeout` | `8000` | DNS, ms |
@@ -1191,26 +1587,136 @@ The Client ID is not here either — same file, `Data\ApiKeys.ini`, under `[Imgu
 | `WinDetectIncludeDesktop` | `0` | Treat Progman/WorkerW as a target. Off because it's screen-sized, and having it match means the highlight never goes away over empty desktop |
 | `WinDetectIncludeMonitors` | `1` | Offer each monitor as a target, appended after the windows |
 
+### `[Puzzle]`
+
+The slide and swap grid puzzles.
+
+| Key | Shipped | Purpose |
+|---|---|---|
+| `GridCols` / `GridRows` | `4` / `4` | The default grid, and what the submenu's "Play" item uses. 2–12 |
+| `MaxBoardSize` | `0` | `0` = play at the snip's own size, limited only by the screen. A number caps the longest side |
+| `MinBoardSize` | `300` | Small snips scale *up* to this |
+| `TileGap` | `2` | px of board colour between tiles |
+| `ShowNumbers` | `1` | Bake tile numbers into the tiles. `N` toggles in game |
+| `SlideAnimMs` | `90` | Slide animation length; `0` = instant |
+| `ShuffleMoves` | `0` | `0` = auto (25 × tile count) |
+| `BoardColor` | `707070` | The gap and background colour |
+| `TileOutline` | `1` | Hairline edge on each tile |
+| `SelectColor` | `FFC24B` | Highlight on the picked tile, swap mode |
+| `CloseSnipOnStart` | `0` | `1` = the snip becomes the puzzle rather than staying open beside it |
+| `SoundOnSolve` | `1` | Three-note fanfare |
+| `AlwaysOnTop` | `1` | Puzzle window floats |
+
+### `[Jigsaw]`
+
+| Key | Shipped | Purpose |
+|---|---|---|
+| `PieceCount` | `48` | The default, and what the submenu's "Play" item uses. 12–300 |
+| `MaxBoardSize` | `0` | `0` = as large as the screen allows |
+| `MinBoardSize` | `280` | Small snips scale up to this |
+| `CanvasScale` | `180` | Table size as a % of the picture. Bigger = more room for loose pieces, smaller picture |
+| `SnapPixels` | `0` | Snap distance; `0` = auto, derived from piece size |
+| `KnobDepth` | `22` | Tab size as a % of the edge length. Bigger knobs, chunkier pieces |
+| `PieceOutline` | `1` | Hairline edge on each piece |
+| `ShowBoardOutline` | `1` | The faint assembly frame. `F` toggles in game |
+| `FeltColor` | `728CA7` | The table's hue, and the starting point of the Felt slider. The slider is session-only and never writes back here |
+| `SoundOnSnap` | `1` | Click when pieces join — the main feedback that a join took |
+| `SoundOnSolve` | `1` | Fanfare on the last join |
+| `AlwaysOnTop` | `1` | A jigsaw is a longer sitting than a tile puzzle, so this is the one most worth turning off |
+| `CloseSnipOnStart` | `0` | Off by default; a jigsaw has no grid to reason about, only the picture |
+
+### `[Markup]`
+
+Defaults for new annotation objects, plus the module's own behaviour. Most of these are editable live on the pallet — what's here is what a *new* object starts as, and what **Save as default** writes back.
+
+| Key | Shipped | Purpose |
+|---|---|---|
+| `Color` | `00B050` | Stroke colour for the next object |
+| `FillColor` | `FFFFFF` | Used when Fill is on. `Ctrl`+click a swatch to set it |
+| `FillShapes` | `0` | Fill rectangles, ellipses and callouts by default |
+| `Thickness` | `5` | Stroke width |
+| `FontName` / `FontSize` | `Segoe UI` / `18` | Text labels and the numeral in a badge |
+| `Outline` | `1` | The legibility halo — a contrasting hairline under each object |
+| `OutlineWidth` | `2` | How thick that halo is |
+| `Shadow` | `0` | Hard drop shadow behind each object. Off by default |
+| `ShadowOffset` / `ShadowAlpha` | `2` / `110` | That shadow's offset and opacity |
+| `HighlightAlpha` | `90` | Highlighter translucency, 0–255 |
+| `HighlightColor` | *(not in the file; `FFF200`)* | The highlighter's own remembered colour, kept separate from `Color` |
+| `ArrowHeadScale` | `4.5` | Arrowhead length as a multiple of stroke width |
+| `NumberDia` | *(not in the file; `0`)* | Badge disc diameter in px. `0` = auto, sized from the digits |
+| `Pixelate` | `1` | `1` = pixelate, `0` = blur |
+| `BlurAmount` | `10` | Block size for pixelate, or downscale factor for blur |
+| `HandleSize` / `HandleColor` | `7` / `00A2FF` | Selection handles — display only, never exported |
+| `UndoDepth` | `60` | Undo steps kept per snip |
+| `PalletAutoShow` | `1` | `0` = hotkey-only operation, no pallet on screen until `F3` |
+| `PalletGap` | `1` | px between the pallet and the snip it's parked beside |
+| `PathTurnTolerance` | `28` | How far the cursor must travel across a segment before a Path Arrow commits an elbow. Too small and hand jitter spawns phantom corners |
+| `PathCornerRadius` | `20` | Elbow rounding on a Path Arrow |
+| `PathMaxSegments` | `24` | Cap on Path Arrow complexity |
+| `LineDash` / `LineCapStart` / `LineCapEnd` | `solid` / `none` / `none` | The Line tool's remembered style |
+| `ArrowDash` / `ArrowCapStart` / `ArrowCapEnd` | `solid` / `none` / `arrow` | The Arrow tool's |
+| `PathDash` / `PathCapStart` / `PathCapEnd` | `solid` / `none` / `arrow` | The Path Arrow tool's |
+| `PenDash` / `PenCapStart` / `PenCapEnd` | `solid` / `none` / `arrow` | The Pen tool's |
+| `RectCorner` | `0` | Rectangle corner radius in px. `-1` = auto |
+| `CalloutCorner` | `-1` | Callout corner radius. `-1` = auto, derived from the font size |
+| `CtrlClickSelect` | `1` | `Ctrl`+click reaches into an object without leaving your tool |
+| `StickyTool` | `1` | A borrowed Select tool hands the drawing tool back at the next click on bare image |
+
+The cap and dash names are looked up in the registries, and an unknown name resolves quietly to `none` / `solid` rather than throwing — so deleting a custom style you were using degrades rather than breaks.
+
+### `[MarkupCaps]` and `[MarkupDashes]`
+
+User-defined arrowheads and dash patterns. Unlike everything above, these are **re-read at runtime** rather than cached at load, which is what lets the Line Styles editor work without a restart. Format and semantics are in [section 11](#11-line-styles-arrowheads-and-dashes).
+
+```ini
+[MarkupCaps]
+; Name = poly|circle, fill|open|line, shrink, coordinates…
+Fletch=poly, line, 0, 0,-0.55, 0.55,0, 0,0.55, 0.55,0, 1.3,0, 0.75,0.55
+Ring=circle, open, 0.76, 0.38, 0.38
+
+[MarkupDashes]
+; Name = on, off, on, off …  (multiples of the stroke width)
+Railroad=5, 2, 1, 2
+Sparse=1, 4
+```
+
+The two entries in each section as shipped are examples, meant to be deleted once you have your own. A name that matches a built-in overrides it in place.
+
 ---
 
-## 18. Credits
+## 21. Credits
 
-**ScreenSnip** is adapted by **kunkel321** with **Claude**, from **Snipper** by **FanaticGuru**.
+**ScreenSnip** is by **kunkel321** with **Claude**, and it began life as **Snipper** by **FanaticGuru** — https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
+
+Snipper supplied the framework and the founding idea: drag a region, and leave the result floating on the desktop as a borderless always-on-top window you can have several of. The first version of ScreenSnip was that code, adapted and simplified.
+
+The inheritance runs further back than that, because Snipper's own header says the work of dozens of people inspired it and points at two threads:
+
+- The floating-clip idea comes from **Learning one**'s *Screen clipping* and its `ScreenClip2Win.ahk` — https://www.autohotkey.com/boards/viewtopic.php?f=6&t=12088 — a thread that ran for years and collected contributions from **Joe Glines**, **maestrith**, **tervon** and others. (That's the same Joe Glines credited further down for the AI vision idea, a decade or so later.)
+- The GDI+ code descends from **tic**'s Gdip library for AHK v1, by way of **Rseding91**'s Unicode and x64 `Gdip_All.ahk` and the AHK v2 port maintained by **guest3456** — https://github.com/mmikeww/AHKv2-Gdip
+
+The compact `GDIp` class in `ScreenSnip.ahk` came from Snipper and is still there unchanged. It does every screen grab, every bitmap operation and every render in the program, so it is not a vestige but a load-bearing wall.
+
+Everything built on top of that is new work: Freeze Capture and window detection, the frozen master snapshot with post-capture pan and resize, straighten, the drop shadow and 3D bevel, the settings system and SettingsManager integration, all three OCR paths, the AI module, Imgur uploads, the markup layer, and the puzzles. So: the house has been extended past recognition, and it is still standing on somebody else's foundation.
 
 The post-capture adjust-region idea — the frozen master snapshot that lets you pan and resize after the fact — was suggested by AutoHotkey forum user **alnz123**.
+
+GitHub user **Droyk** made several of the recommendations that shaped this version, including the markup and annotation tools and `Alt`+right-drag to resize a snip by cursor travel. The markup request in particular is why annotations are editable objects rather than paint baked into the image.
 
 **OCR.ahk** for Windows.Media.Ocr is by **Descolada** — https://github.com/Descolada/OCR
 
 **PaddleOCR-json** is by **hiroi-sora** — https://github.com/hiroi-sora/PaddleOCR-json
 
-The idea of sending a screen snip to an AI vision model comes from one of **Joe Glines'** apps. Joe's site — https://www.the-automator.com — is where a lot of us first saw AHK and LLM APIs wired together.  Specifically, he showcased his snip tool durrin an AHK Hero zoom meeting. `SnipAI.ahk` is an independent implementation of that idea, fitted to ScreenSnip's snip objects.
+The idea of sending a screen snip to an AI vision model comes from one of **Joe Glines'** apps. Joe's site — https://www.the-automator.com — is where a lot of us first saw AHK and LLM APIs wired together. Specifically, he showcased his snip tool during an AHK Hero zoom meeting. `SnipAI.ahk` is an independent implementation of that idea, fitted to ScreenSnip's snip objects.
 
 **ToolTipOptions.ahk** is by AHK forum member **just me** — https://www.autohotkey.com/boards/viewtopic.php?t=113308 — and ships unmodified, so it can be swapped for a newer copy whenever he posts one.
 
-**SettingsManager** in `Resources\` began life as a tool in kunkel321's AutoCorrect2 suite, but the copy here is a separate build with its own metadata and no connection to that project. Nothing in the ScreenSnip package is part of AutoCorrect2 or depends on it.
+**SettingsManager** in `Resources\` began life as a tool in kunkel321's AutoCorrect2 suite, but the copy here is a separate build with its own metadata and no connection to that project. **Nothing in the ScreenSnip package is part of AutoCorrect2 or depends on it.** ScreenSnip is its own project.
 
 The window-highlighting behaviour in Freeze Capture is modelled on **SnagIt**'s.
 
+The puzzle modules started as an offhand suggestion from Claude during a different conversation and got built because they were funnier than they should have been.
+
 Bug reports and feature suggestions are welcome on the [AutoHotkey forum thread](https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140802) or the [GitHub repository](https://github.com/kunkel321/ScreenSnip).
 
-User Manual **version date**: Aug 11, 2026.
+User Manual **version date**: Sep 5, 2026.
