@@ -6,7 +6,7 @@ This is based on Snipper by FanaticGuru, and has a subset of the features, with 
 `Ctrl`+`RClick`-and-drag to select. Then, with the snip selected, press `F1` for a list of the hotkeys.
 
 (On-screen keyboard is a separate ahk app... Not part of ScreenSnip.ahk.)
-![Screenshot of ScreenSnip](https://github.com/kunkel321/ScreenSnip/blob/main/ScreenSnipDemo.gif)
+![Screenshot of ScreenSnip](https://i.imgur.com/W0s9cmA.gif)
 
 A gif, showing a table snip.
 *You can see that it is not perfect (puts the 4s in a separate column), but it is pretty good. Handles wrapped text well. Oddly, the fourth row does not get pasted into Excel. It is indeed on the clipboard though...
