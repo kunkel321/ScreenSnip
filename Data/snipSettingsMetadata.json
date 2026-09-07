@@ -1524,5 +1524,36 @@
     "label": "Increment",
     "help": "Help for Increment goes here",
     "type": "text"
+  },
+  "StickyNote.Enabled": {
+    "label": "Send to Sticky Note",
+    "help": "Adds a 'Send to Sticky Note' item to a snip's right-click menu. The snip goes to the clipboard and a running Sticky Notes picks it up, appending it to whichever note is open in its editor, or creating a new note if none is open. Requires Resources\\SnipStickyNote.ahk.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ]
+  },
+  "StickyNote.ProcessName": {
+    "label": "Sticky Notes program",
+    "help": "Used only to word the confirmation tooltip - the handoff itself works whether or not this matches. Set it to your Sticky Notes executable so ScreenSnip can tell you when Sticky Notes is not running. Leave blank to skip the check.",
+    "type": "file",
+    "filter": "Executables (*.exe)|*.exe"
+  },
+  "StickyNote.ShowTip": {
+    "label": "Confirm with a tooltip",
+    "help": "Show a brief tooltip after sending, confirming the snip went across - or warning that Sticky Notes may not be running and the snip is on the clipboard instead.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ]
+  },
+  "StickyNote.TipMs": {
+    "label": "Tooltip duration (ms)",
+    "help": "How long the confirmation tooltip stays up. The longer 'Sticky Notes may not be running' warning shows for twice this, since it has more to read.",
+    "type": "integer",
+    "min": 0,
+    "max": 2250
   }
 }

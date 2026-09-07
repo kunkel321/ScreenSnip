@@ -714,6 +714,15 @@ SnipMenu := Menu()
 SnipMenu.Add('Copy to Clipboard', SnipMenu_Handler)
 SnipMenu.Add('Save Image As…`tCtrl+S', SnipMenu_Handler)
 
+; Sticky Notes handoff — see Resources\SnipStickyNote.ahk.  Sits with the two
+; items above it because it is the same kind of thing: a one-click way OUT of
+; the snip, to a destination rather than a transformation.  Same opt-out
+; contract as every module here — delete SnipStickyNote.ahk and StickyCfg never
+; exists, so this item is never added and its handler case is unreachable.
+if IsSet(StickyCfg) {
+    SnipMenu.Add('Send to Sticky Note', SnipMenu_Handler)
+}
+
 ; Markup — see Resources\SnipMarkup.ahk.  Sits with the primary actions rather
 ; than down among Rotate/Flip, because it is a step in the CAPTURE → ANNOTATE →
 ; SHARE workflow and belongs above the OCR and Imgur items that follow it, not
@@ -2522,6 +2531,7 @@ SnipMenu_Handler(ItemName, ItemPos, *) {
         case 'Copy Text (AI)':          addOnFn := 'SnipAiCopyText',     %addOnFn%(TargetHwnd)
         case 'Copy Table (AI)':         addOnFn := 'SnipAiCopyTable',    %addOnFn%(TargetHwnd)
         case 'Ask AI About Snip…':      addOnFn := 'SnipAiAsk',          %addOnFn%(TargetHwnd)
+        case 'Send to Sticky Note':     addOnFn := 'StickySendSnip',     %addOnFn%(TargetHwnd)
         case 'Rotate 90° CW':           RotateSnip(TargetHwnd, +90)
         case 'Rotate 180°':             RotateSnip(TargetHwnd, 180)
         case 'Rotate 90° CCW':          RotateSnip(TargetHwnd, -90)
@@ -4368,6 +4378,16 @@ Class GDIp {
 ; coordinate space the crop uses.  No dependencies; settings live in the
 ; [Markup] section of Data\snipSettings.ini and fall back to coded defaults.
 #Include *i Resources\SnipMarkup.ahk
+
+; Sticky Notes handoff — provides StickyCfg plus StickySendSnip, called from the
+; 'Send to Sticky Note' case in SnipMenu_Handler.  Puts the snip on the
+; clipboard and broadcasts AHK_StickyNotes_NewImageNote; a running Sticky Notes
+; appends the image to the note open in its editor, or makes a new note if none
+; is open.  Nothing here knows where Sticky Notes is installed, and if it isn't
+; running the snip is still on the clipboard to paste by hand.  No dependencies;
+; settings live in the [StickyNote] section of Data\snipSettings.ini and fall
+; back to coded defaults when absent.
+#Include *i Resources\SnipStickyNote.ahk
 
 ; Tooltip styling — bigger, colored, padded tooltips.  Unlike the four above,
 ; this one isn't a ScreenSnip module at all: it's an unmodified copy of
