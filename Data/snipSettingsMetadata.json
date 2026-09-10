@@ -1500,6 +1500,36 @@
     "help": "After a Ctrl+click borrows the Select tool, remember the drawing tool that was in hand and give it back at the next click on bare image. A click with no drag still just deselects, so only a drag actually draws. Set to 0 and the Ctrl+click is a one-way trip to Select.",
     "type": "boolean"
   },
+  "Markup.NumberTail": {
+    "label": "Number tail length",
+    "help": "Length of the teardrop tail on a Number badge, measured from the disc centre as a multiple of the disc diameter. 0 means no tail, so badges are plain discs. Values under about 0.6 put the tip inside the disc and are clamped up. This sets what NEW badges get; change an existing one with the second Tail box on the markup pallet, or by dragging its tip handle.",
+    "type": "float",
+    "min": 0,
+    "max": 3,
+    "decimals": 1
+  },
+  "Markup.NumberAngle": {
+    "label": "Number tail angle",
+    "help": "Direction a new Number badge's tail points, in degrees clockwise from east: 0 points right, 90 down, 180 left, 270 up. Ignored when Number tail length is 0. Drag a badge's tip handle to aim it freely, or hold Shift while dragging to snap to 15 degrees.",
+    "type": "integer",
+    "min": 0,
+    "max": 359
+  },
+  "Markup.NumberCorner": {
+    "label": "Number tail bluntness",
+    "help": "Rounding radius applied to the point of the teardrop, in image pixels. 0 gives a sharp tangent point; larger values blunt it into a rounded lobe. Clamped against the length of the tail's sides, so an oversized value cannot turn the shape inside out. Only affects badges that have a tail.",
+    "type": "integer",
+    "min": 0,
+    "max": 40
+  },
+  "Markup.NumberPad": {
+    "label": "Number badge padding",
+    "help": "Breathing room between the numeral and the edge of the disc on an auto-sized badge, as a fraction of the font size. Lower is tighter. A hard floor keeps the digits inside the disc no matter how low this goes, and the disc's own stroke width is accounted for separately. Has no effect on badges given an explicit size with the Disc box.",
+    "type": "float",
+    "min": 0,
+    "max": 1,
+    "decimals": 2
+  },
   "MarkupCaps.Fletch": {
     "label": "Fletch",
     "help": "Help for Fletch goes here",

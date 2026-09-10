@@ -126,6 +126,23 @@ class MarkupCfg {
     ; disc from the font — see MarkupNumDia.
     static NumberDia      := Integer(SnipCfg('Markup', 'NumberDia', 0))
 
+    ; Number badge TAIL — the SnagIt-style "step" teardrop.  NumberTail is the
+    ; tip's distance from the disc CENTRE as a multiple of the disc DIAMETER,
+    ; and 0 means no tail at all, which is the plain disc every badge drawn
+    ; before this existed.  NumberAngle is the direction in degrees clockwise
+    ; from east (screen y grows downward), so 225 points up and to the left.
+    ; NumberCorner blunts the point; 0 is the sharp tangent apex.
+    static NumberTail   := Float(SnipCfg('Markup', 'NumberTail',   1.2))
+    static NumberAngle  := Float(SnipCfg('Markup', 'NumberAngle',  0))
+    static NumberCorner := Integer(SnipCfg('Markup', 'NumberCorner', 0))
+
+    ; Breathing room around the numeral on an AUTO-sized badge, as a fraction of
+    ; the font size.  A step badge is nearly always one or two digits, so the
+    ; disc does not have to be padded for a string that will never turn up —
+    ; which is what lets this be tight.  The hard fit floor in MarkupNumDia is
+    ; unaffected: a disc that cannot contain its own digits is still a bug.
+    static NumberPad    := Float(SnipCfg('Markup', 'NumberPad', 0.28))
+
     ; Path Arrow.  TurnTolerance is how far the cursor must travel ACROSS the
     ; current segment before a corner is committed: too small and hand jitter
     ; spawns phantom elbows, too large and a deliberate short jog gets eaten.
@@ -217,6 +234,9 @@ class MarkupState {
     static Ctl      := Map()      ; pallet control name → control object
     static ThickList := ''        ; which ladder the Width box is loaded with
     static HeadList  := 'arrow'   ; which ladder the Head box is loaded with
+    static EndsList  := 'caps'    ; ditto for the two Ends boxes
+    static EndsExA   := ''        ; off-ladder value spliced into the first box
+    static EndsExB   := ''        ; ditto, second box
     static ColorLive := true      ; do the swatches mean anything right now?
 
     ; Per-tool line style, seeded from MarkupCfg on first use.  Changing a
@@ -871,6 +891,7 @@ MarkupNewObj(type) {
          , Num:       0
          , TailX:     0,   TailY: 0
          , TailA:     0,   TailB: 0        ; tail base, offsets along the edge
+         , HasTail:   false                ; number badge: does it have a tail?
          , Dash:      'solid'              ; named pattern  — see MarkupStyles
          , CapStart:  'none', CapEnd: 'none'   ; named end treatments
          , HeadScale: MarkupCfg.ArrowHeadScale ; head length as a multiple of Thick
@@ -901,6 +922,7 @@ MarkupNewObj(type) {
     o.Corner   := st.Corner
     if (type = 'number')
         o.Fill := true, o.FillColor := o.Color
+                      , o.HasTail := (MarkupCfg.NumberTail > 0)
     if (type = 'callout')
         o.Fill := true, o.FillColor := 0xFFFFFF
     return o
@@ -1299,6 +1321,10 @@ MarkupInitToolStyles() {
     ts['callout']   := { Dash: 'solid', CapStart: 'none', CapEnd: 'none'
                        , Corner: MarkupCfg.CalloutCorner }
     ts['ellipse']   := { Dash: 'solid', CapStart: 'none', CapEnd: 'none', Corner: 0 }
+    ; A badge strokes no line, so only Corner means anything here — it is the
+    ; bluntness of the teardrop's point.
+    ts['number']    := { Dash: 'solid', CapStart: 'none', CapEnd: 'none'
+                       , Corner: MarkupCfg.NumberCorner }
 }
 
 ; Rebuild the registries from the INI and push the result at everything that is
@@ -1447,9 +1473,13 @@ MarkupCapShrink(capId, head) => MarkupCap(capId).Shrink * head
 ; disc grows the disc rather than letting the numeral hang out of it.
 MarkupNumDia(o) {
     MarkupTextSize(o, &tw, &th)
-    fit  := Max(tw, th) + o.FontSize * 0.15
+    ; Both the padding and the floor have to clear the RING as well as the
+    ; glyphs: the disc's stroke straddles the path, so half its width eats
+    ; inward and would crowd the digits on a thick badge.
+    ring := Max(1, o.Thick - 1) / 2
+    fit  := Max(tw, th) + o.FontSize * 0.15 + ring
     dia  := (o.HasProp('NumDia') && o.NumDia > 0) ? o.NumDia
-                                                 : Max(tw, th) + o.FontSize * 0.7
+                                                 : Max(tw, th) + o.FontSize * MarkupCfg.NumberPad + ring
     return Max(dia, fit)
 }
 
@@ -1459,6 +1489,175 @@ MarkupNumDia(o) {
 MarkupNumDiaSteps() {
     static t := [20, 24, 28, 32, 40, 48, 56, 64, 80, 96]
     return t
+}
+
+; ==============================================================================
+; NUMBER BADGE TAIL  —  the rotatable teardrop
+; ==============================================================================
+;
+; A badge grows a tail when HasTail is set, and the tail is stored as a POINT
+; (TailX/TailY, master coords) rather than as an angle — the same way a callout
+; stores its tip.  That is not an arbitrary choice.  MarkupComposeOverlay
+; already maps an Upright object's tail anchor through the display matrix
+; SEPARATELY from its body, so a point-based tail follows a rotated or flipped
+; snip for free while the numeral itself stays the right way up.  An angle would
+; have had to re-derive the image rotation on every draw.
+;
+; The two Tail boxes on the pallet are a polar VIEW of that point: angle in
+; degrees clockwise from east, length as a multiple of the disc DIAMETER.
+; Dragging the tip handle edits the point directly, which is where free rotation
+; (and free tail length) comes from.
+
+MarkupNumHasTail(o) => (o.Type = 'number' && o.HasProp('HasTail') && o.HasTail)
+
+MarkupNumCentre(o, &cx, &cy) {
+    d  := MarkupNumDia(o)
+    cx := o.X1 + d / 2, cy := o.Y1 + d / 2
+}
+
+; Tip in master coords.  A badge whose tail was switched on but never placed
+; still carries 0,0, so the default direction is written onto it here — the same
+; lazy materialisation MarkupCalloutMaterialize does for a callout's tail base.
+MarkupNumTip(o, &tx, &ty) {
+    if (o.TailX = 0 && o.TailY = 0)
+        MarkupNumSetTail(o, MarkupCfg.NumberAngle
+                       , (MarkupCfg.NumberTail > 0) ? MarkupCfg.NumberTail : 1.4)
+    tx := o.TailX, ty := o.TailY
+}
+
+MarkupNumSetTail(o, angDeg, ratio) {
+    MarkupNumCentre(o, &cx, &cy)
+    ; Under about 0.62 diameters the tip is inside the disc and there is no
+    ; teardrop left to draw, so that is a floor rather than an error.
+    L := Max(0.62, ratio) * MarkupNumDia(o)
+    a := angDeg * 3.14159265358979 / 180
+    o.TailX := cx + L * Cos(a), o.TailY := cy + L * Sin(a)
+}
+
+; The polar view the pallet edits.  Materialises first, so reading is safe on a
+; badge that has never had a tail.
+MarkupNumPolar(o, &angDeg, &ratio) {
+    MarkupNumCentre(o, &cx, &cy)
+    MarkupNumTip(o, &tx, &ty)
+    dx := tx - cx, dy := ty - cy
+    angDeg := Mod(MarkupAtan2(dy, dx) * 180 / 3.14159265358979 + 360, 360)
+    ratio  := Sqrt(dx * dx + dy * dy) / Max(1, MarkupNumDia(o))
+}
+
+; One entry point for both Tail boxes, so switching the tail on and aiming it
+; cannot get out of step.  A length of 0 means "no tail" and deliberately leaves
+; TailX/TailY alone, so turning it back on restores the direction it had rather
+; than snapping to the default.
+MarkupNumApplyTail(o, prop, value) {
+    if (prop = 'NumTail' && value <= 0) {
+        o.HasTail := false
+        return
+    }
+    MarkupNumPolar(o, &ang, &rat)
+    if (prop = 'NumAngle')
+        ang := value
+    else
+        rat := value
+    o.HasTail := true
+    MarkupNumSetTail(o, ang, rat)
+}
+
+; Apex bluntness in master pixels.  Corner -1 (auto) means sharp, matching what
+; a plain rectangle's auto means.  The real clamp is in the path builder, which
+; is the only place that knows how long the tangents are.
+MarkupNumCorner(o, dia) {
+    r := (o.HasProp('Corner') && o.Corner > 0) ? o.Corner : 0
+    return Min(r, dia)
+}
+
+MarkupNumAngleSteps() {
+    static t := []
+    if !t.Length
+        Loop 24
+            t.Push((A_Index - 1) * 15)
+    return t
+}
+
+MarkupNumTailSteps() {
+    static t := [0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5, 3]
+    return t
+}
+
+MarkupUnitVec(dx, dy, &ux, &uy) {
+    L := Sqrt(dx * dx + dy * dy)
+    if (L = 0)
+        ux := 0, uy := 0
+    else
+        ux := dx / L, uy := dy / L
+}
+
+; The teardrop, as ONE closed path: the disc's arc plus the kite formed by the
+; two TANGENT lines from the tip.  Tangency is the whole point — it is the only
+; construction where the sides meet the circle smoothly, which is why this is
+; trig rather than a hand-tuned Bezier.
+;
+;   phi = ACos(r/d)   half-angle from the axis to each tangent point
+;   the arc runs the LONG way round, 360 - 2*phi, so the sector it leaves open
+;   is exactly the one the kite covers.
+;
+; corner > 0 blunts the apex: pull back rc*Tan(phi) along each tangent and arc
+; between, tangent to both sides.  Clamped against the tangent length, so a
+; large value gives a fat rounded lobe rather than a shape turned inside out.
+;
+; Returns 0 — "draw the plain disc instead" — when the tip is inside or barely
+; outside the circle.  That is what makes dragging the tip inward an undo, and
+; it is also the path every badge drawn before this existed takes, unchanged.
+MarkupTeardropPath(cx, cy, dia, tipX, tipY, corner := 0) {
+    static PI := 3.14159265358979
+    r  := dia / 2
+    dx := tipX - cx, dy := tipY - cy
+    d  := Sqrt(dx * dx + dy * dy)
+    if (r <= 0 || d <= r * 1.08)
+        return 0
+    DllCall('gdiplus\GdipCreatePath', 'Int', 0, 'UPtr*', &gp := 0)
+    if !gp
+        return 0
+    th  := MarkupAtan2(dy, dx)
+    phi := ACos(r / d)
+    DllCall('gdiplus\GdipAddPathArc', 'UPtr', gp
+          , 'Float', cx - r, 'Float', cy - r, 'Float', dia, 'Float', dia
+          , 'Float', (th + phi) * 180 / PI
+          , 'Float', 360 - (2 * phi * 180 / PI))
+    ax := cx + r * Cos(th - phi), ay := cy + r * Sin(th - phi)   ; where the arc ENDS
+    bx := cx + r * Cos(th + phi), by := cy + r * Sin(th + phi)   ; where it STARTED
+    tanLen := Sqrt(d * d - r * r)
+    rc := Max(0, corner)
+    if (rc > 0)
+        rc := Min(rc, 0.85 * tanLen / Max(0.0001, Tan(phi)))
+    if (rc <= 0.5) {
+        DllCall('gdiplus\GdipAddPathLine', 'UPtr', gp
+              , 'Float', ax, 'Float', ay, 'Float', tipX, 'Float', tipY)
+        DllCall('gdiplus\GdipAddPathLine', 'UPtr', gp
+              , 'Float', tipX, 'Float', tipY, 'Float', bx, 'Float', by)
+    } else {
+        pull := rc * Tan(phi)
+        MarkupUnitVec(ax - tipX, ay - tipY, &u1x, &u1y)
+        MarkupUnitVec(bx - tipX, by - tipY, &u2x, &u2y)
+        p1x := tipX + pull * u1x, p1y := tipY + pull * u1y
+        p2x := tipX + pull * u2x, p2y := tipY + pull * u2y
+        ; Centre of the apex arc: back down the axis far enough to be tangent
+        ; to both sides at once.
+        qx  := tipX - (rc / Cos(phi)) * Cos(th)
+        qy  := tipY - (rc / Cos(phi)) * Sin(th)
+        a1  := MarkupAtan2(p1y - qy, p1x - qx) * 180 / PI
+        a2  := MarkupAtan2(p2y - qy, p2x - qx) * 180 / PI
+        sw  := Mod(a2 - a1 + 540, 360) - 180          ; shorter signed sweep
+        DllCall('gdiplus\GdipAddPathLine', 'UPtr', gp
+              , 'Float', ax, 'Float', ay, 'Float', p1x, 'Float', p1y)
+        DllCall('gdiplus\GdipAddPathArc', 'UPtr', gp
+              , 'Float', qx - rc, 'Float', qy - rc
+              , 'Float', rc * 2,  'Float', rc * 2
+              , 'Float', a1, 'Float', sw)
+        DllCall('gdiplus\GdipAddPathLine', 'UPtr', gp
+              , 'Float', p2x, 'Float', p2y, 'Float', bx, 'Float', by)
+    }
+    DllCall('gdiplus\GdipClosePathFigure', 'UPtr', gp)
+    return gp
 }
 
 ; Corner radius for a rectangle-ish object, clamped so shrinking the shape
@@ -2089,16 +2288,40 @@ MarkupDrawPass(pGfx, o, pass, ox, oy, tox, toy) {
         MarkupTextSize(o, &tw, &th)          ; still needed to CENTRE the digits
         dia := MarkupNumDia(o)
         cx  := o.X1 + ox, cy := o.Y1 + oy
+        ; A tailed badge is ONE closed path, so the fill, the halo and the
+        ; shadow all get the teardrop without any of them knowing about it.
+        ; With no tail — or a tip dragged back inside the disc — the builder
+        ; returns 0 and the original two ellipse calls run untouched, which is
+        ; what keeps every badge drawn before today pixel-identical.
+        ;
+        ; tox/toy, not ox/oy, for the tip: the tail anchor is mapped through the
+        ; display matrix separately, so the point keeps aiming at the feature it
+        ; was aimed at even on a rotated snip.
+        gp := 0
+        if MarkupNumHasTail(o) {
+            MarkupNumTip(o, &tipX, &tipY)
+            gp := MarkupTeardropPath(cx + dia / 2, cy + dia / 2, dia
+                                   , tipX + tox, tipY + toy
+                                   , MarkupNumCorner(o, dia))
+        }
         if !isHalo {
             br := MarkupBrush(fillCol, fillAlpha)
-            DllCall('gdiplus\GdipFillEllipse', 'UPtr', pGfx, 'UPtr', br
-                  , 'Float', cx, 'Float', cy, 'Float', dia, 'Float', dia)
+            if gp
+                DllCall('gdiplus\GdipFillPath', 'UPtr', pGfx, 'UPtr', br, 'UPtr', gp)
+            else
+                DllCall('gdiplus\GdipFillEllipse', 'UPtr', pGfx, 'UPtr', br
+                      , 'Float', cx, 'Float', cy, 'Float', dia, 'Float', dia)
             MarkupDelBrush(br)
         }
         pn := MarkupPen(col, alpha, isHalo ? MarkupCfg.OutlineWidth * 2 : Max(1, o.Thick - 1))
-        DllCall('gdiplus\GdipDrawEllipse', 'UPtr', pGfx, 'UPtr', pn
-              , 'Float', cx, 'Float', cy, 'Float', dia, 'Float', dia)
+        if gp
+            DllCall('gdiplus\GdipDrawPath', 'UPtr', pGfx, 'UPtr', pn, 'UPtr', gp)
+        else
+            DllCall('gdiplus\GdipDrawEllipse', 'UPtr', pGfx, 'UPtr', pn
+                  , 'Float', cx, 'Float', cy, 'Float', dia, 'Float', dia)
         MarkupDelPen(pn)
+        if gp
+            DllCall('gdiplus\GdipDeletePath', 'UPtr', gp)
         if !isHalo {
             ; Digits sit on the disc, so they take their colour from the DISC,
             ; not from the stroke — a red-filled badge needs white numerals.
@@ -2289,6 +2512,12 @@ MarkupComposeOverlay(snip, pBmp, wantChrome := true) {
         for o in mk.Objs {
             if !o.Upright
                 continue
+            ; A badge's tail tip has to EXIST before it can be mapped: the
+            ; offset handed to MarkupDrawObject below is computed from
+            ; o.TailX/Y, so materialising it lazily inside the draw would map
+            ; the old value and put the point in the wrong place.
+            if MarkupNumHasTail(o)
+                MarkupNumTip(o, &mtx, &mty)
             MarkupXform(m, o.X1, o.Y1, &ax, &ay)
             MarkupXform(m, o.TailX, o.TailY, &tx, &ty)
             MarkupDrawObject(pGfx, o, ax - o.X1, ay - o.Y1, tx - o.TailX, ty - o.TailY)
@@ -2403,7 +2632,18 @@ MarkupHandleList(snip, o, m) {
         }
         return hs
     }
-    if (o.Type = 'pen' || o.Type = 'text' || o.Type = 'number')
+    ; A badge has no size handles — the Disc box does that job — but a tailed
+    ; one gets a tip handle, and dragging it is where free rotation and free
+    ; tail length come from.  Hold Shift to snap the angle to 15 degrees.
+    if (o.Type = 'number') {
+        if MarkupNumHasTail(o) {
+            MarkupNumTip(o, &ntx, &nty)
+            MarkupXform(m, ntx, nty, &hx, &hy)
+            hs.Push({ Id: 'tip', X: hx, Y: hy })
+        }
+        return hs
+    }
+    if (o.Type = 'pen' || o.Type = 'text')
         return hs
     MarkupBoundsDisplay(snip, o, m, &x1, &y1, &x2, &y2)
     mx := (x1 + x2) / 2, my := (y1 + y2) / 2
@@ -2560,6 +2800,19 @@ MarkupHitObj(snip, o, m, dx, dy) {
     if (o.Type = 'callout') {
         MarkupXform(m, o.TailX, o.TailY, &tx, &ty)
         if (Abs(dx - tx) <= 8 && Abs(dy - ty) <= 8)
+            return true
+    }
+    ; The tail is part of the badge, so clicking it picks the badge up — the
+    ; disc alone would leave a long tail as dead space.  The disc's centre is
+    ; taken from the MAPPED anchor plus half a diameter rather than from the
+    ; mapped centre, because that is exactly where the draw pass puts it for an
+    ; Upright object.
+    if MarkupNumHasTail(o) {
+        MarkupNumTip(o, &ntx, &nty)
+        MarkupXform(m, o.X1, o.Y1, &kx, &ky)
+        MarkupXform(m, ntx, nty, &tpx, &tpy)
+        nr := MarkupNumDia(o) / 2
+        if (MarkupDistToSeg(dx, dy, kx + nr, ky + nr, tpx, tpy) <= slop)
             return true
     }
     return (dx >= x1 - 2 && dx <= x2 + 2 && dy >= y1 - 2 && dy <= y2 + 2)
@@ -3084,7 +3337,18 @@ MarkupApplyHandle(snip, o, orig, id, cx, cy) {
     switch id {
     case 'p1':  o.X1 := mx, o.Y1 := my
     case 'p2':  o.X2 := mx, o.Y2 := my
-    case 'tip': o.TailX := mx, o.TailY := my
+    case 'tip':
+        ; A badge's tip is polar as far as the pallet is concerned, so Shift
+        ; snapping has to go through the polar form.  A callout's tip is a free
+        ; point and has never wanted snapping, so it keeps the plain assignment.
+        if (o.Type = 'number' && GetKeyState('Shift', 'P')) {
+            MarkupNumCentre(o, &ncx, &ncy)
+            ndx := mx - ncx, ndy := my - ncy
+            MarkupNumSetTail(o
+                , Round(MarkupAtan2(ndy, ndx) * 180 / 3.14159265358979 / 15) * 15
+                , Sqrt(ndx * ndx + ndy * ndy) / Max(1, MarkupNumDia(o)))
+        } else
+            o.TailX := mx, o.TailY := my
     case 'tail1', 'tail2':
         ; Project the cursor onto the edge the base sits on and store the signed
         ; distance from the crossing point.  Clamped to the straight part of the
@@ -3220,6 +3484,11 @@ MarkupStartDraw(snip, dx, dy) {
             MarkupTextSize(o, &tw, &th)
             dia := Max(tw, th) + o.FontSize * 0.7
             o.X1 -= dia / 2, o.Y1 -= dia / 2
+            ; The tail is placed at the remembered angle and length, and only
+            ; once the anchor is final — it is measured from the disc centre.
+            ; With NumberTail 0 there is no tail and this does not run at all.
+            if o.HasTail
+                MarkupNumSetTail(o, MarkupCfg.NumberAngle, MarkupCfg.NumberTail)
         }
         mk.Objs.Push(o)
         MarkupState.Sel := o
@@ -3597,6 +3866,8 @@ MarkupShowPallet() {
     ctl := MarkupState.Ctl := Map()
     MarkupState.ThickList := ''
     MarkupState.HeadList  := 'arrow'   ; matches the list the Head box is built with
+    MarkupState.EndsList  := 'caps'    ; ditto for the two Ends boxes
+    MarkupState.EndsExA   := '', MarkupState.EndsExB := ''
 
     ; Absolute x/y throughout.  Relative positioning (y+8 / yp) is tidier to
     ; read but it makes the swatch grid, which wraps mid-row, a nuisance — and a
@@ -3657,8 +3928,8 @@ MarkupShowPallet() {
     ctl['capstart'] := g.Add('DropDownList', 'x58 y457 w70', [])
     ctl['swap']     := g.Add('Button', 'x132 y457 w22 h22', Chr(0x21C4))
     ctl['capend']   := g.Add('DropDownList', 'x158 y457 w62', [])
-    ctl['capstart'].OnEvent('Change', MarkupPal_Style.Bind('CapStart'))
-    ctl['capend'].OnEvent('Change',   MarkupPal_Style.Bind('CapEnd'))
+    ctl['capstart'].OnEvent('Change', MarkupPal_Cap.Bind('CapStart'))
+    ctl['capend'].OnEvent('Change',   MarkupPal_Cap.Bind('CapEnd'))
     ctl['swap'].OnEvent('Click',      (*) => MarkupSwapEnds())
 
     ; The preview is drawn by the SAME MarkupDrawObject the snip uses, on a
@@ -3857,6 +4128,70 @@ MarkupSetHeadList(mode) {
     }
 }
 
+; '' when the value is already a rung on the ladder, otherwise the value itself.
+; Used to splice a freehand angle or length into a dropdown so the box shows
+; what the object actually is instead of going blank.
+MarkupExtraStep(steps, v) {
+    ; Tolerant compare on purpose: a ratio derived from pixel geometry can miss
+    ; a rung by a rounding hair, and splicing in a near-duplicate would show the
+    ; same number twice in the list.
+    for st in steps
+        if (Abs(st - v) < 0.005)
+            return ''
+    return v
+}
+
+; Build a dropdown's items from a ladder, with an off-ladder value spliced into
+; its sorted position.
+MarkupStepsWith(steps, extra) {
+    out  := []
+    done := (extra = '')
+    for v in steps {
+        if (!done && extra < v)
+            out.Push(MarkupNumText(extra)), done := true
+        out.Push(MarkupNumText(v))
+    }
+    if !done
+        out.Push(MarkupNumText(extra))
+    return out
+}
+
+; The two Ends boxes serve two ladders as well: end caps for anything that
+; strokes, and a Number badge's tail ANGLE and LENGTH.  Same reload-only-on-
+; change rule as the Width and Head boxes, and for the same reason — reloading
+; a DropDownList on every sync makes it flicker.
+;
+; Doubling the row up rather than adding one is deliberate: the pallet is laid
+; out in absolute coordinates, so a row that appeared and disappeared would move
+; every button under it as you switched tools.
+MarkupSetEndsList(mode, exAng := '', exLen := '') {
+    ctl := MarkupState.Ctl
+    if (!ctl.Has('capstart') || !ctl.Has('capend'))
+        return
+    if (MarkupState.EndsList = mode && MarkupState.EndsExA = exAng
+                                    && MarkupState.EndsExB = exLen)
+        return
+    MarkupState.EndsList := mode
+    MarkupState.EndsExA  := exAng, MarkupState.EndsExB := exLen
+    try {
+        ctl['capstart'].Delete(), ctl['capend'].Delete()
+        if (mode = 'number') {
+            ctl['capstart'].Add(MarkupStepsWith(MarkupNumAngleSteps(), exAng))
+            ; 'none' first, because "no tail" is a real choice and the most
+            ; likely one to want back in a hurry.
+            tails := ['none']
+            for txt in MarkupStepsWith(MarkupNumTailSteps(), exLen)
+                tails.Push(txt)
+            ctl['capend'].Add(tails)
+        } else {
+            caps := []
+            for id in MarkupStyles.CapOrder
+                caps.Push(MarkupStyles.Caps[id].Name)
+            ctl['capstart'].Add(caps), ctl['capend'].Add(caps)
+        }
+    }
+}
+
 ; WHAT the pallet is currently describing: the frame, the primary selected
 ; object, or — with nothing selected — the tool about to be used.  A borrowed
 ; tool reports the tool you get back, matching what the tool list highlights.
@@ -3899,7 +4234,7 @@ MarkupApplyTable() {
       , 'pen',       'color outline shadow thick head dash ends'
       , 'highlight', 'color shadow corner'
       , 'text',      'color outline shadow font'
-      , 'number',    'color outline shadow thick font head'
+      , 'number',    'color outline shadow thick font head corner ends'
       , 'callout',   'color fill outline shadow thick font corner dash'
       , 'blur',      ''
       , 'image',     'shadow'
@@ -3941,6 +4276,11 @@ MarkupSyncEnable() {
     ; The Head box means something different on a badge, so it says so.
     if ctl.Has('lblhead')
         try ctl['lblhead'].Text := (subj = 'number') ? 'Disc' : 'Head'
+
+    ; And the Ends row is the badge's TAIL: angle in the first box, length in
+    ; the second, and the swap button flips it through 180 degrees.
+    if ctl.Has('lblends')
+        try ctl['lblends'].Text := (subj = 'number') ? 'Tail' : 'Ends'
 }
 
 ; Reflect the current selection (or, with nothing selected, the defaults for the
@@ -3984,8 +4324,6 @@ MarkupSyncPallet() {
     corn := (o && o.HasProp('Corner')) ? o.Corner : (o ? 0 : st.Corner)
     hsc  := (o && o.HasProp('HeadScale')) ? o.HeadScale : MarkupCfg.ArrowHeadScale
     try ctl['dash'].Text     := MarkupDash(dash).Name
-    try ctl['capstart'].Text := MarkupCap(cs).Name
-    try ctl['capend'].Text   := MarkupCap(ce).Name
     try ctl['corner'].Text   := (corn < 0) ? 'auto' : MarkupNumText(corn)
 
     ; Head wears two hats.  On a badge it is the disc diameter in pixels, which
@@ -3998,6 +4336,32 @@ MarkupSyncPallet() {
     } else {
         MarkupSetHeadList('arrow')
         try ctl['head'].Text := MarkupNumText(hsc)
+    }
+
+    ; The Ends row wears two hats the same way.  A tip that was dragged freehand
+    ; lands between the rungs, so the off-ladder value is spliced into the list
+    ; rather than left to blank the box — a control showing nothing reads as a
+    ; bug, and a control showing a rounded lie is worse.
+    if (MarkupSubjectType() = 'number') {
+        ; Only a badge that HAS a tail is read for one.  Reading a tailless one
+        ; would materialise TailX/TailY as a side effect of merely selecting it,
+        ; and a sync must never edit the model.  A tailless badge shows the
+        ; defaults instead, which is what it would get if you switched it on.
+        if (o && MarkupNumHasTail(o)) {
+            MarkupNumPolar(o, &nang, &nrat)
+            nang := Round(nang), nrat := Round(nrat, 2), hasT := true
+        } else {
+            nang := Round(MarkupCfg.NumberAngle)
+            nrat := Round(MarkupCfg.NumberTail, 2), hasT := false
+        }
+        MarkupSetEndsList('number', MarkupExtraStep(MarkupNumAngleSteps(), nang)
+                                  , hasT ? MarkupExtraStep(MarkupNumTailSteps(), nrat) : '')
+        try ctl['capstart'].Text := MarkupNumText(nang)
+        try ctl['capend'].Text   := hasT ? MarkupNumText(nrat) : 'none'
+    } else {
+        MarkupSetEndsList('caps')
+        try ctl['capstart'].Text := MarkupCap(cs).Name
+        try ctl['capend'].Text   := MarkupCap(ce).Name
     }
 
     ; With a tool on loan the list highlights the tool you will GET BACK, not
@@ -4033,6 +4397,11 @@ MarkupFillStyleLists() {
             try ctl[key].Add(caps)
         }
     }
+    ; Both boxes now hold the cap ladder whatever they held a moment ago, so the
+    ; ladder state has to agree or the next sync would skip its reload and leave
+    ; a badge looking at arrowhead names.
+    MarkupState.EndsList := 'caps'
+    MarkupState.EndsExA  := '', MarkupState.EndsExB := ''
     if ctl.Has('dash') {
         try ctl['dash'].Delete()
         try ctl['dash'].Add(dashes)
@@ -4200,6 +4569,19 @@ MarkupPal_Num(prop, ctrl, *)   => MarkupApplyStyle(prop, Integer(ctrl.Text))
 ; here is the whole of the conversion, which is why a cap's id is defined as the
 ; lowercase of its name rather than as a separate field the user could get wrong.
 MarkupPal_Style(prop, ctrl, *) => MarkupApplyStyle(prop, StrLower(ctrl.Text))
+
+; The Ends boxes carry cap NAMES normally and a badge's tail numbers in Number
+; mode — see MarkupSetEndsList for why one row does both jobs.
+MarkupPal_Cap(which, ctrl, *) {
+    if (MarkupSubjectType() = 'number') {
+        if (which = 'CapStart')
+            MarkupApplyStyle('NumAngle', Float(ctrl.Text))
+        else
+            MarkupApplyStyle('NumTail', (ctrl.Text = 'none') ? 0 : Float(ctrl.Text))
+        return
+    }
+    MarkupApplyStyle(which, StrLower(ctrl.Text))
+}
 MarkupPal_Head(ctrl, *) {
     if (MarkupSubjectType() = 'number')
         MarkupApplyStyle('NumDia', (ctrl.Text = 'auto') ? 0 : Integer(ctrl.Text))
@@ -4221,10 +4603,21 @@ MarkupSwapEnds() {
         snip := guiSnips[hwnd]
         MarkupPushUndo(snip)
         for o in MarkupState.Sels {
+            ; On a badge the button means the other thing this row means: flip
+            ; the tail through 180 degrees.
+            if (o.Type = 'number') {
+                if MarkupNumHasTail(o) {
+                    MarkupNumPolar(o, &sang, &srat)
+                    MarkupNumSetTail(o, Mod(sang + 180, 360), srat)
+                }
+                continue
+            }
             tmp := o.CapStart
             o.CapStart := o.CapEnd, o.CapEnd := tmp
         }
         MarkupRender(snip)
+    } else if (MarkupSubjectType() = 'number') {
+        MarkupCfg.NumberAngle := Mod(MarkupCfg.NumberAngle + 180, 360)
     } else {
         st  := MarkupToolStyle(MarkupState.Tool)
         tmp := st.CapStart
@@ -4272,6 +4665,9 @@ MarkupSaveDefaults() {
         IniWrite(Format('{:06X}', MarkupCfg.HighlightColor)
                , path, 'Markup', 'HighlightColor')
         IniWrite(Integer(MarkupCfg.NumberDia), path, 'Markup', 'NumberDia')
+        IniWrite(MarkupNumText(MarkupCfg.NumberAngle), path, 'Markup', 'NumberAngle')
+        IniWrite(MarkupNumText(MarkupCfg.NumberTail),  path, 'Markup', 'NumberTail')
+        IniWrite(MarkupToolStyle('number').Corner, path, 'Markup', 'NumberCorner')
 
         for tool, prefix in Map('line', 'Line', 'arrow', 'Arrow'
                               , 'path', 'Path', 'pen',  'Pen') {
@@ -4345,8 +4741,16 @@ MarkupApplyStyle(prop, value) {
             ; Disc size is meaningless on anything but a badge, and writing it
             ; anyway would leave a stray property on every object in a mixed
             ; group.  Skip rather than pollute.
-            if (prop = 'NumDia' && o.Type != 'number')
+            if ((prop = 'NumDia' || prop = 'NumAngle' || prop = 'NumTail')
+                && o.Type != 'number')
                 continue
+            ; NumAngle and NumTail are a polar VIEW of TailX/TailY rather than
+            ; stored properties, so they go through the converter instead of
+            ; being written straight onto the object.
+            if (prop = 'NumAngle' || prop = 'NumTail') {
+                MarkupNumApplyTail(o, prop, value)
+                continue
+            }
             o.%prop% := value
             ; A number badge's disc IS its colour, so recolouring the stroke on
             ; one that has never been given a separate fill recolours the badge.
@@ -4379,7 +4783,9 @@ MarkupApplyStyle(prop, value) {
         case 'Outline':   MarkupCfg.Outline   := value
         case 'Shadow':    MarkupCfg.Shadow    := value
         case 'HeadScale': MarkupCfg.ArrowHeadScale := value
-        case 'NumDia':    MarkupCfg.NumberDia := value
+        case 'NumDia':    MarkupCfg.NumberDia   := value
+        case 'NumAngle':  MarkupCfg.NumberAngle := value
+        case 'NumTail':   MarkupCfg.NumberTail  := value
         ; These four are per TOOL, not per script — see MarkupToolStyle.  So
         ; setting a chevron end while the Line tool is active changes what Line
         ; draws next and leaves Arrow exactly as it was.
