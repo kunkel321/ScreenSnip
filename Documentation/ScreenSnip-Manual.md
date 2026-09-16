@@ -53,7 +53,7 @@ Six things it does that the built-in Windows tools don't:
 
 **It reads text out of the capture — three different ways.** Two OCR engines run locally: a fast built-in Windows one, and PaddleOCR for harder material. A third path sends the image to an AI vision model, which is the only one of the three that can see a table's *ruling lines*. All of them put their result on the clipboard.
 
-**Its annotations stay editable.** Arrows, boxes, numbered badges, text labels, highlighter, redaction blur — none of it is painted into the image. Every object stays selectable forever, so you can recolour an arrow you drew ten minutes ago, and the annotations follow the pixels they were drawn on when you pan, resize, rotate or flip the snip. See [section 10](#10-markup-annotating-a-snip).
+**Its annotations stay editable.** Arrows, boxes, numbered badges, text labels, highlighter, redaction blur, even the eraser — none of it is painted into the image. Every object stays selectable forever, so you can recolour an arrow you drew ten minutes ago, and the annotations follow the pixels they were drawn on when you pan, resize, rotate or flip the snip. The one tool that genuinely changes the image, Cut Out, is undoable too. See [section 10](#10-markup-annotating-a-snip).
 
 **It will cut your screenshot into a puzzle,** which is either the least necessary feature in the package or the best one, depending on the day. See [section 16](#16-games-the-puzzle-modules).
 
@@ -544,7 +544,7 @@ Annotations turn and flip with the image, with two exceptions on purpose: **text
 
 ## 10. Markup: annotating a snip
 
-`Resources\SnipMarkup.ahk` turns a snip into a drawing surface: arrows, boxes, circles, freehand pen, highlighter, text labels, numbered badges, speech callouts, blur/pixelate redaction, and pasted images.
+`Resources\SnipMarkup.ahk` turns a snip into a drawing surface: arrows, boxes, circles, freehand pen, highlighter, text labels, numbered badges, speech callouts, blur/pixelate redaction, and pasted images — plus three tools that work on the picture itself: an eraser, an eyedropper, and Cut Out for removing a strip from the middle of a snip.
 
 ![The markup pallet beside an annotated snip, showing several annotation types at once](Images/MarkupPalletAndSnip.png)
 
@@ -556,7 +556,9 @@ Annotations turn and flip with the image, with two exceptions on purpose: **text
 - Pan, resize-region, rotate, flip and straighten all just work. Annotations track the pixels they were drawn on rather than the window they happen to be in.
 - Annotations survive leaving markup mode. Press Esc, use the snip normally, then `Ctrl`+click any annotation to drop straight back in with that object selected.
 
-The one fixed rule is z-order between *kinds*: blur and pixelate are a pixel operation on the image and are composited before everything else, so **redaction is always underneath every other annotation**. Within the overlay, objects stack in the order you drew them, and Bring to Front / Send to Back reorder them.
+The one fixed rule is z-order between *kinds*: blur, pixelate and the eraser are operations on the image and are composited before everything else, so **redaction and erasing are always underneath every other annotation**. Within the overlay, objects stack in the order you drew them, and Bring to Front / Send to Back reorder them.
+
+**The exception is Cut Out.** Removing a strip from the middle of a picture brings the pixels on either side of it together, and no amount of redrawing from a list can express that — so Cut Out really does rebuild the frozen snapshot. It's still undoable, and the annotations are moved to match, but it's the one thing in markup that isn't just a layer. See [Cut Out](#cut-out) below.
 
 ### Getting in and out
 
@@ -588,18 +590,20 @@ Set `PalletAutoShow` to `0` if you know the letters and would rather not have a 
 
 | Pallet control | What it does |
 |---|---|
-| Tool list | The twelve tools, each with its key in brackets |
-| Colour swatches | Twelve colours. Click sets the stroke colour; `Ctrl`+click sets the *fill* colour |
+| Tool list | The fourteen tools, each with its key in brackets |
+| Colour swatches | Twelve colours. Click sets the stroke colour; `Ctrl`+click sets the *fill* colour. With the Eraser in hand, a click sets the snip's background colour instead |
+| Eyedropper button | Right of the swatches. Takes a colour from the snip or anywhere on screen — see [The eyedropper](#the-eyedropper). Same as `I` |
+| Picked swatch | Under the eyedropper button. Holds the last colour you took, and works like a thirteenth swatch |
 | Fill shape | Fill rectangles, ellipses and callouts with the fill colour |
 | Outline (legibility halo) | A thin contrasting halo drawn under the object — on by default |
 | Drop shadow | A hard offset shadow behind the object — off by default |
-| Width | Stroke width. Loaded with the frame's own wider ladder when the frame is selected |
+| Width | Stroke width. Loaded with the frame's own wider ladder when the frame is selected, and with the eraser's brush sizes when the Eraser is the current tool |
 | Font | Point size for Text and the numeral inside a Number badge |
 | Head / Disc | Arrowhead length as a multiple of stroke width — or, on a Number badge, the disc diameter in pixels (`auto` sizes it from the digits) |
 | Corner | Corner radius for Rectangle, Highlighter and Callout, and the elbow radius on a Path Arrow. `auto` keeps the look each type had before the setting existed |
 | Dash | Named dash pattern |
 | Ends | Start cap, a swap button, end cap |
-| Preview strip | A live sample drawn by the *same* routine the snip uses, so it can't lie to you |
+| Preview strip | A live sample drawn by the *same* routine the snip uses, so it can't lie to you. For the Eraser it shows the background colour at the brush width |
 | Undo / Redo / Delete | The obvious three |
 | Save as default | Writes the current style back to the INI as the new defaults |
 | Line styles… | Opens the arrowhead and dash editor — [section 11](#11-line-styles-arrowheads-and-dashes) |
@@ -614,7 +618,7 @@ This is the thing to internalise, because it's what keeps the feature free of a 
 
 The line-style properties are remembered **per tool**, not globally. Picking a chevron end while the Line tool is in hand doesn't quietly change what Arrow draws. The Highlighter likewise remembers its own colour separately from the stroke colour, so choosing cyan to highlight a paragraph won't repaint your next arrow.
 
-Controls that don't apply to the current tool or selection are **greyed out** rather than hidden — the pallet's layout stays put, so nothing jumps around as you switch tools. Blur has no stroke, so Width and Dash grey; a Number badge has no arrowhead, so the Head box relabels itself **Disc** and takes a pixel diameter instead.
+Controls that don't apply to the current tool or selection are **greyed out** rather than hidden — the pallet's layout stays put, so nothing jumps around as you switch tools. Blur has no stroke, so Width and Dash grey; the Eraser keeps only the swatches and Width; Cut Out has no style at all, so everything greys; a Number badge has no arrowhead, so the Head box relabels itself **Disc** and takes a pixel diameter instead.
 
 ### The tools
 
@@ -632,8 +636,10 @@ Controls that don't apply to the current tool or selection are **greyed out** ra
 | Number | `N` | Click | Auto-incrementing badge, 1, 2, 3… per snip |
 | Callout | `C` | Drag | Speech bubble with a draggable tail |
 | Blur | `B` | Drag | Redaction — see below |
+| Eraser | `W` | Drag / click | Paints the image back to the snip's background colour — `W` for wipe, since `E` is Ellipse. See below |
+| Cut Out | `X` | Drag | Removes a horizontal or vertical strip from the snip — see below |
 
-A click with no drag is discarded rather than leaving an invisible zero-size object behind, so click-empty-space-to-deselect still works exactly as you'd expect.
+A click with no drag is discarded rather than leaving an invisible zero-size object behind, so click-empty-space-to-deselect still works exactly as you'd expect. The Eraser is the one exception: a click with it takes out a single brush-sized dot, which is how you remove a speck.
 
 **Path Arrow** records corners as you drag: move across the current segment far enough (`PathTurnTolerance`) and an elbow is committed, so you draw an L or an S in one gesture instead of assembling segments. Elbows are rounded by `Corner`, interior segments get slide handles for nudging a run over, and `PathMaxSegments` caps how baroque it can get.
 
@@ -648,6 +654,61 @@ Drag with the Blur tool over anything you don't want to publish. `Pixelate` is o
 Because redaction is composited into the *image* stage rather than the overlay, it is glued to the pixels it hides. Pan the region and it stays over the right thing. It's also there in everything that leaves the snip: the clipboard, the saved file, an Imgur upload, and every OCR path. **The OCR engines see the redacted image, not the original** — which is what you want, but does mean you shouldn't blur something and then wonder why Copy Text skipped it.
 
 Blur rectangles are deliberately never rounded. Rounded corners on a redaction box leave a sliver of the original showing.
+
+### The eraser
+
+Drag with the Eraser (`W`) to paint the picture back to a plain background colour — for cleaning a stray cursor, a notification badge or a line of text out of a screenshot. A click without dragging erases one dot the size of the brush.
+
+It looks like it removes pixels, but an eraser stroke is really a stroke, kept in the list like everything else and composited in the same image stage as blur. That buys the same things blur has: it follows the pixels when you pan, rotate, flip or straighten, it's in everything you export, and the original is still in the frozen snapshot underneath until you close the snip. It only ever erases the *image* — annotations drawn over an erased area stay put, since they're already easy to delete on their own.
+
+Eraser strokes are deliberately **not selectable**. Erased area behaves like part of the picture: clicking it selects whatever is beneath, `Ctrl+A` and the marquee skip it. To take a stroke back, use `Ctrl+Z`.
+
+**The background colour belongs to the snip, not to each stroke.** Every erased area on a snip shows the same colour, and it can be chosen before *or* after you erase — change it and all the erasures change together. With the Eraser as the current tool, clicking a swatch sets it, and so does the eyedropper, which is the easy way to match the page you're erasing from: press `W`, press `I`, click the page's background, then erase. Changing the background colour is an undo step of its own.
+
+New snips start with `EraserColor` (white). **Save as default** writes the current snip's background colour back there.
+
+The brush size is `EraserWidth` in image pixels. While the Eraser is in hand the Width box switches to the eraser's own sizes — 4 to 64 — and `Ctrl`+wheel steps through them.
+
+### The eyedropper
+
+Press `I`, click the eyedropper button to the right of the swatches, or use **Markup → Pick Color…**. The cursor becomes a crosshair and a small tag follows it, filled with the colour under the cursor and showing its hex value; the picked swatch on the pallet previews it too.
+
+| While picking | |
+|---|---|
+| Click | Take the colour |
+| `Ctrl` + click | Take it as the *fill* colour |
+| `Esc` or right-click | Cancel |
+
+The click is intercepted, so it never reaches the window underneath — nothing starts dragging and no button in another program gets pressed.
+
+A taken colour does exactly what clicking a swatch would: it recolours the selection, sets the colour for the next object, or — with the Eraser in hand — sets the snip's background colour. It also stays in the picked swatch, so you can reuse it without sampling again. If the current tool has no colour (Blur, Cut Out), the colour is just kept in the swatch for later.
+
+**Where the colour comes from.** Over the snip being annotated, it's read from the snip's own image rather than from the screen, so it's the true pixel — unaffected by the snip's transparency setting or the selection handles. Anywhere else — including a window that happens to cover part of the snip — it's read from the screen, so you can borrow a colour from another program entirely.
+
+The crosshair is set for the whole desktop while you pick, and your normal cursors are put back afterwards — including if something goes wrong or ScreenSnip exits mid-pick.
+
+### Cut Out
+
+For removing the middle of something — the dull stretch of a long dialog, a column of a table you don't need. Press `X`, press at one edge of the strip you want gone, and drag to the other edge. The strip is shown darkened with a dashed line along each cut; a tooltip gives its size. Let go and it's gone, and the two sides close up.
+
+- **Direction follows the drag.** Mostly-vertical travel removes a horizontal strip; mostly-horizontal travel removes a vertical one. It keeps following as you drag, so a wobbly start sorts itself out.
+- **The window shrinks from the bottom or right.** Everything above or left of the cut stays exactly where it was on screen.
+- **It works on a rotated or flipped snip.** The strip is taken along the *picture's* rows or columns, which is what you'd expect: on a snip turned 90°, a strip that looks horizontal on screen is a column of the original.
+- **It won't take the whole image.** At least 8 px has to be left.
+- **It isn't available on a straightened snip.** A straight strip on screen would be a tilted strip of the original, and there are no whole rows to remove. Reset Straighten first.
+
+Cut Out is also on the **Markup** submenu as **Cut Out…**, which starts markup mode if it isn't on already.
+
+**What happens to your annotations.** They move with the picture:
+
+- Anything above or left of the strip doesn't move; anything below or right of it slides across to close the gap.
+- A line, arrow or box that *spans* the cut gets shorter, and still connects the same two things.
+- Anything entirely inside the strip marked something that no longer exists, so it's deleted. Numbered badges renumber to close the gap.
+- Text, number badges and pasted images are never squashed. They move as a whole according to where their centre is, and are deleted if their centre was inside the strip.
+
+**What happens to the snapshot.** The strip is removed across the *whole* frozen snapshot, including the spare margin around your capture — not just the part you can see. That keeps the snapshot a plain rectangle, so panning and resizing the region still work afterwards; they simply carry on across the seam.
+
+**Undo.** `Ctrl+Z` puts the strip back exactly, pixel for pixel, and moves the annotations back with it. It sits in the same undo history as everything else, so a cut and the arrow you drew after it undo in the right order. Only the removed strip is kept for this, not a copy of the whole snapshot. If you panned or resized the region after cutting, undo keeps that too, as closely as it can.
 
 ### Selecting, moving, restyling
 
@@ -683,7 +744,9 @@ The frame and the objects are mutually exclusive — selecting an object drops t
 
 `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`), up to `UndoDepth` steps, per snip. Undo works on whole-list snapshots rather than command objects: the objects are small plain records, so a deep copy is cheap, and a snapshot stack can't get out of step with the model the way a hand-written undo/redo pair can.
 
-**Clear All Markup** on the Markup submenu removes everything at once, and is itself undoable.
+Eraser strokes, a change of background colour, and Cut Out are all ordinary undo steps.
+
+**Clear All Markup** on the Markup submenu removes everything at once — annotations and erasures — and is itself undoable. It doesn't restore strips taken out with Cut Out; step back with `Ctrl+Z` for those.
 
 ### Images
 
@@ -691,7 +754,7 @@ The frame and the objects are mutually exclusive — selecting an object drops t
 
 ### What ends up in the exported image
 
-Everything except the editing chrome. Selection handles, the marquee, and the frame highlight are drawn into the *display* bitmap only — the clipboard, Save Image As, Imgur and every OCR path go through a separate build that leaves them out. You never have to deselect before copying.
+Everything except the editing chrome — erasures and cuts included. Selection handles, the marquee, the Cut Out preview, and the frame highlight are drawn into the *display* bitmap only — the clipboard, Save Image As, Imgur and every OCR path go through a separate build that leaves them out. You never have to deselect before copying.
 
 ---
 
@@ -747,7 +810,7 @@ Two conveniences worth knowing:
 
 ### Save as default
 
-The pallet's **Save as default** button writes the current styling back to `Data\snipSettings.ini` — colour, fill colour, thickness, font size, the three checkboxes, arrowhead scale, highlighter colour, badge diameter, and the per-tool dash and cap choices. It's a button rather than an automatic write because you don't want every experimental colour click rewriting your config.
+The pallet's **Save as default** button writes the current styling back to `Data\snipSettings.ini` — colour, fill colour, thickness, font size, the three checkboxes, arrowhead scale, highlighter colour, badge diameter, eraser width, the per-tool dash and cap choices, and — from the snip being annotated — the eraser's background colour. It's a button rather than an automatic write because you don't want every experimental colour click rewriting your config.
 
 One thing it saves is not in `[Markup]` at all: if a snip is being annotated, its **frame colour and width** are written to `[SnipWindow]`, where ScreenSnip and SettingsManager already look for them. The live values update too, so the next snip you capture wears the new frame without a restart. Snips already open keep the frame they have.
 
@@ -1132,7 +1195,7 @@ The **Felt** slider on the toolbar is a lightness dial for the table, not a colo
 |---|---|
 | Copy to Clipboard | |
 | Save Image As… | `Ctrl+S` |
-| **Markup** → | Annotate… · Show/Hide Tool Pallet · Paste Image · Add Image From File… · Swap Line Ends · Line Styles… · Select All · Edit Text… · Duplicate · Bring to Front · Send to Back · Delete Selected · Undo · Redo · Clear All Markup *(if `SnipMarkup.ahk` is present)* |
+| **Markup** → | Annotate… · Show/Hide Tool Pallet · Cut Out… · Pick Color… · Paste Image · Add Image From File… · Swap Line Ends · Line Styles… · Select All · Edit Text… · Duplicate · Bring to Front · Send to Back · Delete Selected · Undo · Redo · Clear All Markup *(if `SnipMarkup.ahk` is present)* |
 | **OCR** → | Copy Text (Windows) · Copy Text (PaddleOCR) · Copy Table (PaddleOCR) *(if `SnipOCR.ahk` is present)* — separator — Copy Text (AI) · Copy Table (AI) · Ask AI About Snip… *(if `SnipAI.ahk` is present)* |
 | **Imgur** → | Upload → [img] Tag · Imgur Uploader… *(if `SnipImgur.ahk` is present)* |
 | **Games** → | Slide Puzzle · Swap Puzzle *(if `SnipPuzzle.ahk` is present)* · Jigsaw Puzzle *(if `SnipJigsaw.ahk` is present)* |
@@ -1260,8 +1323,8 @@ Tool keys:
 | `E` | Ellipse | | `N` | Number |
 | `L` | Line | | `C` | Callout |
 | `A` | Arrow | | `B` | Blur |
-| `D` | Path Arrow | | | |
-| `P` | Pen | | | |
+| `D` | Path Arrow | | `W` | Eraser |
+| `P` | Pen | | `X` | Cut Out |
 
 Everything else:
 
@@ -1275,7 +1338,8 @@ Everything else:
 | `Shift` + click | Add / remove one object from the selection |
 | `Shift` + drag | Marquee-select |
 | `Ctrl` + click | Select an object (or the frame) without leaving your tool |
-| `Ctrl` + wheel | Step the selection's stroke width or point size |
+| `Ctrl` + wheel | Step the selection's stroke width or point size — or, with the Eraser in hand, the brush size |
+| `I` | Eyedropper. Click takes the colour, `Ctrl`+click takes it as fill, `Esc` or right-click cancels |
 | Arrow keys | Nudge the selection 1 px |
 | `Delete` | Delete the selection |
 | `Ctrl+D` | Duplicate |
@@ -1332,13 +1396,21 @@ A blur or pixelate rectangle is a *object*, not a destructive edit. Everything t
 
 Deliberate, and it takes ten seconds to get used to. During a markup session the image is drawing canvas, so the frame becomes the snip's drag-to-move handle — which, with a fat border, is the best handle an annotated snip has. Resizing from an edge wants `Alt` while a session is open, and the resize cursor stays hidden so it never promises something the drag won't do. Leave markup mode and bare edge-drag resizing comes back.
 
-### Blur always sits under everything else
+### Blur and the eraser always sit under everything else
 
-Redaction is composited into the image before the annotations are drawn on top, so you cannot put an arrow *under* a blur. That's a consequence of blur being a pixel operation and everything else being vector overlay, and it happens to be the order you want anyway.
+Redaction and erasing are composited into the image before the annotations are drawn on top, so you cannot put an arrow *under* a blur, and the eraser can't rub out an arrow. That's a consequence of both being operations on the picture and everything else being vector overlay, and it happens to be the order you want anyway — an annotation you don't want is one `Delete` away.
+
+### Erasing isn't redaction
+
+An eraser stroke is exported as solid colour, so what it covered is gone from anything you copy or save. But like blur, the original pixels are still in the live snip until you close it, and an anti-aliased brush edge blends into the picture rather than cutting cleanly. For hiding something sensitive, a filled rectangle or the Blur tool says more clearly that something was deliberately removed.
+
+### Cut Out is gone from the margin too
+
+The strip is removed across the whole frozen snapshot, not only the visible part, so you can't pan or resize back into what you cut — it isn't there any more. Undo is the way back. And Cut Out refuses to run on a straightened snip; Reset Straighten, cut, then straighten again.
 
 ### Snips never scale
 
-A snip is always 1:1 with the pixels that were captured. "Resize" always means re-cropping the frozen master, which is why growing stops dead at `CaptureAdjustMargin` and why a snip can't be stretched to twice its size. If another tool resizes a snip window from the outside, ScreenSnip re-crops to match rather than stretching — but it can only give you pixels the master actually has.
+A snip is always 1:1 with the pixels that were captured. "Resize" always means re-cropping the frozen master (Cut Out is the only thing that changes the master itself, and it removes pixels rather than stretching any), which is why growing stops dead at `CaptureAdjustMargin` and why a snip can't be stretched to twice its size. If another tool resizes a snip window from the outside, ScreenSnip re-crops to match rather than stretching — but it can only give you pixels the master actually has.
 
 ### Freeze Capture can't capture ScreenSnip's own menus
 
@@ -1646,6 +1718,8 @@ Defaults for new annotation objects, plus the module's own behaviour. Most of th
 | `NumberDia` | *(not in the file; `0`)* | Badge disc diameter in px. `0` = auto, sized from the digits |
 | `Pixelate` | `1` | `1` = pixelate, `0` = blur |
 | `BlurAmount` | `10` | Block size for pixelate, or downscale factor for blur |
+| `EraserWidth` | `16` | Eraser brush diameter in image pixels. The pallet steps 4–64; any whole number here is honoured |
+| `EraserColor` | `FFFFFF` | The background colour a *new* snip's erased areas show. Each snip then keeps its own, set with the swatches or the eyedropper while the Eraser is in hand |
 | `HandleSize` / `HandleColor` | `7` / `00A2FF` | Selection handles — display only, never exported |
 | `UndoDepth` | `60` | Undo steps kept per snip |
 | `PalletAutoShow` | `1` | `0` = hotkey-only operation, no pallet on screen until `F3` |

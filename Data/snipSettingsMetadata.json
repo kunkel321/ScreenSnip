@@ -1423,82 +1423,98 @@
   "Markup.LineDash": {
     "label": "LineDash",
     "help": "Dash pattern the Line tool starts with. Built-in names: solid, dash, dot, dashdot, dashdotdot. Any pattern you define in the [MarkupDashes] section can be named here too. An unrecognised name falls back to solid.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.LineCapStart": {
     "label": "LineCapStart",
     "help": "End treatment at the start of a new Line. Built-in names: none, arrow, stealth, hollow, chevron, bar, dot, circle, square, diamond, plus anything defined in [MarkupCaps]. An unrecognised name falls back to none.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.LineCapEnd": {
     "label": "LineCapEnd",
     "help": "End treatment at the finish of a new Line. Same names as LineCapStart. Setting this to arrow is the only thing that distinguishes the Arrow tool from the Line tool.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.ArrowDash": {
     "label": "ArrowDash",
     "help": "Dash pattern the Arrow tool starts with. Same names as LineDash.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.ArrowCapStart": {
     "label": "ArrowCapStart",
     "help": "End treatment at the tail of a new Arrow. Same names as LineCapStart. Set this as well as ArrowCapEnd for a double-headed arrow.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.ArrowCapEnd": {
     "label": "ArrowCapEnd",
     "help": "Arrowhead at the point of a new Arrow. Same names as LineCapStart. This is the one people change most often, and it is what makes the Arrow tool an arrow.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.PathDash": {
     "label": "PathDash",
     "help": "Dash pattern a new Path Arrow starts with. Same names as LineDash. Dashes follow the rounded elbows, so a dotted path reads well as a connector.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.PathCapStart": {
     "label": "PathCapStart",
     "help": "End treatment at the start of a new Path Arrow. Same names as LineCapStart. The cap angle follows the first segment, so it turns with the elbow it sits on.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.PathCapEnd": {
     "label": "PathCapEnd",
     "help": "End treatment at the finish of a new Path Arrow. Same names as LineCapStart. The cap angle follows the last segment.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.PenDash": {
     "label": "PenDash",
     "help": "Dash pattern a new freehand Pen stroke starts with. Same names as LineDash.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.PenCapStart": {
     "label": "PenCapStart",
     "help": "End treatment at the start of a new Pen stroke. Same names as LineCapStart. A freehand stroke is never trimmed back, so the cap is drawn over the first point rather than replacing part of the line.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.PenCapEnd": {
     "label": "PenCapEnd",
     "help": "End treatment at the finish of a new Pen stroke. Same names as LineCapStart. Useful for sketching a hand-drawn arrow.",
-    "type": "text"
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.RectCorner": {
     "label": "RectCorner",
     "help": "Corner radius in image pixels for new Rectangle and Highlighter objects. 0 gives square corners, which is how rectangles were drawn before this setting existed. The radius is capped at half the shorter side, so shrinking a shape turns it into a stadium instead of tying itself in knots.",
-    "type": "integer"
+    "type": "integer",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.CalloutCorner": {
     "label": "CalloutCorner",
     "help": "Corner radius in image pixels for new Callout bubbles. -1 means auto, which keeps the original radius derived from the font size so existing callouts look unchanged. Any other value is an explicit radius, capped at half the shorter side.",
-    "type": "integer"
+    "type": "integer",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.CtrlClickSelect": {
     "label": "CtrlClickSelect",
     "help": "Ctrl+click an annotation to select it without leaving the drawing tool you are using. Works on a snip that is not in a markup session too, which starts one. A Ctrl+click on bare image is ignored, so dragging a snip by its middle is unaffected. Set to 0 to disable.",
-    "type": "boolean"
+    "type": "boolean",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.StickyTool": {
     "label": "StickyTool",
     "help": "After a Ctrl+click borrows the Select tool, remember the drawing tool that was in hand and give it back at the next click on bare image. A click with no drag still just deselects, so only a drag actually draws. Set to 0 and the Ctrl+click is a one-way trip to Select.",
-    "type": "boolean"
+    "type": "boolean",
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.NumberTail": {
     "label": "Number tail length",
@@ -1506,21 +1522,24 @@
     "type": "float",
     "min": 0,
     "max": 3,
-    "decimals": 1
+    "decimals": 1,
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.NumberAngle": {
     "label": "Number tail angle",
     "help": "Direction a new Number badge's tail points, in degrees clockwise from east: 0 points right, 90 down, 180 left, 270 up. Ignored when Number tail length is 0. Drag a badge's tip handle to aim it freely, or hold Shift while dragging to snap to 15 degrees.",
     "type": "integer",
     "min": 0,
-    "max": 359
+    "max": 359,
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.NumberCorner": {
     "label": "Number tail bluntness",
     "help": "Rounding radius applied to the point of the teardrop, in image pixels. 0 gives a sharp tangent point; larger values blunt it into a rounded lobe. Clamped against the length of the tail's sides, so an oversized value cannot turn the shape inside out. Only affects badges that have a tail.",
     "type": "integer",
     "min": 0,
-    "max": 40
+    "max": 40,
+    "restart": "..\\ScreenSnip.exe"
   },
   "Markup.NumberPad": {
     "label": "Number badge padding",
@@ -1528,32 +1547,55 @@
     "type": "float",
     "min": 0,
     "max": 1,
-    "decimals": 2
+    "decimals": 2,
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.EraserWidth": {
+    "label": "EraserWidth",
+    "help": "Diameter of the Eraser brush (W), in image pixels.\n\nThe pallet's Width box steps through 4, 6, 8, 12, 16, 20, 24, 32, 40, 48 and 64 while the Eraser is the current tool, and Ctrl+Wheel does the same; any whole number typed here is honoured, it simply won't appear in that list.\n\nThis is the starting size each session. Changing it on the pallet and clicking 'Save as default' writes it back here.",
+    "type": "integer",
+    "min": 1,
+    "max": 200,
+    "default": "16",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "Markup.EraserColor": {
+    "label": "EraserColor",
+    "help": "The background colour a NEW snip's erased areas show.\n\nSix hex digits, RRGGBB, with no 0x or # prefix. FFFFFF (white) suits most screenshots of documents and web pages.\n\nEach snip keeps its own background colour once you start marking it up: with the Eraser as the current tool, clicking a swatch or taking a colour with the eyedropper (I) sets it for that snip, and every area already erased changes to match. That change is undoable. 'Save as default' writes the current snip's colour back here.",
+    "type": "color",
+    "validation": "^[0-9A-Fa-f]{6}$",
+    "default": "FFFFFF",
+    "restart": "..\\ScreenSnip.exe"
   },
   "MarkupCaps.Fletch": {
     "label": "Fletch",
-    "help": "Help for Fletch goes here",
-    "type": "text"
+    "help": "A user-defined arrowhead (line-end cap) named 'Fletch'. It appears in the Ends lists on the markup pallet.\n\nFormat:  kind, style, shrink, geometry\n  kind   - poly or circle\n  style  - fill (solid), open (outlined, closed) or line (stroked, not closed - how a chevron is made)\n  shrink - how far the line is pulled back from the tip, as a fraction of the head length, so the shaft doesn't poke through\n  poly   - then x,y pairs; the tip is 0,0 and +x runs back along the shaft, in multiples of the head length\n  circle - then centre and radius, in the same units\n\nEasiest to edit with the Line Styles editor on the pallet, which checks the definition with the same parser the loader uses. An entry this file can't parse is skipped rather than causing an error.",
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "MarkupCaps.Ring": {
     "label": "Ring",
-    "help": "Help for Ring goes here",
-    "type": "text"
+    "help": "A user-defined arrowhead (line-end cap) named 'Ring'. It appears in the Ends lists on the markup pallet.\n\nFormat:  kind, style, shrink, geometry\n  kind   - poly or circle\n  style  - fill (solid), open (outlined, closed) or line (stroked, not closed - how a chevron is made)\n  shrink - how far the line is pulled back from the tip, as a fraction of the head length, so the shaft doesn't poke through\n  poly   - then x,y pairs; the tip is 0,0 and +x runs back along the shaft, in multiples of the head length\n  circle - then centre and radius, in the same units\n\nEasiest to edit with the Line Styles editor on the pallet, which checks the definition with the same parser the loader uses. An entry this file can't parse is skipped rather than causing an error.",
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "MarkupDashes.Railroad": {
     "label": "Railroad",
-    "help": "Help for Railroad goes here",
-    "type": "text"
+    "help": "A user-defined dash pattern named 'Railroad'. It appears in the Dash list on the markup pallet.\n\nFormat:  on, off, on, off ...\nAlternating dash and gap lengths, measured in multiples of the stroke WIDTH, so a pattern keeps its proportions as lines get thicker. At least two numbers, all greater than zero.\n\nExample: 5, 2, 1, 2 is a long dash, a gap, a dot, a gap.\n\nEasiest to edit with the Line Styles editor on the pallet. An entry this file can't parse is skipped rather than causing an error.",
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "MarkupDashes.Sparse": {
     "label": "Sparse",
-    "help": "Help for Sparse goes here",
-    "type": "text"
+    "help": "A user-defined dash pattern named 'Sparse'. It appears in the Dash list on the markup pallet.\n\nFormat:  on, off, on, off ...\nAlternating dash and gap lengths, measured in multiples of the stroke WIDTH, so a pattern keeps its proportions as lines get thicker. At least two numbers, all greater than zero.\n\nExample: 5, 2, 1, 2 is a long dash, a gap, a dot, a gap.\n\nEasiest to edit with the Line Styles editor on the pallet. An entry this file can't parse is skipped rather than causing an error.",
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "MarkupDashes.Increment": {
     "label": "Increment",
-    "help": "Help for Increment goes here",
-    "type": "text"
+    "help": "A user-defined dash pattern named 'Increment'. It appears in the Dash list on the markup pallet.\n\nFormat:  on, off, on, off ...\nAlternating dash and gap lengths, measured in multiples of the stroke WIDTH, so a pattern keeps its proportions as lines get thicker. At least two numbers, all greater than zero.\n\nExample: 5, 2, 1, 2 is a long dash, a gap, a dot, a gap.\n\nEasiest to edit with the Line Styles editor on the pallet. An entry this file can't parse is skipped rather than causing an error.",
+    "type": "text",
+    "restart": "..\\ScreenSnip.exe"
   },
   "StickyNote.Enabled": {
     "label": "Send to Sticky Note",
@@ -1562,13 +1604,15 @@
     "options": [
       "0=Disabled",
       "1=Enabled"
-    ]
+    ],
+    "restart": "..\\ScreenSnip.exe"
   },
   "StickyNote.ProcessName": {
     "label": "Sticky Notes program",
     "help": "Used only to word the confirmation tooltip - the handoff itself works whether or not this matches. Set it to your Sticky Notes executable so ScreenSnip can tell you when Sticky Notes is not running. Leave blank to skip the check.",
     "type": "file",
-    "filter": "Executables (*.exe)|*.exe"
+    "filter": "Executables (*.exe)|*.exe",
+    "restart": "..\\ScreenSnip.exe"
   },
   "StickyNote.ShowTip": {
     "label": "Confirm with a tooltip",
@@ -1577,13 +1621,15 @@
     "options": [
       "0=Disabled",
       "1=Enabled"
-    ]
+    ],
+    "restart": "..\\ScreenSnip.exe"
   },
   "StickyNote.TipMs": {
     "label": "Tooltip duration (ms)",
     "help": "How long the confirmation tooltip stays up. The longer 'Sticky Notes may not be running' warning shows for twice this, since it has more to read.",
     "type": "integer",
     "min": 0,
-    "max": 2250
+    "max": 2250,
+    "restart": "..\\ScreenSnip.exe"
   }
 }

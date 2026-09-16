@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 9-6-2026
+; Version date: 9-17-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -1919,7 +1919,8 @@ BuildDisplayBitmap(snip) {
     ; See the header of Resources\SnipMarkup.ahk for why the compose is split.
     if (IsSet(MarkupCfg) && snip.HasProp('Markup')) {
         markupImgFn := 'MarkupComposeImage'
-        %markupImgFn%(snip, work)
+        if %markupImgFn%(snip, work)          ; true = it drew on work (erase/blur)
+            work := SnipFreshBitmap(work)
     }
 
     ; Flips first — lossless, exact.
@@ -1966,7 +1967,8 @@ BuildSaveBitmap(snip, wantTransparent) {
         return 0
     if (IsSet(MarkupCfg) && snip.HasProp('Markup')) {   ; markup stage 1 — redaction
         markupImgFn := 'MarkupComposeImage'
-        %markupImgFn%(snip, work)
+        if %markupImgFn%(snip, work)          ; true = it drew on work (erase/blur)
+            work := SnipFreshBitmap(work)
     }
     if snip.FlipH
         DllCall('gdiplus\GdipImageRotateFlip', 'UPtr', work, 'Int', 4)   ; horizontal
@@ -2046,8 +2048,39 @@ SaveSnipAs(hwnd := 0) {
         MsgBox('Save failed (code ' status ').`n`nThe folder may be read-only, or the format unsupported.', appName, 4096)
 }
 
+; Swap a bitmap for a byte-identical copy that has never had a Graphics opened on
+; it, disposing the original.  Returns the copy (or the original if the copy
+; couldn't be made).
+;
+; WHY: a GDI+ quirk.  Once GdipGetImageGraphicsContext has been called on a
+; bitmap, GdipImageRotateFlip can turn the bitmap's pixels but a Graphics opened
+; on it AFTERWARDS still clips to the pre-rotation width and height.  The
+; display pipeline hits exactly that on a 90/270 snip: markup's image stage
+; (Eraser, Blur) draws on `work`, the cardinal rotate turns `work` in place, and
+; the overlay stage then draws every annotation on that same object — so shapes
+; were cut off wherever the rotated image was longer than the original.  A snip
+; with no erasure or blur never opened a Graphics before the rotate, which is
+; why the glitch only appeared after erasing.  A fresh clone has no such
+; history.
+SnipFreshBitmap(pBitmap) {
+    DllCall('gdiplus\GdipGetImageWidth',       'UPtr', pBitmap, 'UInt*', &w := 0)
+    DllCall('gdiplus\GdipGetImageHeight',      'UPtr', pBitmap, 'UInt*', &h := 0)
+    DllCall('gdiplus\GdipGetImagePixelFormat', 'UPtr', pBitmap, 'Int*',  &fmt := 0)
+    DllCall('gdiplus\GdipCloneBitmapAreaI', 'Int', 0, 'Int', 0, 'Int', w, 'Int', h
+          , 'Int', fmt, 'UPtr', pBitmap, 'UPtr*', &pNew := 0)
+    if !pNew
+        return pBitmap
+    GDIp.DisposeImage(pBitmap)
+    return pNew
+}
+
 ; Rebuild a snip's picture + window from its frozen master and current state.
-RenderSnip(snip) {
+; anchor 'center' (the default) grows or shrinks the window about its middle,
+; which is right for rotate and for the arrow-key region resize.  'topleft'
+; pins the window's top-left corner instead — Cut Out uses it, so everything
+; above and left of the removed strip stays exactly where it was on screen and
+; only the far edge moves in.
+RenderSnip(snip, anchor := 'center') {
     global Bevel3D, Bevel3DMaxThickness
     bw   := SnipBorderW(snip), bcol := SnipBorderColor(snip)
     g    := snip.GuiObj
@@ -2100,13 +2133,18 @@ RenderSnip(snip) {
 
     ; Keep the window centered on its current physical position. For a pan
     ; (size unchanged) this is a no-op move; for resize/rotate it grows or
-    ; shrinks symmetrically around the current center.
+    ; shrinks symmetrically around the current center.  All physical pixels:
+    ; GetWindowRect and SetWindowPos both speak them, so no DPI factor enters.
     rect := Buffer(16, 0)
     DllCall('GetWindowRect', 'Ptr', hwnd, 'Ptr', rect)
     curL := NumGet(rect, 0, 'Int'), curT := NumGet(rect,  4, 'Int')
     curR := NumGet(rect, 8, 'Int'), curB := NumGet(rect, 12, 'Int')
-    centerX := (curL + curR) // 2,  centerY := (curT + curB) // 2
-    newX := centerX - totalW // 2,  newY := centerY - totalH // 2
+    if (anchor = 'topleft') {
+        newX := curL, newY := curT
+    } else {
+        centerX := (curL + curR) // 2,  centerY := (curT + curB) // 2
+        newX := centerX - totalW // 2,  newY := centerY - totalH // 2
+    }
 
     if showBorder {
         g.BackColor := Format('0x{:06X}', bcol)
@@ -2401,6 +2439,295 @@ ResizeSnipRegion(dw, dh, hwnd := 0) {
         return
     }
     RenderSnip(snip)
+}
+
+; ==============================================================================
+; CUT OUT  (remove a strip from the frozen master)
+; ==============================================================================
+; The one operation in ScreenSnip that changes the master's PIXELS rather than
+; how they're viewed.  A strip is removed across the FULL width (or height) of
+; the master — margin included, not just the visible crop — so the master stays
+; a plain rectangle and pan / region-resize keep working across the seam.
+;
+; These functions own only the pixel surgery and the core's own bookkeeping
+; (MasterW/H, Crop, SkewPivot).  The tool, the preview, the markup-object remap
+; and undo all live in Resources\SnipMarkup.ahk.  Nothing here has any UI, and
+; nothing here is called unless that module is present.
+;
+; Units: everything is MASTER pixels.  A snip's display is 1:1 with the master
+; today, but the caller converts screen positions through the markup matrix
+; rather than assuming so, which keeps this correct if a scale stage is ever
+; added to the render pipeline.
+;
+; Undo is cheap because a cut returns a RECORD holding just the removed strip:
+;   { Axis, Pos, Size, Strip, CropBefore, CropAfter, PivotBefore, PivotAfter }
+; Re-inserting that strip at Pos restores the master byte-for-byte, as long as
+; cuts are undone in reverse order — which the markup undo stack guarantees.
+;
+; Axis 'Y' removes ROWS pos..pos+size-1 (a horizontal strip in the master);
+; axis 'X' removes COLUMNS.
+
+; Where a master coordinate lands once [a, a+size) has been removed.  Points
+; before the strip are untouched, points inside it collapse onto the seam, and
+; points after it slide back by the strip's size.  One rule serves the crop, the
+; straighten pivot and every markup object.
+SnipCutMap(p, a, size) {
+    if (p <= a)
+        return p
+    return (p < a + size) ? a : p - size
+}
+
+; A new blank bitmap in the given pixel format, at screen DPI like every other
+; bitmap the pipeline makes.
+SnipNewBitmap(w, h, fmt) {
+    DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', w, 'Int', h
+          , 'Int', 0, 'Int', fmt, 'Ptr', 0, 'UPtr*', &p := 0)
+    if p {
+        dpi := A_ScreenDPI + 0.0
+        DllCall('gdiplus\GdipBitmapSetResolution', 'UPtr', p, 'Float', dpi, 'Float', dpi)
+    }
+    return p
+}
+
+; The format to build replacement masters in.  Keeping the master's own format
+; means the bytes copy across unconverted (and a 24-bit master stays 24-bit, so
+; memory doesn't grow a third).  Anything unusual — indexed, 16-bit, 48-bit —
+; falls back to 32bpp ARGB, which GDI+ will convert into on lock.
+SnipCutFormat(pBitmap) {
+    DllCall('gdiplus\GdipGetImagePixelFormat', 'UPtr', pBitmap, 'Int*', &fmt := 0)
+    switch fmt {
+        case 0x21808, 0x22009, 0x26200A:     ; 24bppRGB, 32bppRGB, 32bppARGB
+            return fmt
+    }
+    return 0x26200A
+}
+
+; Copy a w×h block of pixels from one bitmap to another with LockBits and a raw
+; memory move.  Deliberately NOT GdipDrawImage: a draw goes through
+; interpolation and pixel-offset rules, and the one thing a cut must never do is
+; resample.  This is a byte copy, so the kept pixels are bit-identical.
+; Both bitmaps are locked in the same format fmt.  src and dst must differ
+; (GDI+ can't hold two locks on one bitmap).  A zero-area block is a no-op.
+SnipCopyPixels(pSrc, sx, sy, w, h, pDst, dx, dy, fmt) {
+    if (w <= 0 || h <= 0)
+        return true
+    bpp := ((fmt >> 8) & 0xFF) // 8
+    ; BitmapData: Width, Height, Stride, PixelFormat (4 Ints) + Scan0 + Reserved.
+    bdSize := 16 + 2 * A_PtrSize
+    rs := Buffer(16, 0), rd := Buffer(16, 0)
+    NumPut('Int', sx, 'Int', sy, 'Int', w, 'Int', h, rs)
+    NumPut('Int', dx, 'Int', dy, 'Int', w, 'Int', h, rd)
+    bs := Buffer(bdSize, 0), bd := Buffer(bdSize, 0)
+    if DllCall('gdiplus\GdipBitmapLockBits', 'UPtr', pSrc, 'Ptr', rs, 'UInt', 1   ; ReadOnly
+             , 'Int', fmt, 'Ptr', bs)
+        return false
+    if DllCall('gdiplus\GdipBitmapLockBits', 'UPtr', pDst, 'Ptr', rd, 'UInt', 2   ; WriteOnly
+             , 'Int', fmt, 'Ptr', bd) {
+        DllCall('gdiplus\GdipBitmapUnlockBits', 'UPtr', pSrc, 'Ptr', bs)
+        return false
+    }
+    strideS := NumGet(bs, 8, 'Int'),  strideD := NumGet(bd, 8, 'Int')
+    scanS   := NumGet(bs, 16, 'UPtr'), scanD  := NumGet(bd, 16, 'UPtr')
+    rowBytes := w * bpp
+    ; One move for the whole block when both strides are exactly the row size
+    ; (always true at 32bpp); otherwise row by row, which also copes with 24bpp
+    ; padding and a bottom-up (negative) stride.
+    if (strideS = rowBytes && strideD = rowBytes)
+        DllCall('RtlMoveMemory', 'Ptr', scanD, 'Ptr', scanS, 'UPtr', rowBytes * h)
+    else
+        Loop h
+            DllCall('RtlMoveMemory', 'Ptr', scanD + (A_Index - 1) * strideD
+                  , 'Ptr', scanS + (A_Index - 1) * strideS, 'UPtr', rowBytes)
+    DllCall('gdiplus\GdipBitmapUnlockBits', 'UPtr', pDst, 'Ptr', bd)
+    DllCall('gdiplus\GdipBitmapUnlockBits', 'UPtr', pSrc, 'Ptr', bs)
+    return true
+}
+
+; Small record helpers.  Plain functions rather than fat arrows, because an
+; object literal straight after => is too easy to misread as a block body.
+SnipCropCopy(c) {
+    return { X: c.X, Y: c.Y, W: c.W, H: c.H }
+}
+SnipCropSame(c, r) {
+    return (c.X = r.X && c.Y = r.Y && c.W = r.W && c.H = r.H)
+}
+SnipPivotCopy(snip) {
+    return { X: snip.SkewPivotX, Y: snip.SkewPivotY }
+}
+
+; Keep a crop span [s, e) at least minSz long and inside [0, full].  Only a REDO
+; can need this (the tool itself refuses a cut that would leave less than
+; MINSZ), when the crop has since been panned to sit mostly inside the strip.
+SnipCutFitSpan(&s, &e, full, minSz) {
+    minSz := Min(minSz, full)
+    s := Max(0, Min(s, full)), e := Max(0, Min(e, full))
+    if (e - s < minSz) {
+        e := Min(full, s + minSz)
+        s := Max(0, e - minSz)
+    }
+}
+
+; Remove a strip.  Returns the undo record, or 0 if nothing was changed (bad
+; arguments, a straightened snip, or an allocation failure — in every failure
+; case the snip is left exactly as it was).  The caller re-renders.
+;
+; Refuses while Straighten is active: with Skew ≠ 0 a straight strip on screen
+; is a TILTED strip in the master, and there are no whole rows to remove.
+SnipCutBand(snip, axis, pos, size) {
+    static MINSZ := 8                       ; same floor as ResizeSnipRegion
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap) || (snip.Skew != 0)
+        return 0
+    src  := snip.SrcBitmap
+    W    := snip.MasterW, H := snip.MasterH
+    full := (axis = 'X') ? W : H
+    pos  := Integer(pos), size := Integer(size)
+    if (size < 1 || pos < 0 || pos + size > full || full - size < 1)
+        return 0
+    if !(snip.HasProp('SkewPivotX') && snip.HasProp('SkewPivotY'))
+        snip.SkewPivotX := snip.Crop.X + snip.Crop.W / 2
+      , snip.SkewPivotY := snip.Crop.Y + snip.Crop.H / 2
+
+    fmt := SnipCutFormat(src)
+    if (axis = 'X') {
+        newM  := SnipNewBitmap(W - size, H, fmt)
+        strip := SnipNewBitmap(size, H, fmt)
+    } else {
+        newM  := SnipNewBitmap(W, H - size, fmt)
+        strip := SnipNewBitmap(W, size, fmt)
+    }
+    ok := (newM && strip)
+    if ok {
+        if (axis = 'X') {
+            ok := SnipCopyPixels(src, 0, 0, pos, H, newM, 0, 0, fmt)
+               && SnipCopyPixels(src, pos + size, 0, W - pos - size, H, newM, pos, 0, fmt)
+               && SnipCopyPixels(src, pos, 0, size, H, strip, 0, 0, fmt)
+        } else {
+            ok := SnipCopyPixels(src, 0, 0, W, pos, newM, 0, 0, fmt)
+               && SnipCopyPixels(src, 0, pos + size, W, H - pos - size, newM, 0, pos, fmt)
+               && SnipCopyPixels(src, 0, pos, W, size, strip, 0, 0, fmt)
+        }
+    }
+    if !ok {
+        if newM
+            GDIp.DisposeImage(newM)
+        if strip
+            GDIp.DisposeImage(strip)
+        return 0
+    }
+
+    rec := { Axis: axis, Pos: pos, Size: size, Strip: strip
+           , CropBefore: SnipCropCopy(snip.Crop), PivotBefore: SnipPivotCopy(snip) }
+
+    GDIp.DisposeImage(src)
+    snip.SrcBitmap := newM
+    if (axis = 'X')
+        snip.MasterW := W - size
+    else
+        snip.MasterH := H - size
+
+    c := snip.Crop
+    if (axis = 'X') {
+        s := SnipCutMap(c.X, pos, size), e := SnipCutMap(c.X + c.W, pos, size)
+        SnipCutFitSpan(&s, &e, snip.MasterW, MINSZ)
+        c.X := s, c.W := e - s
+        snip.SkewPivotX := SnipCutMap(snip.SkewPivotX, pos, size)
+    } else {
+        s := SnipCutMap(c.Y, pos, size), e := SnipCutMap(c.Y + c.H, pos, size)
+        SnipCutFitSpan(&s, &e, snip.MasterH, MINSZ)
+        c.Y := s, c.H := e - s
+        snip.SkewPivotY := SnipCutMap(snip.SkewPivotY, pos, size)
+    }
+    rec.CropAfter  := SnipCropCopy(c)
+    rec.PivotAfter := SnipPivotCopy(snip)
+    return rec
+}
+
+; Put a removed strip back.  The record's Strip is freed on success (a redo
+; re-cuts and gets a fresh one), so a record never holds pixels it doesn't need.
+;
+; The crop: if nothing has moved it since the cut, it goes back EXACTLY — that
+; matters, because the cut collapsed information (a crop edge on the seam could
+; have come from anywhere inside the strip).  If the user panned or resized in
+; between, the inverse rule is applied to wherever it is now, and a crop edge
+; sitting on the seam is read as including the strip.
+SnipUncutBand(snip, rec) {
+    if !(rec.Strip && snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return false
+    src := snip.SrcBitmap
+    W   := snip.MasterW, H := snip.MasterH
+    pos := rec.Pos, size := rec.Size
+    fmt := SnipCutFormat(src)
+    axis := rec.Axis
+    if (axis = 'X') {
+        if (pos > W)
+            return false
+        newM := SnipNewBitmap(W + size, H, fmt)
+        ok := newM
+           && SnipCopyPixels(src, 0, 0, pos, H, newM, 0, 0, fmt)
+           && SnipCopyPixels(rec.Strip, 0, 0, size, H, newM, pos, 0, fmt)
+           && SnipCopyPixels(src, pos, 0, W - pos, H, newM, pos + size, 0, fmt)
+    } else {
+        if (pos > H)
+            return false
+        newM := SnipNewBitmap(W, H + size, fmt)
+        ok := newM
+           && SnipCopyPixels(src, 0, 0, W, pos, newM, 0, 0, fmt)
+           && SnipCopyPixels(rec.Strip, 0, 0, W, size, newM, 0, pos, fmt)
+           && SnipCopyPixels(src, 0, pos, W, H - pos, newM, 0, pos + size, fmt)
+    }
+    if !ok {
+        if newM
+            GDIp.DisposeImage(newM)
+        return false
+    }
+
+    c := snip.Crop
+    exact := SnipCropSame(c, rec.CropAfter)
+    GDIp.DisposeImage(src)
+    snip.SrcBitmap := newM
+    if (axis = 'X')
+        snip.MasterW := W + size
+    else
+        snip.MasterH := H + size
+
+    if exact {
+        b := rec.CropBefore
+        c.X := b.X, c.Y := b.Y, c.W := b.W, c.H := b.H
+    } else if (axis = 'X') {
+        e  := c.X + c.W
+        c.X := (c.X > pos) ? c.X + size : c.X
+        c.W := ((e >= pos) ? e + size : e) - c.X
+    } else {
+        e  := c.Y + c.H
+        c.Y := (c.Y > pos) ? c.Y + size : c.Y
+        c.H := ((e >= pos) ? e + size : e) - c.Y
+    }
+
+    pv := rec.PivotAfter
+    if (snip.SkewPivotX = pv.X && snip.SkewPivotY = pv.Y) {
+        snip.SkewPivotX := rec.PivotBefore.X, snip.SkewPivotY := rec.PivotBefore.Y
+    } else if (axis = 'X') {
+        snip.SkewPivotX += (snip.SkewPivotX > pos) ? size : 0
+    } else {
+        snip.SkewPivotY += (snip.SkewPivotY > pos) ? size : 0
+    }
+
+    GDIp.DisposeImage(rec.Strip)
+    rec.Strip := 0
+    return true
+}
+
+; Redo a cut from its record.  Re-cutting is deterministic, so this simply runs
+; SnipCutBand again and refreshes the record from the result.
+SnipRecutBand(snip, rec) {
+    fresh := SnipCutBand(snip, rec.Axis, rec.Pos, rec.Size)
+    if !fresh
+        return false
+    if rec.Strip
+        GDIp.DisposeImage(rec.Strip)
+    for k in ['Strip', 'CropBefore', 'CropAfter', 'PivotBefore', 'PivotAfter']
+        rec.%k% := fresh.%k%
+    return true
 }
 
 ; Virtual-desktop bounds (all monitors), in physical pixels. Used to clamp the

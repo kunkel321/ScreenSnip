@@ -1,6 +1,6 @@
 ; ==============================================================================
 ; SnipMarkup.ahk  —  annotation / markup layer for ScreenSnip
-;                       Version Date: 9-6-2026
+;                       Version Date: 9-17-2026
 ; ==============================================================================
 ;
 ; An optional add-on on the same contract as SnipOCR / SnipAI / SnipImgur /
@@ -185,6 +185,13 @@ class MarkupCfg {
     static Pixelate   := Integer(SnipCfg('Markup', 'Pixelate', 1)) ? true : false
     static BlurAmount := Integer(SnipCfg('Markup', 'BlurAmount', 10))
 
+    ; Eraser.  EraserWidth is the brush diameter in master pixels.  EraserColor
+    ; is what a NEW snip's erased areas show; each snip then keeps its own
+    ; background colour (see MarkupEraseColorOf), set with the swatches or the
+    ; eyedropper while the Eraser is the current tool.
+    static EraserWidth := Integer(SnipCfg('Markup', 'EraserWidth', 16))
+    static EraserColor := SnipCfgHex('Markup', 'EraserColor', 0xFFFFFF)
+
     ; Selection chrome.  Drawn into the DISPLAY bitmap only, never into the save
     ; or clipboard bitmap (see MarkupComposeOverlay's wantChrome argument).
     static HandleSize  := Integer(SnipCfg('Markup', 'HandleSize', 7))
@@ -231,6 +238,16 @@ class MarkupState {
     static PalOwner := 0          ; which snip PalX/PalY were remembered for
     static Dragging := false
     static Band     := 0          ; live rubber-band rect (display coords) or 0
+    static CutBand  := 0          ; live Cut Out strip {Axis, A, B} (MASTER coords) or 0
+
+    ; Eyedropper.  Picked is the last sampled colour ('' until the first pick),
+    ; shown in the swatch under the eyedropper button.  The other four only
+    ; mean anything while a pick is running — see MarkupEyedropper.
+    static Picked     := ''
+    static Picking    := false
+    static PickClick  := false
+    static PickCtrl   := false
+    static PickCancel := false
     static Ctl      := Map()      ; pallet control name → control object
     static ThickList := ''        ; which ladder the Width box is loaded with
     static HeadList  := 'arrow'   ; which ladder the Head box is loaded with
@@ -342,7 +359,8 @@ MarkupSelectAll(hwnd := 0) {
     MarkupState.Sels      := []
     MarkupState.BorderSel := false
     for o in snip.Markup.Objs
-        MarkupState.Sels.Push(o)
+        if (o.Type != 'erase')                  ; erasures are image, not objects
+            MarkupState.Sels.Push(o)
     MarkupSyncPallet()
     MarkupRender(snip)
 }
@@ -439,6 +457,8 @@ MarkupBuildMenu() {
     m := Menu()
     m.Add('Annotate…`tM',              MarkupMenu_Handler)
     m.Add('Show/Hide Tool Pallet`tF3', MarkupMenu_Handler)
+    m.Add('Cut Out…`tX',               MarkupMenu_Handler)
+    m.Add('Pick Color…`tI',            MarkupMenu_Handler)
     m.Add('')
     m.Add('Paste Image`tCtrl+V',       MarkupMenu_Handler)
     m.Add('Add Image From File…',      MarkupMenu_Handler)
@@ -465,6 +485,8 @@ MarkupMenu_Handler(ItemName, ItemPos, *) {
     switch StrSplit(ItemName, "`t")[1] {
         case 'Annotate…':              MarkupBegin(hwnd)
         case 'Show/Hide Tool Pallet': MarkupPalletMenuItem(hwnd)
+        case 'Cut Out…':               MarkupCutOutMenu(hwnd)
+        case 'Pick Color…':            MarkupPickMenu(hwnd)
         case 'Paste Image':            MarkupPasteImage(hwnd)
         case 'Add Image From File…':   MarkupImageFromFile(hwnd)
         case 'Swap Line Ends':         MarkupSwapEnds()
@@ -494,9 +516,12 @@ MarkupMenu_Handler(ItemName, ItemPos, *) {
 ; to reason about who owns it, and the pool is disposed once when the snip
 ; closes.  Deleting an image object leaves its slot in the pool (a few bytes and
 ; one bitmap) rather than invalidating indices held by older snapshots.
+; CutLog / CutsApplied are Cut Out's pixel history — see the CUT OUT section.
 MarkupEnsure(snip) {
     if !snip.HasProp('Markup')
-        snip.Markup := { Objs: [], Undo: [], Redo: [], NextNum: 1, Images: [] }
+        snip.Markup := { Objs: [], Undo: [], Redo: [], NextNum: 1, Images: []
+                       , CutLog: [], CutsApplied: 0
+                       , EraseColor: MarkupCfg.EraserColor }
     return snip.Markup
 }
 
@@ -551,6 +576,11 @@ MarkupEnd(leaveTip := true) {
 ; The escalation is: deselect → back to the Select tool → leave markup mode →
 ; (only then) close the snip. That gives a panic key that never destroys work.
 MarkupEscape(hwnd) {
+    ; A running eyedropper owns Esc: it cancels the pick and nothing else.
+    if MarkupState.Picking {
+        MarkupState.PickCancel := true
+        return true
+    }
     if !MarkupState.Active
         return false
     if (MarkupState.Active != hwnd)
@@ -614,6 +644,11 @@ MarkupOnSnipClosed(snip, hwnd) {
     for pImg in snip.Markup.Images
         if pImg
             GDIp.DisposeImage(pImg)
+    ; So are the strips Cut Out kept for undo.
+    if snip.Markup.HasProp('CutLog')
+        for rec in snip.Markup.CutLog
+            if rec.Strip
+                GDIp.DisposeImage(rec.Strip), rec.Strip := 0
     snip.DeleteProp('Markup')
 }
 
@@ -800,26 +835,43 @@ MarkupSnapshot(mk, snip) {
     for o in mk.Objs
         out.Push(MarkupCloneObj(o))
     return { Objs: out, NextNum: mk.NextNum
-           , BorderColor: SnipBorderColor(snip), BorderW: SnipBorderW(snip) }
+           , BorderColor: SnipBorderColor(snip), BorderW: SnipBorderW(snip)
+           , Cuts: mk.HasProp('CutsApplied') ? mk.CutsApplied : 0
+           , EraseColor: MarkupEraseColorOf(snip) }
 }
 
 ; Restoring the frame goes through SetSnipBorder rather than a bare assignment,
 ; because putting a width back means resizing the window — and SetSnipBorder
 ; returns early when nothing actually differs, so the common undo (objects only)
 ; costs one comparison.
+; Returns true when the snip's PIXELS changed (a Cut Out was undone or redone),
+; which means the window has to change size — the caller then goes the long
+; way round through RenderSnip instead of the cheap MarkupRender.
+;
+; The cut count is sought BEFORE the objects are swapped in, though either order
+; works: a snapshot's objects are already in the coordinates that belong to its
+; cut count, so no object remap is ever run backwards.  That is the whole reason
+; Cut Out's undo is small — only the pixels need an inverse.
 MarkupRestoreSnapshot(snip, snap) {
     mk := snip.Markup
+    geo := snap.HasProp('Cuts') ? MarkupCutSeek(snip, snap.Cuts) : false
     mk.Objs := snap.Objs, mk.NextNum := snap.NextNum
+    if snap.HasProp('EraseColor')
+        mk.EraseColor := snap.EraseColor
     if snap.HasProp('BorderW')
         SetSnipBorder(snip.GuiObj.Hwnd, snap.BorderColor, snap.BorderW)
+    return geo
 }
 
 MarkupPushUndo(snip) {
     mk := MarkupEnsure(snip)
     mk.Undo.Push(MarkupSnapshot(mk, snip))
-    if (mk.Undo.Length > MarkupCfg.UndoDepth)
+    if (mk.Undo.Length > MarkupCfg.UndoDepth) {
         mk.Undo.RemoveAt(1)
+        MarkupCutFreeFloor(mk)         ; strips no snapshot can reach any more
+    }
     mk.Redo := []                      ; a new edit invalidates the redo branch
+    MarkupCutPruneRedo(mk)             ; ...including any undone cuts
 }
 
 MarkupUndo(hwnd := 0) {
@@ -833,10 +885,13 @@ MarkupUndo(hwnd := 0) {
         return
     mk := snip.Markup
     mk.Redo.Push(MarkupSnapshot(mk, snip))
-    MarkupRestoreSnapshot(snip, mk.Undo.Pop())
+    geo := MarkupRestoreSnapshot(snip, mk.Undo.Pop())
     MarkupState.Sel := 0
     MarkupSyncPallet()
-    MarkupRender(snip)
+    if geo
+        RenderSnip(snip, 'topleft')
+    else
+        MarkupRender(snip)
 }
 
 MarkupRedo(hwnd := 0) {
@@ -850,10 +905,13 @@ MarkupRedo(hwnd := 0) {
         return
     mk := snip.Markup
     mk.Undo.Push(MarkupSnapshot(mk, snip))
-    MarkupRestoreSnapshot(snip, mk.Redo.Pop())
+    geo := MarkupRestoreSnapshot(snip, mk.Redo.Pop())
     MarkupState.Sel := 0
     MarkupSyncPallet()
-    MarkupRender(snip)
+    if geo
+        RenderSnip(snip, 'topleft')
+    else
+        MarkupRender(snip)
 }
 
 ; ==============================================================================
@@ -863,7 +921,7 @@ MarkupRedo(hwnd := 0) {
 ; One flat record per object.  Geometry is always master-local:
 ;   rect / ellipse / highlight / blur / image : X1,Y1 → X2,Y2 corners
 ;   line / arrow                              : X1,Y1 → X2,Y2 endpoints
-;   pen                                       : Pts, a flat [x1,y1,x2,y2,...]
+;   pen / erase                               : Pts, a flat [x1,y1,x2,y2,...]
 ;   text / number                             : X1,Y1 anchor (top-left)
 ;   callout                                   : X1,Y1 → X2,Y2 box + TailX,TailY
 ;
@@ -2382,7 +2440,7 @@ MarkupComposeImage(snip, pBmp) {
         return
     any := false
     for o in snip.Markup.Objs
-        if (o.Type = 'blur') {
+        if (o.Type = 'blur' || o.Type = 'erase') {
             any := true
             break
         }
@@ -2402,7 +2460,14 @@ MarkupComposeImage(snip, pBmp) {
     DllCall('gdiplus\GdipSetPixelOffsetMode', 'UPtr', pGfx, 'Int', 2)   ; Half
     DllCall('gdiplus\GdipSetSmoothingMode',   'UPtr', pGfx, 'Int', 3)   ; None
 
+    ; Blur and Eraser share this stage and are applied in list order, so erasing
+    ; over a redaction and redacting over an erasure both do what they look like.
+    eraseCol := MarkupEraseColorOf(snip)
     for o in snip.Markup.Objs {
+        if (o.Type = 'erase') {
+            MarkupDrawErase(pGfx, snip, o, m, eraseCol)
+            continue
+        }
         if (o.Type != 'blur')
             continue
         ; Axis-aligned bounding box of the four mapped corners.  Under a
@@ -2427,6 +2492,9 @@ MarkupComposeImage(snip, pBmp) {
     }
     DllCall('gdiplus\GdipDeleteGraphics', 'UPtr', pGfx)
     DllCall('gdiplus\GdipDeleteMatrix',   'UPtr', m)
+    ; Tell the core a Graphics was opened on this bitmap — it needs to know.  See
+    ; SnipFreshBitmap in ScreenSnip.ahk for the GDI+ bug that makes it matter.
+    return true
 }
 
 ; Downscale a rectangle of the bitmap and blow it back up over itself.
@@ -2497,7 +2565,7 @@ MarkupComposeOverlay(snip, pBmp, wantChrome := true) {
     if m
         DllCall('gdiplus\GdipSetWorldTransform', 'UPtr', pGfx, 'UPtr', m)
     for o in mk.Objs {
-        if (o.Upright || o.Type = 'blur')
+        if (o.Upright || o.Type = 'blur' || o.Type = 'erase')
             continue
         if (o.Type = 'image')
             o._pImg := mk.Images.Has(o.ImgIdx) ? mk.Images[o.ImgIdx] : 0
@@ -2540,7 +2608,7 @@ MarkupComposeOverlay(snip, pBmp, wantChrome := true) {
 ; rather than read off the record, because their size follows the font.
 MarkupBoundsMaster(o, &x1, &y1, &x2, &y2) {
     switch o.Type {
-    case 'pen', 'path':
+    case 'pen', 'path', 'erase':
         if !o.Pts.Length {
             x1 := o.X1, y1 := o.Y1, x2 := o.X1, y2 := o.Y1
             return
@@ -2676,6 +2744,11 @@ MarkupHandleList(snip, o, m) {
 ; bmpW/bmpH are the display bitmap's own dimensions, needed only by the frame
 ; ring below — everything else works in coordinates the matrix supplies.
 MarkupDrawChrome(pGfx, snip, m, bmpW := 0, bmpH := 0) {
+    ; A Cut Out drag in progress.  First, and without returning: it is its own
+    ; gesture, so nothing else of the chrome is normally showing alongside it.
+    if (MarkupState.CutBand && m)
+        MarkupDrawCutBand(pGfx, snip, m)
+
     ; The FRAME, when it is what's selected.  It sits outside this bitmap
     ; entirely, so it cannot be outlined where it actually is; instead a dashed
     ; ring runs along the image's outermost pixels, immediately inside the
@@ -2829,7 +2902,10 @@ MarkupHitTest(snip, dx, dy) {
     found := 0
     i := snip.Markup.Objs.Length
     while (i >= 1) {
-        if MarkupHitObj(snip, snip.Markup.Objs[i], m, dx, dy) {
+        ; Eraser strokes are part of the picture, not things you pick up: a
+        ; click on erased area falls through to whatever is under it.
+        if (snip.Markup.Objs[i].Type != 'erase'
+         && MarkupHitObj(snip, snip.Markup.Objs[i], m, dx, dy)) {
             found := snip.Markup.Objs[i]
             break
         }
@@ -2903,6 +2979,8 @@ MarkupRender(snip) {
 
 MarkupOnLButton(hwnd) {
     global guiSnips
+    if MarkupState.Picking                   ; the eyedropper's hotkey has it
+        return true
     if !guiSnips.Has(hwnd)
         return false
     snip := guiSnips[hwnd]
@@ -2951,10 +3029,8 @@ MarkupOnLButton(hwnd) {
             ; and leaves nothing behind, because MarkupStartDraw discards a
             ; zero-drag object.  So the click-empty-space-to-deselect habit
             ; survives intact, and only a DRAG actually draws.
-            if MarkupReturnTool() {
-                MarkupStartDraw(snip, dx, dy)
-                return true
-            }
+            if MarkupReturnTool()
+                return MarkupToolPress(snip, dx, dy)
             if (MarkupState.Sels.Length || MarkupState.BorderSel) {
                 MarkupState.Sels := []
                 MarkupState.BorderSel := false
@@ -2980,6 +3056,16 @@ MarkupOnLButton(hwnd) {
         return true
     }
 
+    return MarkupToolPress(snip, dx, dy)
+}
+
+; A press with a non-Select tool.  Every drawing tool makes an object, so they
+; all go to MarkupStartDraw; Cut Out makes no object and has its own gesture.
+; Returns what MarkupOnLButton should return — Cut Out declines a press on the
+; frame so the frame stays the drag-to-move handle, as it is for Select.
+MarkupToolPress(snip, dx, dy) {
+    if (MarkupState.Tool = 'cutout')
+        return MarkupCutOutPress(snip, dx, dy)
     MarkupStartDraw(snip, dx, dy)
     return true
 }
@@ -3137,6 +3223,8 @@ MarkupMarquee(snip, dx, dy) {
         m := MarkupMatrix(snip, 'display')
         if m {
             for o in snip.Markup.Objs {
+                if (o.Type = 'erase')
+                    continue
                 MarkupBoundsDisplay(snip, o, m, &ox1, &oy1, &ox2, &oy2)
                 if (ox1 <= bx2 && ox2 >= bx1 && oy1 <= by2 && oy2 >= by1)
                     if !MarkupIsSelected(o)
@@ -3500,8 +3588,10 @@ MarkupStartDraw(snip, dx, dy) {
     MarkupPushUndo(snip)
     o := MarkupNewObj(tool)
     o.X1 := mx, o.Y1 := my, o.X2 := mx, o.Y2 := my
-    if (tool = 'pen')
+    if (tool = 'pen' || tool = 'erase')
         o.Pts := [mx, my]
+    if (tool = 'erase')
+        o.Thick := MarkupCfg.EraserWidth, o.Outline := false, o.Shadow := false
     if (tool = 'path') {
         ; Scratch state for the drag; deleted below when it ends.  The list
         ; always holds committed corners plus one live end, so it starts with
@@ -3513,12 +3603,19 @@ MarkupStartDraw(snip, dx, dy) {
     if (tool = 'callout')
         o.TailX := mx, o.TailY := my
     mk.Objs.Push(o)
-    MarkupState.Sel := o
+    ; An eraser stroke is never selected — see MarkupHitTest.
+    MarkupState.Sel := (tool = 'erase') ? 0 : o
 
     MarkupState.Dragging := true
     moved := MarkupDragLoop(snip, (cx, cy, *) => MarkupExtendDraw(snip, o, cx, cy))
     MarkupState.Dragging := false
 
+    if (!moved && o.Type = 'erase') {
+        ; Unlike a shape, a click with the eraser means something: it takes out
+        ; one brush-sized dot, which is how you remove a speck.
+        MarkupRender(snip)
+        return
+    }
     if !moved {
         ; A click with no drag produced a zero-size shape — drop it rather than
         ; leaving an invisible object for the user to wonder about later.
@@ -3545,7 +3642,8 @@ MarkupStartDraw(snip, dx, dy) {
         o.X1 := o.Pts[1], o.Y1 := o.Pts[2]
         o.X2 := o.Pts[o.Pts.Length - 1], o.Y2 := o.Pts[o.Pts.Length]
     }
-    if (o.Type != 'line' && o.Type != 'arrow' && o.Type != 'pen' && o.Type != 'path') {
+    if (o.Type != 'line' && o.Type != 'arrow' && o.Type != 'pen' && o.Type != 'path'
+     && o.Type != 'erase') {
         a := Min(o.X1, o.X2), b := Max(o.X1, o.X2)
         c := Min(o.Y1, o.Y2), d := Max(o.Y1, o.Y2)
         o.X1 := a, o.X2 := b, o.Y1 := c, o.Y2 := d
@@ -3570,7 +3668,7 @@ MarkupExtendDraw(snip, o, cx, cy) {
         return
     }
     MarkupToMaster(snip, cx, cy, &mx, &my)
-    if (o.Type = 'pen') {
+    if (o.Type = 'pen' || o.Type = 'erase') {
         ; Only record a point once the cursor has actually travelled, so a slow
         ; drag doesn't pile up hundreds of coincident points.
         n := o.Pts.Length
@@ -3842,7 +3940,9 @@ MarkupToolTable() {
                 , ['Text',        'text',      'T']
                 , ['Number',      'number',    'N']
                 , ['Callout',     'callout',   'C']
-                , ['Blur',        'blur',      'B'] ]
+                , ['Blur',        'blur',      'B']
+                , ['Eraser',      'erase',     'W']
+                , ['Cut Out',     'cutout',    'X'] ]
     return t
 }
 
@@ -3876,32 +3976,48 @@ MarkupShowPallet() {
     items := []
     for row in MarkupToolTable()
         items.Push(row[1] '  (' row[3] ')')
-    ctl['tools'] := g.Add('ListBox', 'x10 y10 w210 h206 Choose1', items)
+    ctl['tools'] := g.Add('ListBox', 'x10 y10 w210 h241 Choose1', items)
     ctl['tools'].OnEvent('Change', MarkupPal_Tool)
 
-    ctl['lblcolor'] := g.Add('Text', 'x10 y224 w210 h16'
+    ctl['lblcolor'] := g.Add('Text', 'x10 y259 w210 h16'
                            , 'Color  (Ctrl+click sets fill)')
     i := 0
     for col in MarkupSwatches() {
         xx := 10 + Mod(i, 6) * 27
-        yy := (i < 6) ? 244 : 271
+        yy := (i < 6) ? 279 : 306
         sw := g.Add('Text', 'x' xx ' y' yy ' w22 h22 Border Background' Format('{:06X}', col))
         sw.OnEvent('Click', MarkupPal_Color.Bind(col))
         i++
     }
 
-    ctl['fill']    := g.Add('Checkbox', 'x10 y304 w210 h18', 'Fill shape')
-    ctl['outline'] := g.Add('Checkbox', 'x10 y326 w210 h18', 'Outline (legibility halo)')
-    ctl['shadow']  := g.Add('Checkbox', 'x10 y348 w210 h18', 'Drop shadow')
+    ; Eyedropper, in the column right of the swatches: the button on the top
+    ; row, and under it the last colour picked, which acts as a thirteenth
+    ; swatch.  The glyph comes from Segoe MDL2 Assets (Windows 10 and 11); on a
+    ; machine without that font the button just says Pick.
+    if FileExist(A_WinDir '\Fonts\segmdl2.ttf') {
+        g.SetFont('s11', 'Segoe MDL2 Assets')
+        ctl['eyedrop'] := g.Add('Button', 'x176 y279 w44 h22', Chr(0xEF3C))
+        g.SetFont('s9', 'Segoe UI')
+    } else {
+        ctl['eyedrop'] := g.Add('Button', 'x176 y279 w44 h22', 'Pick')
+    }
+    ctl['eyedrop'].OnEvent('Click', (*) => MarkupEyedropper())
+    ctl['picked'] := g.Add('Text', 'x176 y306 w44 h22 Border')
+    ctl['picked'].OnEvent('Click', MarkupPal_Picked)
+    MarkupPickSwatch(MarkupState.Picked)
+
+    ctl['fill']    := g.Add('Checkbox', 'x10 y339 w210 h18', 'Fill shape')
+    ctl['outline'] := g.Add('Checkbox', 'x10 y361 w210 h18', 'Outline (legibility halo)')
+    ctl['shadow']  := g.Add('Checkbox', 'x10 y383 w210 h18', 'Drop shadow')
     ctl['fill'].OnEvent('Click',    MarkupPal_Check.Bind('Fill'))
     ctl['outline'].OnEvent('Click', MarkupPal_Check.Bind('Outline'))
     ctl['shadow'].OnEvent('Click',  MarkupPal_Check.Bind('Shadow'))
 
-    ctl['lblthick'] := g.Add('Text', 'x10 y376 w44 h22 +0x200', 'Width')
-    ctl['thick'] := g.Add('DropDownList', 'x58 y373 w56'
+    ctl['lblthick'] := g.Add('Text', 'x10 y411 w44 h22 +0x200', 'Width')
+    ctl['thick'] := g.Add('DropDownList', 'x58 y408 w56'
                         , MarkupStepStrings(MarkupThickSteps()))
-    ctl['lblfont'] := g.Add('Text', 'x122 y376 w34 h22 +0x200', 'Font')
-    ctl['font']  := g.Add('DropDownList', 'x160 y373 w60'
+    ctl['lblfont'] := g.Add('Text', 'x122 y411 w34 h22 +0x200', 'Font')
+    ctl['font']  := g.Add('DropDownList', 'x160 y408 w60'
                         , MarkupStepStrings(MarkupFontSteps()))
     ctl['thick'].OnEvent('Change', MarkupPal_Num.Bind('Thick'))
     ctl['font'].OnEvent('Change',  MarkupPal_Num.Bind('FontSize'))
@@ -3911,23 +4027,23 @@ MarkupShowPallet() {
     ; stays in proportion when the line gets fatter.  Corner is the rounding on
     ; a Rectangle, Highlighter or Callout box and the elbow radius on a Path
     ; Arrow; 'auto' keeps whatever the type derived before the setting existed.
-    ctl['lblhead'] := g.Add('Text', 'x10 y404 w44 h22 +0x200', 'Head')
-    ctl['head'] := g.Add('DropDownList', 'x58 y401 w56'
+    ctl['lblhead'] := g.Add('Text', 'x10 y439 w44 h22 +0x200', 'Head')
+    ctl['head'] := g.Add('DropDownList', 'x58 y436 w56'
                        , ['1.5','2','2.5','3','3.5','4','4.5','5','6','8'])
-    ctl['lblcorner'] := g.Add('Text', 'x120 y404 w46 h22 +0x200', 'Corner')
-    ctl['corner'] := g.Add('DropDownList', 'x170 y401 w50'
+    ctl['lblcorner'] := g.Add('Text', 'x120 y439 w46 h22 +0x200', 'Corner')
+    ctl['corner'] := g.Add('DropDownList', 'x170 y436 w50'
                          , ['auto','0','2','3','4','6','8','10','12','16','20','24','32'])
     ctl['head'].OnEvent('Change',   MarkupPal_Head)
     ctl['corner'].OnEvent('Change', MarkupPal_Corner)
 
-    ctl['lbldash'] := g.Add('Text', 'x10 y432 w44 h22 +0x200', 'Dash')
-    ctl['dash'] := g.Add('DropDownList', 'x58 y429 w162', [])
+    ctl['lbldash'] := g.Add('Text', 'x10 y467 w44 h22 +0x200', 'Dash')
+    ctl['dash'] := g.Add('DropDownList', 'x58 y464 w162', [])
     ctl['dash'].OnEvent('Change', MarkupPal_Style.Bind('Dash'))
 
-    ctl['lblends'] := g.Add('Text', 'x10 y460 w44 h22 +0x200', 'Ends')
-    ctl['capstart'] := g.Add('DropDownList', 'x58 y457 w70', [])
-    ctl['swap']     := g.Add('Button', 'x132 y457 w22 h22', Chr(0x21C4))
-    ctl['capend']   := g.Add('DropDownList', 'x158 y457 w62', [])
+    ctl['lblends'] := g.Add('Text', 'x10 y495 w44 h22 +0x200', 'Ends')
+    ctl['capstart'] := g.Add('DropDownList', 'x58 y492 w70', [])
+    ctl['swap']     := g.Add('Button', 'x132 y492 w22 h22', Chr(0x21C4))
+    ctl['capend']   := g.Add('DropDownList', 'x158 y492 w62', [])
     ctl['capstart'].OnEvent('Change', MarkupPal_Cap.Bind('CapStart'))
     ctl['capend'].OnEvent('Change',   MarkupPal_Cap.Bind('CapEnd'))
     ctl['swap'].OnEvent('Click',      (*) => MarkupSwapEnds())
@@ -3935,21 +4051,21 @@ MarkupShowPallet() {
     ; The preview is drawn by the SAME MarkupDrawObject the snip uses, on a
     ; throwaway object — so it cannot drift out of step with what you actually
     ; get.  A preview that lies is worse than no preview at all.
-    ctl['preview'] := g.Add('Picture', 'x10 y488 w210 h38 Border')
+    ctl['preview'] := g.Add('Picture', 'x10 y523 w210 h38 Border')
 
-    ctl['undo'] := g.Add('Button', 'x10  y536 w66 h26', 'Undo')
-    ctl['redo'] := g.Add('Button', 'x80  y536 w66 h26', 'Redo')
-    ctl['del']  := g.Add('Button', 'x150 y536 w70 h26', 'Delete')
+    ctl['undo'] := g.Add('Button', 'x10  y571 w66 h26', 'Undo')
+    ctl['redo'] := g.Add('Button', 'x80  y571 w66 h26', 'Redo')
+    ctl['del']  := g.Add('Button', 'x150 y571 w70 h26', 'Delete')
     ctl['undo'].OnEvent('Click', (*) => MarkupUndo())
     ctl['redo'].OnEvent('Click', (*) => MarkupRedo())
     ctl['del'].OnEvent('Click',  (*) => MarkupDeleteSel())
 
-    ctl['savedef'] := g.Add('Button', 'x10  y570 w120 h26', 'Save as default')
-    ctl['editsty'] := g.Add('Button', 'x134 y570 w86  h26', 'Line styles…')
+    ctl['savedef'] := g.Add('Button', 'x10  y605 w120 h26', 'Save as default')
+    ctl['editsty'] := g.Add('Button', 'x134 y605 w86  h26', 'Line styles…')
     ctl['savedef'].OnEvent('Click', (*) => MarkupSaveDefaults())
     ctl['editsty'].OnEvent('Click', (*) => MarkupStyleEditor())
 
-    ctl['done'] := g.Add('Button', 'x10 y604 w210 h26', 'Done  (Esc)')
+    ctl['done'] := g.Add('Button', 'x10 y639 w210 h26', 'Done  (Esc)')
     ctl['done'].OnEvent('Click', (*) => MarkupEnd())
 
     g.OnEvent('Close', (*) => MarkupEnd())
@@ -4067,7 +4183,7 @@ MarkupPositionPallet() {
     ; logical-unit fallback would reintroduce the very mismatch this avoids.
     if (!MarkupWinRect(g.Hwnd, , , &pw, &ph) || !pw || !ph) {
         sc := A_ScreenDPI / 96.0
-        pw := Round(236 * sc), ph := Round(650 * sc)
+        pw := Round(236 * sc), ph := Round(685 * sc)
     }
     if !MarkupWinRect(MarkupState.Active, &sl, &st, &sw, &sh)
         return
@@ -4095,16 +4211,18 @@ MarkupPositionPallet() {
 ; and a DropDownList shows blank for a value that isn't one of its items, so
 ; the list itself has to swap when the frame is selected.  Reloaded only on an
 ; actual change of ladder; doing it on every sync would flicker the control.
-MarkupSetThickList(border) {
+MarkupSetThickList(mode) {
     ctl  := MarkupState.Ctl
-    want := border ? 'border' : 'obj'
+    ; mode: true = frame, false = objects, 'erase' = eraser brush.
+    want := (mode = 'erase') ? 'erase' : (mode ? 'border' : 'obj')
     if (MarkupState.ThickList = want || !ctl.Has('thick'))
         return
     MarkupState.ThickList := want
     try {
         ctl['thick'].Delete()
-        ctl['thick'].Add(MarkupStepStrings(border ? MarkupBorderSteps()
-                                                  : MarkupThickSteps()))
+        ctl['thick'].Add(MarkupStepStrings((want = 'border') ? MarkupBorderSteps()
+                                         : (want = 'erase')  ? MarkupEraseSteps()
+                                         :                     MarkupThickSteps()))
     }
 }
 
@@ -4237,6 +4355,8 @@ MarkupApplyTable() {
       , 'number',    'color outline shadow thick font head corner ends'
       , 'callout',   'color fill outline shadow thick font corner dash'
       , 'blur',      ''
+      , 'erase',     'color thick'
+      , 'cutout',    ''
       , 'image',     'shadow'
       , 'border',    'color thick')
     return t
@@ -4311,8 +4431,11 @@ MarkupSyncPallet() {
     try ctl['fill'].Value    := (o ? o.Fill    : false) ? 1 : 0
     try ctl['outline'].Value := (o ? o.Outline : MarkupCfg.Outline) ? 1 : 0
     try ctl['shadow'].Value  := (o ? o.Shadow  : MarkupCfg.Shadow)  ? 1 : 0
-    MarkupSetThickList(false)
-    try ctl['thick'].Text    := String(thick)
+    ; The Eraser has no object to show, so Width shows the brush, on its own
+    ; ladder.
+    isErase := (!o && MarkupSubjectType() = 'erase')
+    MarkupSetThickList(isErase ? 'erase' : false)
+    try ctl['thick'].Text    := String(isErase ? MarkupCfg.EraserWidth : thick)
     try ctl['font'].Text     := String(fsize)
 
     ; Line style shows the selection when there is one, otherwise the CURRENT
@@ -4413,6 +4536,7 @@ MarkupFillStyleLists() {
 ; 16px stroke doesn't overflow a 38px strip, and shadow forced off because the
 ; strip has no background for one to fall on.
 MarkupPreviewObj() {
+    global guiSnips
     o := MarkupNewObj('line')
     ; A plain bar in the frame's colour and width — the frame has no caps, dash
     ; or halo, and showing the tool's would misrepresent what a click does next.
@@ -4423,6 +4547,17 @@ MarkupPreviewObj() {
         o.Outline := false, o.Shadow := false
         o.Thick := Min(o.Thick, 7)
         o.X1 := 14, o.Y1 := 19, o.X2 := 192, o.Y2 := 19
+        return o
+    }
+    ; The Eraser: a bar in the snip's background colour, at the brush width.  The
+    ; halo is forced on so a white bar still shows against the pallet.
+    if (!MarkupState.Sel && MarkupSubjectType() = 'erase') {
+        o.Color := guiSnips.Has(MarkupState.Active)
+                 ? MarkupEraseColorOf(guiSnips[MarkupState.Active]) : MarkupCfg.EraserColor
+        o.Thick := Min(MarkupCfg.EraserWidth, 16)
+        o.Dash  := 'solid', o.CapStart := 'none', o.CapEnd := 'none'
+        o.Outline := true, o.Shadow := false
+        o.X1 := 14 + o.Thick, o.Y1 := 19, o.X2 := 192 - o.Thick, o.Y2 := 19
         return o
     }
     if (sel := MarkupState.Sel) {
@@ -4550,16 +4685,40 @@ MarkupReturnTool() {
 ;
 ; The swatches can't be greyed (a disabled Static still paints its Background),
 ; so the refusal lives here instead — see MarkupSyncEnable.
-MarkupPal_Color(col, *) {
-    if !MarkupState.ColorLive
-        return
-    prop := GetKeyState('Ctrl', 'P') ? 'FillColor' : 'Color'
+MarkupPal_Color(col, *) => MarkupUseColor(col, GetKeyState('Ctrl', 'P'))
+
+; What a colour click means, wherever it came from — a swatch, the picked
+; swatch, or the eyedropper.  With the Eraser in hand it sets the snip's
+; background colour; otherwise stroke (or fill, with Ctrl) as it always did.
+MarkupUseColor(col, toFill := false) {
+    if (MarkupSubjectType() = 'erase') {
+        MarkupSetEraseColor(col)
+        return true
+    }
+    if !MarkupColorLive()
+        return false
+    prop := toFill ? 'FillColor' : 'Color'
     MarkupApplyStyle(prop, col)
     ; A highlighter is already fill-only, so turning the global Fill default on
     ; as a side effect of picking its colour would be a surprise aimed at every
     ; OTHER tool.
     if (prop = 'FillColor' && MarkupSubjectType() != 'highlight')
         MarkupApplyStyle('Fill', true)
+    return true
+}
+
+; Does the current subject use a colour at all?  Worked out fresh rather than
+; read from MarkupState.ColorLive, which is only maintained while the pallet is
+; built — and the eyedropper also works with the pallet hidden.
+MarkupColorLive() {
+    tbl  := MarkupApplyTable()
+    subj := MarkupSubjectType()
+    return InStr(' ' (tbl.Has(subj) ? tbl[subj] : tbl['select']) ' ', ' color ') ? true : false
+}
+
+MarkupPal_Picked(*) {
+    if (MarkupState.Picked != '')
+        MarkupUseColor(MarkupState.Picked, GetKeyState('Ctrl', 'P'))
 }
 
 MarkupPal_Check(prop, ctrl, *) => MarkupApplyStyle(prop, ctrl.Value ? true : false)
@@ -4651,6 +4810,7 @@ MarkupCycleStyle(prop, dir := 1) {
 ; constantly while annotating, and saving each one would make "my default" mean
 ; "whatever I last happened to use" — which is the opposite of a default.
 MarkupSaveDefaults() {
+    global guiSnips
     path := MarkupIniPath()
     try {
         IniWrite(Format('{:06X}', MarkupCfg.Color),     path, 'Markup', 'Color')
@@ -4665,6 +4825,12 @@ MarkupSaveDefaults() {
         IniWrite(Format('{:06X}', MarkupCfg.HighlightColor)
                , path, 'Markup', 'HighlightColor')
         IniWrite(Integer(MarkupCfg.NumberDia), path, 'Markup', 'NumberDia')
+        ; The eraser's background colour is saved from the snip being marked
+        ; up, so what you save is the colour you were just looking at.
+        if guiSnips.Has(MarkupState.Active)
+            MarkupCfg.EraserColor := MarkupEraseColorOf(guiSnips[MarkupState.Active])
+        IniWrite(MarkupCfg.EraserWidth, path, 'Markup', 'EraserWidth')
+        IniWrite(Format('{:06X}', MarkupCfg.EraserColor), path, 'Markup', 'EraserColor')
         IniWrite(MarkupNumText(MarkupCfg.NumberAngle), path, 'Markup', 'NumberAngle')
         IniWrite(MarkupNumText(MarkupCfg.NumberTail),  path, 'Markup', 'NumberTail')
         IniWrite(MarkupToolStyle('number').Corner, path, 'Markup', 'NumberCorner')
@@ -4778,7 +4944,11 @@ MarkupApplyStyle(prop, value) {
             else
                 MarkupCfg.FillColor := value
         case 'Fill':      MarkupCfg.FillShapes := value
-        case 'Thick':     MarkupCfg.Thickness := value
+        case 'Thick':
+            if (MarkupSubjectType() = 'erase')
+                MarkupCfg.EraserWidth := value
+            else
+                MarkupCfg.Thickness := value
         case 'FontSize':  MarkupCfg.FontSize  := value
         case 'Outline':   MarkupCfg.Outline   := value
         case 'Shadow':    MarkupCfg.Shadow    := value
@@ -4895,6 +5065,12 @@ MarkupBorderSteps() {
     return t
 }
 
+; An eraser wants to be fat far more often than thin.
+MarkupEraseSteps() {
+    static t := [4, 6, 8, 12, 16, 20, 24, 32, 40, 48, 64]
+    return t
+}
+
 MarkupStepStrings(steps) {
     out := []
     for v in steps
@@ -4950,6 +5126,16 @@ MarkupWheelSize(dir) {
         SetSnipBorder(MarkupState.Active, '', nxt)
         MarkupRender(snip)
         MarkupSyncPallet()
+        return
+    }
+    ; Eraser in hand: step the brush.  A default rather than an edit, so no undo.
+    if (!MarkupState.Sels.Length && MarkupSubjectType() = 'erase') {
+        nxt := MarkupStepValue(MarkupEraseSteps(), MarkupCfg.EraserWidth, dir)
+        if (nxt != MarkupCfg.EraserWidth) {
+            MarkupCfg.EraserWidth := nxt
+            MarkupSyncPallet()
+            MarkupToast('Eraser ' nxt, 700)
+        }
         return
     }
     if !MarkupState.Sels.Length
@@ -5409,6 +5595,654 @@ MarkupEd_DeleteDash() {
 }
 
 ; ==============================================================================
+; CUT OUT  —  remove a horizontal or vertical strip from the snip  (key X)
+; ==============================================================================
+;
+; Snagit's "Cut Out": press at one edge of the strip, drag to the other, let go.
+; Mostly-vertical travel removes a horizontal strip; mostly-horizontal travel
+; removes a vertical one.  The direction follows the drag the whole way, so a
+; hesitant start in the wrong direction corrects itself.
+;
+; ── WHY THIS IS UNLIKE EVERY OTHER TOOL ───────────────────────────────────────
+;
+; Everything else in this file is re-derived on every render and never touches
+; the frozen master.  A cut can't work that way: removing rows is a DISCONTINUOUS
+; change (the pixels either side of the seam end up adjacent), and no GDI+ matrix
+; can express that — while this whole module depends on one matrix for both
+; drawing and hit-testing.  So a cut really does rebuild the master, once, via
+; SnipCutBand in the core, and then remaps the objects once.
+;
+; ── WHAT HAPPENS TO THE OBJECTS ───────────────────────────────────────────────
+;
+; They are in master coordinates, so each point goes through SnipCutMap: before
+; the strip it stays, inside it collapses onto the seam, after it slides back.
+;   - An arrow or box that spans the seam gets SHORTER and still connects the
+;     same two things, which is almost always what you meant.
+;   - Anything wholly inside the strip annotated pixels that no longer exist, so
+;     it is deleted.
+;   - Text, number badges and pasted images are RIGID: squashing a label or a
+;     picture is never wanted.  They move as a unit by where their centre falls,
+;     and are deleted if the centre was inside the strip.
+; Undo brings every one of them back.
+;
+; ── UNDO ──────────────────────────────────────────────────────────────────────
+;
+; Rides the ordinary snapshot stack, so a cut and an arrow interleave correctly
+; under Ctrl+Z.  Snapshots already hold the objects in their pre-cut coordinates,
+; so only the PIXELS need an inverse, and that is just the removed strip:
+;   mk.CutLog       every cut record, oldest first (see SnipCutBand)
+;   mk.CutsApplied  how many of them are currently applied; records past this
+;                   index are undone cuts waiting for a redo
+;   snapshot.Cuts   CutsApplied at the time the snapshot was taken
+; Restoring a snapshot re-inserts or re-removes strips until the counts agree
+; (MarkupCutSeek).  Strips are freed when a new edit kills the redo branch, when
+; UndoDepth pushes the last snapshot that could reach them off the stack, and
+; when the snip closes.
+;
+; ── SCALING ───────────────────────────────────────────────────────────────────
+;
+; Two kinds of pixel, kept apart on purpose:
+;   - The drag threshold is a SCREEN distance, so it is scaled by A_ScreenDPI —
+;     6 px at 100%, 8 px at 125% — and measured in the Picture control's display
+;     pixels (MarkupCursorPos).
+;   - The strip itself is measured in MASTER pixels, reached only through
+;     MarkupToMaster.  Nothing here assumes a display pixel is a master pixel, so
+;     rotation and flips already work, and a future zoom stage in the render
+;     pipeline would too.
+; Windows are placed by the core in physical pixels (GetWindowRect/SetWindowPos),
+; which is why RenderSnip's 'topleft' anchor needs no DPI factor either.
+;
+; Not available on a straightened snip (Skew ≠ 0): a straight strip on screen is
+; a tilted one in the master, so there are no whole rows to take out.
+
+; Menu entry: start (or retarget) a markup session with Cut Out in hand.
+MarkupCutOutMenu(hwnd) {
+    global guiSnips
+    if !guiSnips.Has(hwnd)
+        return
+    if (MarkupState.Active != hwnd)
+        MarkupBegin(hwnd)
+    MarkupSetTool('cutout')
+    MarkupToast('Cut Out — drag across the strip to remove')
+}
+
+; A press with the Cut Out tool.  dx, dy are display pixels of the Picture
+; control, as MarkupOnLButton measured them.
+MarkupCutOutPress(snip, dx, dy) {
+    static MINSZ := 8                          ; must match SnipCutBand's floor
+    if MarkupHitBorder(snip, dx, dy)
+        return false                           ; the frame is still the move handle
+    if (snip.Skew != 0) {
+        MarkupToast("Cut Out can't work on a straightened snip — reset Straighten first", 2200)
+        KeyWait('LButton')
+        return true
+    }
+    if !(snip.HasProp('SrcBitmap') && snip.SrcBitmap)
+        return true
+
+    ; A press in the transparent corners of a tilted snip maps outside the crop.
+    ; Starting a strip from there would mean nothing, so it's ignored.
+    c := snip.Crop
+    MarkupToMaster(snip, dx, dy, &smx, &smy)
+    if (smx < c.X || smx > c.X + c.W || smy < c.Y || smy > c.Y + c.H) {
+        KeyWait('LButton')
+        return true
+    }
+
+    dz   := Max(3, Round(6 * A_ScreenDPI / 96))   ; screen distance, so DPI-scaled
+    band := 0
+    MarkupState.Sels      := []
+    MarkupState.BorderSel := false
+    MarkupState.Dragging  := true
+    while GetKeyState('LButton', 'P') {
+        MarkupCursorPos(snip, &cx, &cy)
+        if (!band && Abs(cx - dx) + Abs(cy - dy) < dz) {
+            Sleep 8
+            continue
+        }
+        ; Direction is decided in MASTER space, not on screen: on a snip turned
+        ; 90°, a vertical drag on screen runs along the master's X axis and must
+        ; remove columns.  Ties go to rows, the more common cut.
+        MarkupToMaster(snip, cx, cy, &mx, &my)
+        axis := (Abs(my - smy) >= Abs(mx - smx)) ? 'Y' : 'X'
+        if (axis = 'Y')
+            lo := c.Y, hi := c.Y + c.H, p0 := smy, p1 := my
+        else
+            lo := c.X, hi := c.X + c.W, p0 := smx, p1 := mx
+        ; Clamped to the VISIBLE image: you can only cut what you can see.
+        ; (The strip still runs across the whole master — see SnipCutBand.)
+        a := Round(Max(lo, Min(p0, p1)))
+        b := Round(Min(hi, Max(p0, p1)))
+        if (!band || band.Axis != axis || band.A != a || band.B != b) {
+            band := MarkupState.CutBand := { Axis: axis, A: a, B: b }
+            MarkupRender(snip)
+            ToolTip('Cut ' (b - a) ' px')
+        }
+        Sleep 8
+    }
+    MarkupState.Dragging := false
+    MarkupState.CutBand  := 0
+    ToolTip()
+
+    if (!band || band.B - band.A < 1) {        ; a click, or a drag that rounded to nothing
+        MarkupRender(snip)
+        return true
+    }
+    size := band.B - band.A
+    span := (band.Axis = 'Y') ? c.H : c.W
+    if (span - size < MINSZ) {
+        MarkupToast('That would remove the whole image')
+        MarkupRender(snip)
+        return true
+    }
+    MarkupCutOutApply(snip, band.Axis, band.A, size)
+    return true
+}
+
+; Do the cut: snapshot, rebuild the master, remap objects, re-render.
+MarkupCutOutApply(snip, axis, pos, size) {
+    mk := MarkupEnsure(snip)
+    MarkupPushUndo(snip)                       ; also discards any undone cuts
+    rec := SnipCutBand(snip, axis, pos, size)
+    if !rec {
+        mk.Undo.Pop()                          ; nothing changed — no undo step earned
+        MarkupToast('Cut Out failed — the image was left unchanged', 2000)
+        MarkupRender(snip)
+        return false
+    }
+    mk.CutLog.Push(rec)
+    mk.CutsApplied := mk.CutLog.Length
+    MarkupCutRemapObjs(mk, axis, pos, size)
+    MarkupState.Sels      := []
+    MarkupState.BorderSel := false
+    ; The window changes size, so this is RenderSnip rather than MarkupRender —
+    ; anchored top-left, so everything above / left of the seam stays put.
+    RenderSnip(snip, 'topleft')
+    MarkupSyncPallet()
+    return true
+}
+
+; Move every object through the cut.  Walks backwards so a deletion can't shift
+; an index still to be visited.
+MarkupCutRemapObjs(mk, axis, a, size) {
+    b := a + size
+    removed := 0
+    i := mk.Objs.Length
+    while (i >= 1) {
+        o := mk.Objs[i]
+        MarkupBoundsMaster(o, &x1, &y1, &x2, &y2)
+        lo := (axis = 'X') ? x1 : y1
+        hi := (axis = 'X') ? x2 : y2
+        if (o.Type = 'text' || o.Type = 'number' || o.Type = 'image') {
+            mid := (lo + hi) / 2
+            if (mid >= a && mid < b)
+                mk.Objs.RemoveAt(i), removed++
+            else if (mid >= b)
+                MarkupCutShiftObj(o, axis, -size)
+        } else if (lo >= a && hi <= b) {
+            mk.Objs.RemoveAt(i), removed++
+        } else if !MarkupCutSqueezeObj(o, axis, a, size) {
+            mk.Objs.RemoveAt(i), removed++
+        }
+        i--
+    }
+    if removed
+        MarkupRenumber(mk)                     ; a deleted badge closes its gap
+    return removed
+}
+
+; Rigid move along one axis.  A tail at 0,0 is the "never placed" sentinel (see
+; MarkupNumTip), so it is left at 0,0 rather than turned into a real position.
+MarkupCutShiftObj(o, axis, d) {
+    hasTail := (o.TailX != 0 || o.TailY != 0)
+    if (axis = 'X') {
+        o.X1 += d, o.X2 += d
+        if hasTail
+            o.TailX += d
+    } else {
+        o.Y1 += d, o.Y2 += d
+        if hasTail
+            o.TailY += d
+    }
+}
+
+; Per-point remap for the shapes that can sensibly get shorter.  Returns false
+; if what's left is no longer a drawable object (a Path Arrow reduced to a point).
+MarkupCutSqueezeObj(o, axis, a, size) {
+    if (axis = 'X') {
+        o.X1 := SnipCutMap(o.X1, a, size), o.X2 := SnipCutMap(o.X2, a, size)
+        if (o.Type = 'callout')
+            o.TailX := SnipCutMap(o.TailX, a, size)
+    } else {
+        o.Y1 := SnipCutMap(o.Y1, a, size), o.Y2 := SnipCutMap(o.Y2, a, size)
+        if (o.Type = 'callout')
+            o.TailY := SnipCutMap(o.TailY, a, size)
+    }
+    if o.Pts.Length {
+        pts := o.Pts.Clone()                   ; never edit an array a snapshot shares
+        k := (axis = 'X') ? 1 : 2
+        while (k <= pts.Length)
+            pts[k] := SnipCutMap(pts[k], a, size), k += 2
+        o.Pts := pts
+    }
+    if (o.Type = 'path') {
+        ; A segment that crossed the strip may now be collinear with its
+        ; neighbour, or have collapsed to nothing — the same tidy the tool runs
+        ; when a drag ends.
+        o.Pts := MarkupPathSimplify(o.Pts)
+        if (o.Pts.Length < 4)
+            return false
+        o.X1 := o.Pts[1], o.Y1 := o.Pts[2]
+        o.X2 := o.Pts[o.Pts.Length - 1], o.Y2 := o.Pts[o.Pts.Length]
+    }
+    return true
+}
+
+; Bring the applied-cut count to target by undoing or redoing cuts.  Returns
+; true if the master changed.  Stops at the first failure and says so; the only
+; realistic cause is running out of memory for the rebuilt master.
+MarkupCutSeek(snip, target) {
+    mk := snip.Markup
+    if !mk.HasProp('CutLog')
+        return false
+    changed := false
+    while (mk.CutsApplied > target) {
+        if !SnipUncutBand(snip, mk.CutLog[mk.CutsApplied]) {
+            MarkupToast('Could not put the removed strip back', 2200)
+            break
+        }
+        mk.CutsApplied--, changed := true
+    }
+    while (mk.CutsApplied < target && mk.CutsApplied < mk.CutLog.Length) {
+        if !SnipRecutBand(snip, mk.CutLog[mk.CutsApplied + 1]) {
+            MarkupToast('Could not redo the cut', 2200)
+            break
+        }
+        mk.CutsApplied++, changed := true
+    }
+    return changed
+}
+
+; A new edit has killed the redo branch, so undone cuts can never come back.
+MarkupCutPruneRedo(mk) {
+    if !mk.HasProp('CutLog')
+        return
+    while (mk.CutLog.Length > mk.CutsApplied) {
+        rec := mk.CutLog.Pop()
+        if rec.Strip
+            GDIp.DisposeImage(rec.Strip)
+    }
+}
+
+; The oldest snapshot left on the stack has just changed.  Cuts it already
+; includes can never be undone again, so their strips are dead weight.  The
+; records stay (CutLog indices must not shift); only the pixels are freed.
+MarkupCutFreeFloor(mk) {
+    if (!mk.HasProp('CutLog') || !mk.Undo.Length)
+        return
+    floor := mk.Undo[1].HasProp('Cuts') ? mk.Undo[1].Cuts : 0
+    Loop Min(floor, mk.CutLog.Length) {
+        rec := mk.CutLog[A_Index]
+        if rec.Strip
+            GDIp.DisposeImage(rec.Strip), rec.Strip := 0
+    }
+}
+
+; Live preview: the strip darkened, with a dashed line along each cut edge.
+; Geometry is built in master space and pushed through the display matrix, so it
+; lands correctly on a flipped or rotated snip.  Drawn with the world transform
+; reset (MarkupDrawChrome's contract), hence the explicit MarkupXform calls.
+MarkupDrawCutBand(pGfx, snip, m) {
+    b := MarkupState.CutBand, c := snip.Crop
+    if (b.Axis = 'Y')
+        x1 := c.X, x2 := c.X + c.W, y1 := b.A, y2 := b.B
+    else
+        x1 := b.A, x2 := b.B, y1 := c.Y, y2 := c.Y + c.H
+    MarkupXform(m, x1, y1, &p1x, &p1y)
+    MarkupXform(m, x2, y1, &p2x, &p2y)
+    MarkupXform(m, x2, y2, &p3x, &p3y)
+    MarkupXform(m, x1, y2, &p4x, &p4y)
+
+    pb := MarkupPointBuf([p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y])
+    br := MarkupBrush(0x000000, 120)
+    DllCall('gdiplus\GdipFillPolygon', 'UPtr', pGfx, 'UPtr', br
+          , 'Ptr', pb.Buf, 'Int', pb.N, 'Int', 0)
+    MarkupDelBrush(br)
+
+    ; The two cut edges are the sides running ACROSS the strip: top and bottom
+    ; for a row cut, left and right for a column cut.
+    if (b.Axis = 'Y')
+        edges := [[p1x, p1y, p2x, p2y], [p4x, p4y, p3x, p3y]]
+    else
+        edges := [[p1x, p1y, p4x, p4y], [p2x, p2y, p3x, p3y]]
+    us := MarkupPen(0x000000, 110, 3)
+    dp := MarkupPen(MarkupCfg.HandleColor, 255, 2)
+    DllCall('gdiplus\GdipSetPenDashStyle', 'UPtr', dp, 'Int', 1)   ; 1 = Dash
+    for e in edges {
+        DllCall('gdiplus\GdipDrawLine', 'UPtr', pGfx, 'UPtr', us
+              , 'Float', e[1], 'Float', e[2], 'Float', e[3], 'Float', e[4])
+        DllCall('gdiplus\GdipDrawLine', 'UPtr', pGfx, 'UPtr', dp
+              , 'Float', e[1], 'Float', e[2], 'Float', e[3], 'Float', e[4])
+    }
+    MarkupDelPen(us)
+    MarkupDelPen(dp)
+}
+
+; ==============================================================================
+; ERASER  —  paint the image back to a background colour  (key W)
+; ==============================================================================
+;
+; It looks like it removes pixels, but an eraser stroke is really a freehand
+; path, stored like a pen stroke and painted in the IMAGE stage (the same stage
+; as Blur), so it covers the image and never the annotations drawn over it.
+; That keeps everything the rest of this file relies on:
+;   - undo is free — strokes are objects in the snapshot
+;   - pan, rotate, flip and Straighten just work, because the stroke goes
+;     through the same crop matrix as a redaction
+;   - Cut Out squeezes a stroke exactly the way it squeezes a pen line
+;   - nothing is ever really lost: pan the region after over-erasing and the
+;     master is still intact underneath
+;
+; Strokes are deliberately NOT selectable (MarkupHitTest, Ctrl+A and the marquee
+; all skip them) so that erased area behaves like image.  Ctrl+Z takes one back.
+;
+; The colour is not stored on the strokes.  Each snip has ONE background colour
+; (snip.Markup.EraseColor) that every stroke paints in, so it can be chosen
+; before or after erasing and every erased area follows.  It is part of the
+; undo snapshot.  With the Eraser in hand, the swatches and the eyedropper set
+; it — see MarkupUseColor.
+
+MarkupEraseColorOf(snip) {
+    if (snip.HasProp('Markup') && snip.Markup.HasProp('EraseColor'))
+        return snip.Markup.EraseColor
+    return MarkupCfg.EraserColor
+}
+
+MarkupSetEraseColor(col) {
+    global guiSnips
+    if !guiSnips.Has(MarkupState.Active)
+        return
+    snip := guiSnips[MarkupState.Active]
+    mk   := MarkupEnsure(snip)
+    if (MarkupEraseColorOf(snip) = col) {
+        MarkupSyncPallet()
+        return
+    }
+    MarkupPushUndo(snip)
+    mk.EraseColor := col
+    MarkupRender(snip)
+    MarkupSyncPallet()
+    MarkupToast('Background ' Format('#{:06X}', col), 900)
+}
+
+; One stroke onto the upright crop bitmap.  m is the master→crop matrix from
+; MarkupComposeImage; drawing under it as a world transform means the brush
+; width is in MASTER pixels and follows a Straighten tilt.  Clipped to the
+; master's own rectangle, so erasing along the edge of a straightened snip
+; can't paint colour into its transparent corners.
+MarkupDrawErase(pGfx, snip, o, m, col) {
+    if !o.Pts.Length
+        return
+    DllCall('gdiplus\GdipSetSmoothingMode', 'UPtr', pGfx, 'Int', 4)     ; AntiAlias
+    DllCall('gdiplus\GdipSetWorldTransform', 'UPtr', pGfx, 'UPtr', m)
+    DllCall('gdiplus\GdipSetClipRectI', 'UPtr', pGfx, 'Int', 0, 'Int', 0
+          , 'Int', snip.MasterW, 'Int', snip.MasterH, 'Int', 0)          ; 0 = Replace
+    if (o.Pts.Length < 4) {
+        ; A click: one brush-sized dot.  A zero-length line draws nothing in
+        ; GDI+, round caps or not, so this is a filled circle instead.
+        r  := o.Thick / 2
+        br := MarkupBrush(col, 255)
+        DllCall('gdiplus\GdipFillEllipse', 'UPtr', pGfx, 'UPtr', br
+              , 'Float', o.Pts[1] - r, 'Float', o.Pts[2] - r
+              , 'Float', o.Thick + 0.0, 'Float', o.Thick + 0.0)
+        MarkupDelBrush(br)
+    } else {
+        pn := MarkupPen(col, 255, o.Thick)                             ; round caps/joins
+        pb := MarkupPointBuf(o.Pts)
+        DllCall('gdiplus\GdipDrawLines', 'UPtr', pGfx, 'UPtr', pn, 'Ptr', pb.Buf, 'Int', pb.N)
+        MarkupDelPen(pn)
+    }
+    DllCall('gdiplus\GdipResetClip', 'UPtr', pGfx)
+    DllCall('gdiplus\GdipResetWorldTransform', 'UPtr', pGfx)
+    DllCall('gdiplus\GdipSetSmoothingMode', 'UPtr', pGfx, 'Int', 3)     ; back to None for blur
+}
+
+; ==============================================================================
+; EYEDROPPER  —  take a colour from the snip or anywhere on screen  (key I)
+; ==============================================================================
+;
+; Press I or the eyedropper button.  The cursor becomes a crosshair and a small
+; tag follows it showing the colour underneath; the picked swatch on the pallet
+; previews it too.  Click to take it (Ctrl+click for fill), Esc or right-click
+; to cancel.  The taken colour does exactly what clicking a swatch does — and
+; with the Eraser in hand, that sets the snip's background colour.
+;
+; ── WHERE THE COLOUR COMES FROM ───────────────────────────────────────────────
+; Over the snip being marked up, it is read from a freshly built EXPORT bitmap
+; (BuildSaveBitmap, no selection handles), not from the screen.  So it is the
+; image's true pixel — not a blend with the snip's transparency setting, and not
+; a handle or the pallet that happens to be on top.  Anywhere else, it is
+; PixelGetColor from the screen, so a colour can be borrowed from another app.
+;
+; ── THE CLICK ─────────────────────────────────────────────────────────────────
+; A temporary *LButton hotkey takes the click, so it never reaches the window
+; under the cursor: no snip starts dragging, no button in another app gets
+; pressed.  The button's release is waited out BEFORE the hotkey is turned off,
+; or the orphaned button-up would leak through to that window.
+;
+; ── THE CURSOR ────────────────────────────────────────────────────────────────
+; A crosshair over EVERY window needs SetSystemCursor — the core's per-window
+; SetCursor trick only works over our own windows.  Each standard cursor is
+; replaced with a COPY of the crosshair (SetSystemCursor destroys the handle it
+; is given, so the same one can't be reused), and restoring is a single
+; SPI_SETCURSORS, which reloads the user's own cursor scheme from the registry.
+; That restore runs in a finally block, and an OnExit hook is registered for the
+; length of the pick, so neither an error nor a script exit mid-pick can leave
+; the crosshair stuck.
+;
+; ── SCALING ───────────────────────────────────────────────────────────────────
+; Every coordinate here is a physical screen pixel: MouseGetPos with
+; CoordMode Screen, GetWindowRect, PixelGetColor, and SetWindowPos for the tag.
+; The tag's GUI is -DPIScale and is sized from A_ScreenDPI by hand, then placed
+; with SetWindowPos, so Gui.Show's scaled/unscaled rules never come into it.
+
+MarkupPickMenu(hwnd) {
+    global guiSnips
+    if !guiSnips.Has(hwnd)
+        return
+    if (MarkupState.Active != hwnd)
+        MarkupBegin(hwnd)
+    MarkupEyedropper()
+}
+
+MarkupEyedropper() {
+    global guiSnips
+    if MarkupState.Picking
+        return
+    ; A pallet button reports its click on release, but a hotkey or menu could
+    ; arrive with the button still down.  Taking over LButton mid-press would
+    ; swallow the down and leak the up.
+    KeyWait('LButton', 'T3')
+
+    snip := guiSnips.Has(MarkupState.Active) ? guiSnips[MarkupState.Active] : 0
+    pBmp := 0, bw := 0, bh := 0
+    if (snip && (pBmp := BuildSaveBitmap(snip, false))) {
+        DllCall('gdiplus\GdipGetImageWidth',  'UPtr', pBmp, 'UInt*', &bw)
+        DllCall('gdiplus\GdipGetImageHeight', 'UPtr', pBmp, 'UInt*', &bh)
+    }
+
+    before := MarkupState.Picked
+    MarkupState.Picking    := true
+    MarkupState.PickClick  := false
+    MarkupState.PickCancel := false
+    MarkupState.PickCtrl   := false
+    committed := false, col := 0, tip := 0
+
+    try {
+        tip := MarkupPickTip()
+        HotIf()
+        Hotkey('*LButton', MarkupPickClick,  'On')
+        Hotkey('*RButton', MarkupPickCancel, 'On')
+        Hotkey('*Escape',  MarkupPickCancel, 'On')
+        OnExit(MarkupPickRestoreCursor)
+        MarkupPickCrossCursor()
+
+        CoordMode('Mouse', 'Screen')
+        CoordMode('Pixel', 'Screen')
+        last := -1, lastX := '', lastY := ''
+        loop {
+            if (MarkupState.PickCancel || GetKeyState('Escape', 'P'))
+                break
+            MouseGetPos(&sx, &sy)
+            c := MarkupPickSample(snip, pBmp, bw, bh, sx, sy)
+            if (c != last) {
+                last := c
+                MarkupPickShowTip(tip, c)
+                MarkupPickSwatch(c)
+            }
+            if (sx != lastX || sy != lastY) {
+                lastX := sx, lastY := sy
+                MarkupPickPlaceTip(tip, sx, sy)
+            }
+            if MarkupState.PickClick {
+                col := c, committed := true
+                break
+            }
+            Sleep 10
+        }
+    } finally {
+        MarkupPickRestoreCursor()
+        OnExit(MarkupPickRestoreCursor, 0)
+        KeyWait('LButton', 'T3')             ; release swallowed while we still own it
+        KeyWait('RButton', 'T3')
+        HotIf()
+        try Hotkey('*LButton', 'Off')
+        try Hotkey('*RButton', 'Off')
+        try Hotkey('*Escape',  'Off')
+        if tip
+            try tip.Gui.Destroy()
+        if pBmp
+            GDIp.DisposeImage(pBmp)
+        MarkupState.Picking := false
+    }
+
+    if !committed {
+        MarkupPickSwatch(before)             ; undo the hover preview
+        return
+    }
+    MarkupState.Picked := col
+    MarkupPickSwatch(col)
+    if !MarkupUseColor(col, MarkupState.PickCtrl)
+        MarkupToast('Picked ' Format('#{:06X}', col) ' — kept in the swatch under the eyedropper', 2000)
+}
+
+MarkupPickClick(*) {
+    MarkupState.PickCtrl  := GetKeyState('Ctrl', 'P')
+    MarkupState.PickClick := true
+}
+
+MarkupPickCancel(*) {
+    MarkupState.PickCancel := true
+}
+
+; Colour under a physical screen point, as 0xRRGGBB.
+MarkupPickSample(snip, pBmp, bw, bh, sx, sy) {
+    if (snip && pBmp) {
+        hit := (A_PtrSize = 8)
+             ? DllCall('WindowFromPoint', 'Int64', (sx & 0xFFFFFFFF) | (sy << 32), 'Ptr')
+             : DllCall('WindowFromPoint', 'Int', sx, 'Int', sy, 'Ptr')
+        if (hit && DllCall('GetAncestor', 'Ptr', hit, 'UInt', 2, 'Ptr') = snip.GuiObj.Hwnd) {  ; GA_ROOT
+            rect := Buffer(16, 0)
+            ok := false
+            try ok := DllCall('GetWindowRect', 'Ptr', snip.GuiObj.Pic.Hwnd, 'Ptr', rect)
+            if ok {
+                px := sx - NumGet(rect, 0, 'Int'), py := sy - NumGet(rect, 4, 'Int')
+                if (px >= 0 && py >= 0 && px < bw && py < bh) {
+                    DllCall('gdiplus\GdipBitmapGetPixel', 'UPtr', pBmp
+                          , 'Int', px, 'Int', py, 'UInt*', &argb := 0)
+                    return argb & 0xFFFFFF
+                }
+            }
+        }
+    }
+    return PixelGetColor(sx, sy) & 0xFFFFFF
+}
+
+; The follower tag.  -DPIScale with sizes computed from A_ScreenDPI, so its
+; numbers are physical pixels like every other coordinate in the pick.
+MarkupPickTip() {
+    sc := A_ScreenDPI / 96
+    w  := Round(96 * sc), h := Round(40 * sc)
+    g  := Gui('+AlwaysOnTop -Caption +ToolWindow +Border -DPIScale +E0x08000020')  ; NOACTIVATE | TRANSPARENT
+    g.MarginX := 0, g.MarginY := 0
+    g.SetFont('s9', 'Segoe UI')
+    t := g.Add('Text', 'x0 y' Round(4 * sc) ' w' w ' h' (h - Round(4 * sc)) ' Center', '')
+    return { Gui: g, Txt: t, W: w, H: h, Shown: false }
+}
+
+MarkupPickShowTip(tip, c) {
+    hex := Format('{:06X}', c)
+    r := (c >> 16) & 0xFF, gg := (c >> 8) & 0xFF, b := c & 0xFF
+    ink := ((r * 299 + gg * 587 + b * 114) / 1000 > 128) ? '000000' : 'FFFFFF'
+    tip.Gui.BackColor := hex
+    tip.Txt.SetFont('c' ink)
+    tip.Txt.Value := '#' hex '`nClick · Esc'
+}
+
+; Beside the cursor, flipped to the other side near a monitor edge.  Uses the
+; monitor UNDER THE CURSOR rather than A_ScreenWidth, which only describes the
+; primary monitor.
+MarkupPickPlaceTip(tip, sx, sy) {
+    mon := (A_PtrSize = 8)
+         ? DllCall('MonitorFromPoint', 'Int64', (sx & 0xFFFFFFFF) | (sy << 32), 'UInt', 2, 'Ptr')
+         : DllCall('MonitorFromPoint', 'Int', sx, 'Int', sy, 'UInt', 2, 'Ptr')   ; 2 = NEAREST
+    mi := Buffer(40, 0)
+    NumPut('UInt', 40, mi, 0)
+    if !DllCall('GetMonitorInfoW', 'Ptr', mon, 'Ptr', mi)
+        return
+    ml := NumGet(mi, 4, 'Int'), mt := NumGet(mi, 8, 'Int')
+    mr := NumGet(mi, 12, 'Int'), mb := NumGet(mi, 16, 'Int')
+    off := Round(18 * A_ScreenDPI / 96)
+    x := (sx + off + tip.W > mr) ? sx - off - tip.W : sx + off
+    y := (sy + off + tip.H > mb) ? sy - off - tip.H : sy + off
+    x := Max(ml, Min(x, mr - tip.W))
+    y := Max(mt, Min(y, mb - tip.H))
+    DllCall('SetWindowPos', 'Ptr', tip.Gui.Hwnd, 'Ptr', -1                     ; HWND_TOPMOST
+          , 'Int', x, 'Int', y, 'Int', tip.W, 'Int', tip.H
+          , 'UInt', 0x0050)                                                  ; NOACTIVATE | SHOWWINDOW
+}
+
+; Paint the picked swatch.  '' shows it empty.
+MarkupPickSwatch(c) {
+    if (!MarkupState.Pallet || !MarkupState.Ctl.Has('picked'))
+        return
+    sw := MarkupState.Ctl['picked']
+    try {
+        sw.Opt((c = '') ? '+BackgroundDefault' : '+Background' Format('{:06X}', c))
+        sw.Redraw()
+    }
+}
+
+MarkupPickCrossCursor() {
+    static ids := [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644
+                 , 32645, 32646, 32648, 32649, 32650, 32651]
+    hCross := DllCall('LoadCursor', 'Ptr', 0, 'Ptr', 32515, 'Ptr')          ; IDC_CROSS
+    if !hCross
+        return
+    for id in ids
+        if (hCopy := DllCall('CopyImage', 'Ptr', hCross, 'UInt', 2         ; IMAGE_CURSOR
+                           , 'Int', 0, 'Int', 0, 'UInt', 0, 'Ptr'))
+            DllCall('SetSystemCursor', 'Ptr', hCopy, 'UInt', id)
+}
+
+; Also the OnExit callback, so it must return 0 (anything non-zero cancels the
+; exit).
+MarkupPickRestoreCursor(*) {
+    DllCall('SystemParametersInfo', 'UInt', 0x57, 'UInt', 0, 'Ptr', 0, 'UInt', 0)  ; SPI_SETCURSORS
+    return 0
+}
+
+; ==============================================================================
 ; HOTKEYS
 ; ==============================================================================
 ;
@@ -5450,6 +6284,9 @@ t::         MarkupSetTool('text') ; hide
 n::         MarkupSetTool('number') ; hide
 c::         MarkupSetTool('callout') ; hide
 b::         MarkupSetTool('blur') ; hide
+x::         MarkupSetTool('cutout') ; hide
+w::         MarkupSetTool('erase') ; hide     ; W for wipe — E is Ellipse
+i::         MarkupEyedropper() ; hide
 m::         MarkupEnd() ; hide
 F2::        MarkupEditSelText() ; hide
 F3::        MarkupTogglePallet() ; hide
