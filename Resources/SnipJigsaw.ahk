@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2
+#Requires AutoHotkey v2
 ; ==============================================================================
 ;
 ;                             SnipJigsaw.ahk
@@ -77,6 +77,36 @@
 ;   AlwaysOnTop              bool     1         window floats
 ;   CloseSnipOnStart         bool     0         1 = the snip becomes the puzzle
 ;
+; ── Canvas display: DO NOT "SIMPLIFY" (a hard-won lesson) ─────────────────────
+; The canvas is one DIB section (J.Hbm) that GDI+ draws into.  A Picture control
+; does NOT display that handle directly — STM_SETIMAGE makes the control keep its
+; own PRIVATE COPY, and hands the PREVIOUS copy back as the return value.  Three
+; consequences, each of which was learned by breaking it:
+;
+;   1. The control only shows a new frame when the canvas is re-installed, once
+;      per frame, in JigPush.  A plain RedrawWindow repaints the OLD copy, so the
+;      felt appears and the pieces never do.
+;   2. The copy STM_SETIMAGE returns is canvas-sized and OURS TO DELETE.  Ignoring
+;      it leaks one canvas-sized bitmap per frame — in testing, about 6,000 GDI
+;      objects and 11 GB of RAM in ten minutes of play, enough to freeze Windows
+;      so hard that only the power button worked.  The DeleteObject in JigPush is
+;      the single most important line in this file.  Check the process's "GDI
+;      objects" column in Task Manager (Details tab) after any change near it: it
+;      should stay flat, near the count when the puzzle opened.
+;   3. Never pass J.Hbm to g.Add('Picture', 'HBITMAP:' ...).  AHK may take
+;      ownership and free it, and GDI+ is still drawing into that memory — an
+;      access violation (0xC0000005) on the next render.  JigCreate builds the
+;      control from a throwaway bitmap and installs the real canvas afterwards.
+;
+; Two smaller rules in the same area: redraw is suppressed around the swap and
+; repainted WITHOUT an erase, and JigWM_CTLCOLORSTATIC returns the NULL brush for
+; the canvas.  Without that the control fills itself white before every paint,
+; which shows as an intermittent whole-canvas flash while dragging.
+;
+; Pieces are GDI+ bitmaps, which GDI+ counts separately, so the GDI object count
+; stays flat however many pieces there are (48 and 154 piece puzzles measured
+; the same).  Only RAM grows with piece count.
+;
 ; ── Wiring into ScreenSnip.ahk (two small edits) ──────────────────────────────
 ; 1. In the "Context menu for snip windows" block, with the other puzzle items:
 ;
@@ -90,7 +120,7 @@
 ;        #Include *i Resources\SnipJigsaw.ahk
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 8-22-2026
+; Version date: 10-16-2026
 ; ==============================================================================
 
 ; ══════════════════════════════════════════════════════════════════════════════
@@ -380,8 +410,24 @@ JigCreate(pOrig, want, x := '', y := '') {
     JigDrawPart(gImg, pOrig, 0, 0, boardW, boardH, 0, 0, sw, sh)
     DllCall('gdiplus\GdipDeleteGraphics', 'Ptr', gImg)
 
-    pBack := JigNewBitmap(canvasW, canvasH)
-    gBack := JigNewGfx(pBack)
+    ; The canvas is ONE DIB section for the life of the game, and GDI+ draws
+    ; straight into its pixels.  Painting is then just "repaint the control" —
+    ; no new HBITMAP per frame.  (An earlier version built a fresh full-canvas
+    ; HBITMAP on every render, ~100 a second while dragging; when those were not
+    ; reliably freed the process hit thousands of GDI objects and took the whole
+    ; machine down with it.)
+    hDib := JigNewDib(canvasW, canvasH, &bits)
+    pBack := hDib ? JigNewBitmapOn(canvasW, canvasH, bits) : 0
+    gBack := pBack ? JigNewGfx(pBack) : 0
+    if !gBack {
+        if pBack
+            GDIp.DisposeImage(pBack)
+        if hDib
+            DllCall('DeleteObject', 'Ptr', hDib)
+        GDIp.DisposeImage(pImg), GDIp.DisposeImage(pOrig)
+        MsgBox('Could not build the jigsaw canvas.', 'Snip Jigsaw', 4096)
+        return
+    }
     DllCall('gdiplus\GdipBitmapSetResolution', 'Ptr', pBack
           , 'Float', A_ScreenDPI + 0.0, 'Float', A_ScreenDPI + 0.0)
 
@@ -392,15 +438,21 @@ JigCreate(pOrig, want, x := '', y := '') {
 
     DllCall('gdiplus\GdipGraphicsClear', 'Ptr', gBack
           , 'UInt', 0xFF000000 | JigCfg.Felt)   ; J doesn't exist yet; seed only
-    hbm0 := GDIp.CreateHBITMAPFromBitmap(pBack)
-    if !hbm0 {
-        DllCall('gdiplus\GdipDeleteGraphics', 'Ptr', gBack)
-        GDIp.DisposeImage(pBack), GDIp.DisposeImage(pImg), GDIp.DisposeImage(pOrig)
-        MsgBox('Could not build the jigsaw canvas.', 'Snip Jigsaw', 4096)
-        return
-    }
+    DllCall('gdiplus\GdipFlush', 'Ptr', gBack, 'Int', 1)
 
-    pic := g.Add('Picture', 'xm ym +0x100', 'HBITMAP:' hbm0)
+    ; NEVER hand the canvas DIB to AHK.  A Picture control given 'HBITMAP:' may
+    ; take ownership and delete the handle, and GDI+ is drawing into that
+    ; memory — deleting it is an access violation on the next render.  So the
+    ; control is created from a throwaway bitmap of the same size (which gives
+    ; it the right dimensions), then the real canvas is installed behind AHK's
+    ; back with STM_SETIMAGE, which does not transfer ownership.
+    hTmp := JigNewDib(canvasW, canvasH, &tmpBits)
+    pic := g.Add('Picture', 'xm ym +0x100', 'HBITMAP:' hTmp)
+    oldHbm := SendMessage(0x0172, 0, hDib, pic.Hwnd)          ; STM_SETIMAGE
+    if oldHbm
+        DllCall('DeleteObject', 'Ptr', oldHbm)
+    if (hTmp && hTmp != oldHbm)       ; no-op if AHK already freed it
+        DllCall('DeleteObject', 'Ptr', hTmp)
 
     stats := g.Add('Text', 'xm y+8 w240 h22 +0x200', '')
     bNew  := g.Add('Button', 'x+6 yp-2 w62 h26', 'New')
@@ -417,7 +469,7 @@ JigCreate(pOrig, want, x := '', y := '') {
          , CanvasW: canvasW, CanvasH: canvasH
          , ClientW: canvasW, ClientH: canvasH
          , Over: 0, Snap: 0
-         , Orig: pOrig, Img: pImg, Back: pBack, Gfx: gBack
+         , Orig: pOrig, Img: pImg, Back: pBack, Gfx: gBack, Hbm: hDib
          , HEdge: 0, VEdge: 0, Pieces: [], Z: []
          , Groups: 0, StartTick: 0, Elapsed: 0
          , Solved: false, Busy: false, Peeking: false, PeekLock: false
@@ -468,6 +520,7 @@ JigHookOnce() {
         return
     JigState.Hooked := true
     OnMessage(0x0201, JigWM_LBUTTONDOWN)
+    OnMessage(0x0138, JigWM_CTLCOLORSTATIC)    ; stop the canvas erasing itself
     OnExit(JigCleanupOnExit)
 }
 
@@ -871,6 +924,9 @@ JigDrag(J, id, downX, downY) {
     minCy := 40 - by1
     maxCy := J.CanvasH - 40 - by0
 
+    ; Redraw only when the cursor actually moved.  Holding a piece still while
+    ; you study the picture used to re-render identical frames flat out.
+    lastX := lastY := ''
     while GetKeyState('LButton', 'P') {
         if !JigState.Games.Has(J.Hwnd)
             break
@@ -878,6 +934,11 @@ JigDrag(J, id, downX, downY) {
             break
         cx := Max(minCx, Min(maxCx, cx))
         cy := Max(minCy, Min(maxCy, cy))
+        if (cx = lastX && cy = lastY) {
+            Sleep 15
+            continue
+        }
+        lastX := cx, lastY := cy
         for mid in members {
             J.Pieces[mid].X := cx + offX[mid]
             J.Pieces[mid].Y := cy + offY[mid]
@@ -1142,6 +1203,13 @@ JigDestroy(J) {
     J.Gfx := 0, J.Back := 0, J.Img := 0, J.Orig := 0
 
     try J.Gui.Destroy()
+    ; Only now, with the control gone and the GDI+ wrapper disposed above.  AHK
+    ; may already have deleted this handle with the control; a second delete is
+    ; harmless, a missed one is a canvas-sized leak per closed puzzle.
+    if J.Hbm {
+        try DllCall('DeleteObject', 'Ptr', J.Hbm)
+        J.Hbm := 0
+    }
 }
 
 ; ══════════════════════════════════════════════════════════════════════════════
@@ -1192,14 +1260,28 @@ JigBanner(J, gfx, text) {
     JigDrawText(gfx, text, 0, y, J.CanvasW, h, h * 0.46, 0xFFFFFFFF)
 }
 
-; STM_SETIMAGE hands back the bitmap it replaced, and that one is ours to free.
+; Show what GDI+ just drew.  The canvas bitmap IS the DIB section the Picture
+; control displays, so there is nothing to build or swap — flush GDI+'s drawing
+; and repaint the control (INVALIDATE|UPDATENOW, no erase, so no flicker).
 JigPush(J) {
-    hbm := GDIp.CreateHBITMAPFromBitmap(J.Back)
-    if !hbm
-        return
-    old := SendMessage(0x0172, 0, hbm, J.Pic.Hwnd)
-    if old
-        DllCall('DeleteObject', 'Ptr', old)
+    DllCall('gdiplus\GdipFlush', 'Ptr', J.Gfx, 'Int', 1)
+    pic := J.Pic.Hwnd
+    ; The Picture control keeps a PRIVATE COPY of whatever bitmap it is given,
+    ; and hands the previous copy back from STM_SETIMAGE.  So re-installing the
+    ; canvas is what makes it show the new frame — and each hand-back is a
+    ; canvas-sized bitmap that is ours to delete.  Ignoring it is exactly what
+    ; leaked thousands of them (and gigabytes) in earlier versions.
+    ;
+    ; Redraw is suppressed around the swap and the repaint is requested WITHOUT
+    ; an erase: left alone, STM_SETIMAGE erases the control to its background
+    ; before painting the new image, which is the flicker.  Same recipe as
+    ; ScreenSnip's RenderSnipFast.
+    DllCall('SendMessage', 'Ptr', pic, 'UInt', 0x000B, 'Ptr', 0, 'Ptr', 0)   ; WM_SETREDRAW off
+    prev := SendMessage(0x0172, 0, J.Hbm, pic)                               ; STM_SETIMAGE
+    if (prev && prev != J.Hbm)
+        DllCall('DeleteObject', 'Ptr', prev)
+    DllCall('SendMessage', 'Ptr', pic, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)   ; WM_SETREDRAW on
+    DllCall('RedrawWindow', 'Ptr', pic, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0101)  ; INVALIDATE|UPDATENOW, no erase
 }
 
 ; ══════════════════════════════════════════════════════════════════════════════
@@ -1303,6 +1385,27 @@ JigWM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
     return 0
 }
 
+; Stop the canvas control erasing itself to white before every repaint.
+;
+; A bitmap Static paints in two steps: FillRect the whole control with the brush
+; its parent returns for WM_CTLCOLORSTATIC, THEN draw the bitmap over it.  The
+; default brush is white, so any repaint Windows requests on its own (not just
+; ours) can show a white frame between the two steps — the intermittent whole-
+; canvas flash while dragging.  Answering with the stock NULL brush makes the
+; fill a no-op; the bitmap covers the control exactly, so nothing is left bare.
+; Same trick ScreenSnip uses for its own snip windows.
+JigWM_CTLCOLORSTATIC(wParam, lParam, msg, hwnd) {
+    if !JigState.Games.Has(hwnd)
+        return
+    try {
+        if (lParam != JigState.Games[hwnd].Pic.Hwnd)
+            return
+    } catch
+        return
+    DllCall('SetBkMode', 'Ptr', wParam, 'Int', 1)         ; TRANSPARENT
+    return DllCall('GetStockObject', 'Int', 5, 'Ptr')     ; NULL_BRUSH
+}
+
 JigActive() {
     hwnd := WinExist('A')
     return hwnd ? JigState.Games.Has(hwnd) : false
@@ -1400,11 +1503,32 @@ JigFeltStart(argb) {
 JigNewBitmap(w, h) {
     ; 0x26200A = PixelFormat32bppARGB, straight (non-premultiplied) alpha — the
     ; same constant ScreenSnip's drop-shadow code uses.  It MUST be a 32bpp
-    ; format with the alpha flag: 0x21808 looks similar but is 24bppRGB, and a
-    ; bitmap with no alpha channel zero-fills to opaque BLACK rather than to
-    ; transparent, so anything not painted shows up as a black rectangle.
+    ; format with the alpha flag:
+    ; 0x21808 looks similar but is 24bppRGB, and a bitmap with no alpha channel
+    ; zero-fills to opaque BLACK rather than to transparent, so anything not
+    ; painted shows up as a black rectangle.
     DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', w, 'Int', h
           , 'Int', 0, 'Int', 0x26200A, 'Ptr', 0, 'Ptr*', &p := 0)
+    return p
+}
+
+; A top-down 32bpp DIB section, plus a pointer to its pixels in `bits`.
+JigNewDib(w, h, &bits) {
+    bi := Buffer(40, 0)                    ; BITMAPINFOHEADER
+    NumPut('UInt', 40, 'Int', w, 'Int', -h, 'UShort', 1, 'UShort', 32, bi)
+    pv := 0
+    hbm := DllCall('gdi32\CreateDIBSection', 'Ptr', 0, 'Ptr', bi, 'UInt', 0
+                 , 'Ptr*', &pv, 'Ptr', 0, 'UInt', 0, 'Ptr')
+    bits := pv
+    return hbm
+}
+
+; A GDI+ bitmap that draws INTO existing pixel memory (the DIB above) instead of
+; owning its own.  Stride is positive because the DIB is top-down.  The memory
+; must outlive this bitmap — JigDestroy disposes it before freeing the DIB.
+JigNewBitmapOn(w, h, bits) {
+    DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', w, 'Int', h
+          , 'Int', w * 4, 'Int', 0x26200A, 'Ptr', bits, 'Ptr*', &p := 0)
     return p
 }
 

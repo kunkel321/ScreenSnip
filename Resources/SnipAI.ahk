@@ -2,7 +2,7 @@
 ;               SnipAI.ahk  —  AI vision add-on module for ScreenSnip.ahk
 ;
 ; Made by kunkel321 via Claude AI.
-; Version date: 8-11-2026
+; Version date: 10-16-2026
 ;
 ; Credit:  The idea of sending a screen snip to an AI vision model comes from
 ; one of Joe Glines' apps.  Joe's site — www.the-automator.com — is where a lot
@@ -492,6 +492,7 @@ SnipAiAsk(Hwnd) {
 
     ; Ask first, capture second: the InputBox is modal, and grabbing the bitmap
     ; before it opens would be wasted work if the user cancels.
+    SnipAiPinInputBox()
     ib := InputBox('What would you like to know about this snip?'
                  , 'ScreenSnip AI', 'w420 h130')
     if (ib.Result != 'OK' || Trim(ib.Value, ' `t') = '')
@@ -518,43 +519,84 @@ SnipAiAsk(Hwnd) {
 }
 
 
+; InputBox has no AlwaysOnTop option and no Gui object to set one on, and it
+; blocks until dismissed — so a timer, which keeps running during the modal
+; wait, looks for the dialog (class #32770, our title) and pins it.  Retries
+; briefly because the window does not exist yet when the timer is armed.
+SnipAiPinInputBox() {
+    static tries := 0
+    tries := 0
+    SetTimer(Pin, 25)
+    Pin() {
+        if WinExist('ScreenSnip AI ahk_class #32770 ahk_pid ' ProcessExist()) {
+            WinSetAlwaysOnTop(1)                 ; uses the window found above
+            SetTimer(Pin, 0)
+        } else if (++tries > 40)                 ; ~1 second, then give up
+            SetTimer(Pin, 0)
+    }
+}
+
+
 ; ══════════════════════════════════════════════════════════════════════════════
 ; RESULT WINDOW
 ; ══════════════════════════════════════════════════════════════════════════════
 
 SnipAiShowResult(question, answer) {
-    g := Gui('+Resize +MinSize420x260', 'ScreenSnip AI')
+    g := Gui('+Resize +MinSize420x260 +AlwaysOnTop', 'ScreenSnip AI')
     g.MarginX := 10, g.MarginY := 10
     g.SetFont('s10', 'Segoe UI')
 
     g.AddText('w560 +Wrap cGray', 'Q:  ' question)
-    edit := g.AddEdit('w560 r16 +Multi +ReadOnly +VScroll -Wrap', answer)
+
+    ; Windows fixes an Edit's wrap behaviour (ES_AUTOHSCROLL) at creation, and
+    ; AHK v2 controls cannot be destroyed, so the Wrap checkbox cannot rebuild
+    ; the control.  Instead two read-only Edits holding the same text are
+    ; stacked in the same spot — one wrapped, one not — and the checkbox just
+    ; swaps which is visible.  ui['edit'] always names the visible one.
+    ui := Map()
+    ui['wrap']   := g.AddEdit('w560 r16 +Multi +ReadOnly +VScroll', answer)
+    ui['nowrap'] := g.AddEdit('xp yp w560 r16 +Multi +ReadOnly +VScroll +HScroll -Wrap', answer)
+    ui['nowrap'].Visible := false
+    ui['edit'] := ui['wrap']                                  ; wrap ON by default
     g.SetFont('s9')
     btnCopy  := g.AddButton('xm w120', 'Copy Answer')
     btnClose := g.AddButton('x+8 w120 Default', 'Close')
+    chkWrap  := g.AddCheckbox('x+16 yp+5 Checked', 'Wrap text')
 
-    btnCopy.OnEvent('Click', (*) => (A_Clipboard := edit.Value
+    btnCopy.OnEvent('Click', (*) => (A_Clipboard := ui['edit'].Value
                                    , SnipAiToolTip('Copied to clipboard', 1200)))
     btnClose.OnEvent('Click', (*) => g.Destroy())
+    chkWrap.OnEvent('Click', (*) => SnipAiSetWrap(ui, chkWrap.Value))
     g.OnEvent('Close',  (*) => g.Destroy())
     g.OnEvent('Escape', (*) => g.Destroy())
 
-    ; Keep the Edit filling the window on resize; the two buttons ride the
-    ; bottom-left corner.  Anchored manually because AHK v2 has no layout
+    ; Keep the Edits filling the window on resize; the buttons and checkbox ride
+    ; the bottom-left corner.  Anchored manually because AHK v2 has no layout
     ; manager and the control count is too small to justify one.
-    g.OnEvent('Size', SnipAiResultSize.Bind(edit, btnCopy, btnClose))
+    g.OnEvent('Size', SnipAiResultSize.Bind(ui, btnCopy, btnClose, chkWrap))
     g.Show()
 }
 
-SnipAiResultSize(edit, btnCopy, btnClose, thisGui, MinMax, W, H) {
+; Show the wrapped or unwrapped Edit.  Both hold the same text and geometry.
+SnipAiSetWrap(ui, wrapOn) {
+    show := wrapOn ? ui['wrap'] : ui['nowrap']
+    hide := wrapOn ? ui['nowrap'] : ui['wrap']
+    hide.Visible := false
+    show.Visible := true
+    ui['edit'] := show
+}
+
+SnipAiResultSize(ui, btnCopy, btnClose, chkWrap, thisGui, MinMax, W, H) {
     if (MinMax = -1)          ; minimized — nothing to lay out
         return
     editH := H - 100
     if (editH < 60)
         editH := 60
-    edit.Move(10, 44, W - 20, editH)
+    ui['wrap'].Move(10, 44, W - 20, editH)
+    ui['nowrap'].Move(10, 44, W - 20, editH)
     btnCopy.Move(10,  44 + editH + 10)
     btnClose.Move(138, 44 + editH + 10)
+    chkWrap.Move(266, 44 + editH + 10 + 5)
 }
 
 
