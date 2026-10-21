@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2
+#Requires AutoHotkey v2
 #Warn All, Off
 #SingleInstance Force
 DetectHiddenWindows true
@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 9-17-2026
+; Version date: 10-21-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -76,6 +76,8 @@ HelpText := "ScreenSnip " (A_IsAdmin? "is":"is NOT") " currently running as admi
   Menu > OCR > Text (AI)       Better on odd layouts; paid
   Menu > OCR > Table (AI)      Reads cell borders; best tables; paid
   Menu > OCR > Ask AI...       Any question about the snip; paid
+                               Dialog lists saved presets and your
+                               recent questions; Ctrl+Enter sends
   Menu > Imgur > Upload        Public link; [img] tag to clipboard
   Menu > Imgur > Uploader...   Formats, delete, Client ID setup
   Tray > Imgur Uploader...     Same dialog, for files already on disc

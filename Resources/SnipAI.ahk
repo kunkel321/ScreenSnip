@@ -2,7 +2,7 @@
 ;               SnipAI.ahk  —  AI vision add-on module for ScreenSnip.ahk
 ;
 ; Made by kunkel321 via Claude AI.
-; Version date: 10-16-2026
+; Version date: 10-21-2026
 ;
 ; Credit:  The idea of sending a screen snip to an AI vision model comes from
 ; one of Joe Glines' apps.  Joe's site — www.the-automator.com — is where a lot
@@ -15,6 +15,13 @@
 ;   OCR > Copy Text (AI)         — verbatim transcription, straight to clipboard
 ;   OCR > Copy Table (AI)        — table as TSV, ready to paste into a spreadsheet
 ;   OCR > Ask AI About Snip…     — free-form question, answer shown in a window
+;
+; The Ask dialog keeps a prompt library in  Data\SnipAiPrompts.ini :
+;   [Saved]   presets you keep (Save as Preset button, or edit the file by hand)
+;   [Recent]  the last few questions actually answered, newest first, managed
+;             automatically.  Capped by AiHistoryMax; AiKeepHistory=0 stops
+;             recording.  A prompt whose text is already a preset is not
+;             duplicated into [Recent].
 ;
 ; Copy Table (AI) exists because a vision model can see the table's RULING LINES,
 ; which no box-based OCR engine can.  PaddleOCR infers columns by clustering the
@@ -230,6 +237,17 @@ Question:
     ; tokens from reasoning tokens, which are billed but otherwise invisible.
     static ShowTokenUsage := SnipCfg('SnipAI', 'AiShowTokenUsage', false)
 
+    ; ── Ask dialog: prompt library ────────────────────────────────────────────
+    ; Lives in Data\ (runtime-written, gitignored) rather than snipSettings.ini,
+    ; so SettingsManager and the auto-managed history never fight over a file,
+    ; and so question text — which can echo snip content — stays out of the
+    ; settings file and out of ApiKeys.ini.
+    static PromptsFile  => SnipDataPath('SnipAiPrompts.ini')
+    ; How many recent questions to keep.  0 = keep none.
+    static HistoryMax   := SnipCfg('SnipAI', 'AiHistoryMax', 15)
+    ; false = never record questions (presets still work).
+    static KeepHistory  := SnipCfg('SnipAI', 'AiKeepHistory', true)
+
     ; ── Debugging ─────────────────────────────────────────────────────────────
     ; true = keep the temp PNG and write the raw request/response into the Data
     ; folder, so a failed call can be inspected.  The request dump does NOT
@@ -243,6 +261,10 @@ Question:
 ; Populated by SnipAiVisionRequest, consumed by the tooltips and the debug log.
 class SnipAiState {
     static LastUsage := ''
+    ; The Ask dialog is a singleton: a second request raises it and retargets
+    ; AskHwnd to the newest snip rather than opening another.
+    static AskGui  := 0
+    static AskHwnd := 0
 }
 
 
@@ -489,15 +511,146 @@ SnipAiJoin(arr, sep) {
 SnipAiAsk(Hwnd) {
     if !(key := SnipAiGetApiKey())
         return
+    ; Ask first, capture second: the dialog comes before any bitmap work, which
+    ; would be wasted if the user cancels.  The dialog is NOT modal (unlike the
+    ; InputBox it replaced), so the actual request runs from its Ask button via
+    ; SnipAiAskRun rather than falling through from here.
+    SnipAiAskDialog(Hwnd, key)
+}
 
-    ; Ask first, capture second: the InputBox is modal, and grabbing the bitmap
-    ; before it opens would be wasted work if the user cancels.
-    SnipAiPinInputBox()
-    ib := InputBox('What would you like to know about this snip?'
-                 , 'ScreenSnip AI', 'w420 h130')
-    if (ib.Result != 'OK' || Trim(ib.Value, ' `t') = '')
+; The question dialog: a drop-down of presets and recent questions above a roomy
+; multi-line Edit.  Picking a list item copies it into the Edit, where it can be
+; tweaked before sending.  Enter adds a line break; Ctrl+Enter or the Ask button
+; sends.
+SnipAiAskDialog(Hwnd, key) {
+    ; Singleton.  Raise the existing one and point it at the newest snip.
+    if (SnipAiState.AskGui && WinExist('ahk_id ' SnipAiState.AskGui.Hwnd)) {
+        SnipAiState.AskHwnd := Hwnd
+        WinActivate('ahk_id ' SnipAiState.AskGui.Hwnd)
         return
-    question := Trim(ib.Value, ' `t`r`n')
+    }
+    SnipAiState.AskHwnd := Hwnd
+
+    ui := { entries: [] }          ; parallel to the drop-down items, minus the placeholder
+    g := Gui('+AlwaysOnTop', 'ScreenSnip AI')
+    SnipAiState.AskGui := g
+    g.MarginX := 12, g.MarginY := 10
+    g.SetFont('s10', 'Segoe UI')
+    g.AddText('w600', 'Presets and recent questions:')
+    dd := g.AddDropDownList('xm w600')
+    g.AddText('xm y+10 w600', 'Your question about this snip  (Ctrl+Enter to ask):')
+    ed := g.AddEdit('xm w600 r8 +Multi +WantReturn +VScroll')
+    g.SetFont('s9')
+    btnAsk    := g.AddButton('xm w90 Default', 'Ask')
+    btnSave   := g.AddButton('x+8 w130', 'Save as Preset')
+    btnDel    := g.AddButton('x+8 w130', 'Delete Selected')
+    btnCancel := g.AddButton('x+8 w90', 'Cancel')
+
+    ; Rebuild the drop-down from the file.  Item 1 is a placeholder so that
+    ; "nothing chosen" is a real, visible state and Delete knows to stay off.
+    Refill() {
+        store := SnipAiPromptsRead()
+        ui.entries := []
+        items := ['—  choose a preset or a recent question  —']
+        for t in store['Saved'] {
+            ui.entries.Push({ sec: 'Saved', text: t })
+            items.Push('Preset:  ' SnipAiOneLine(t))
+        }
+        for t in store['Recent'] {
+            ui.entries.Push({ sec: 'Recent', text: t })
+            items.Push('Recent:  ' SnipAiOneLine(t))
+        }
+        dd.Delete()
+        dd.Add(items)
+        dd.Choose(1)
+        btnDel.Enabled := false
+    }
+
+    ; The Edit wants CRLF on the way in and hands back CRLF on the way out;
+    ; everything else in this module uses LF.  Both directions are idempotent.
+    EditText() => Trim(StrReplace(ed.Value, '`r`n', '`n'), ' `t`r`n')
+
+    OnPick(*) {
+        i := dd.Value
+        btnDel.Enabled := (i > 1)
+        if (i < 2)
+            return
+        t := ui.entries[i - 1].text
+        ed.Value := StrReplace(StrReplace(t, '`r`n', '`n'), '`n', '`r`n')
+        ed.Focus()
+        len := StrLen(ed.Value)
+        SendMessage(0x00B1, len, len, ed)          ; EM_SETSEL: caret to the end
+    }
+
+    OnSave(*) {
+        q := EditText()
+        if (q = '') {
+            SnipAiToolTip('Nothing to save', 1200)
+            return
+        }
+        r := SnipAiPromptAdd('Saved', q)
+        Refill()
+        SnipAiToolTip(r = 'exists' ? 'Already a preset' : 'Saved as preset', 1200)
+    }
+
+    OnDel(*) {
+        i := dd.Value
+        if (i < 2)
+            return
+        e := ui.entries[i - 1]
+        SnipAiPromptRemove(e.sec, e.text)
+        Refill()
+    }
+
+    CloseDlg(*) {
+        HotIfWinActive('ahk_id ' g.Hwnd)
+        try Hotkey('^Enter', 'Off')
+        HotIf()
+        SnipAiState.AskGui := 0
+        g.Destroy()
+    }
+
+    OnAsk(*) {
+        q := EditText()
+        if (q = '') {
+            SnipAiToolTip('Type a question first', 1200)
+            ed.Focus()
+            return
+        }
+        target := SnipAiState.AskHwnd
+        CloseDlg()
+        SnipAiAskRun(target, key, q)
+    }
+
+    Refill()
+    dd.OnEvent('Change', OnPick)
+    btnAsk.OnEvent('Click', OnAsk)
+    btnSave.OnEvent('Click', OnSave)
+    btnDel.OnEvent('Click', OnDel)
+    btnCancel.OnEvent('Click', CloseDlg)
+    g.OnEvent('Close', CloseDlg)
+    g.OnEvent('Escape', CloseDlg)
+
+    ; Ctrl+Enter, scoped to this window only, so it can't leak into anything
+    ; else.  Turned off again in CloseDlg.
+    HotIfWinActive('ahk_id ' g.Hwnd)
+    Hotkey('^Enter', OnAsk, 'On')
+    HotIf()
+
+    g.Show()
+    ed.Focus()
+}
+
+; Capture the snip, send the question, show the answer.  Split out of the dialog
+; so it runs after the dialog is gone.
+SnipAiAskRun(Hwnd, key, question) {
+    global guiSnips
+    ; The dialog is non-modal, so the snip can be closed while it is open.
+    if !guiSnips.Has(Hwnd) {
+        MsgBox('That snip was closed before the question was sent.'
+             , 'ScreenSnip AI', 'Icon!')
+        return
+    }
 
     if !(png := SnipAiSnipToPng(Hwnd))
         return
@@ -515,25 +668,154 @@ SnipAiAsk(Hwnd) {
         return
     }
 
+    ; Recorded only now, so a failed call never lands in the history.
+    SnipAiRecordRecent(question)
     SnipAiShowResult(question, Trim(answer, ' `t`r`n'))
 }
 
 
-; InputBox has no AlwaysOnTop option and no Gui object to set one on, and it
-; blocks until dismissed — so a timer, which keeps running during the modal
-; wait, looks for the dialog (class #32770, our title) and pins it.  Retries
-; briefly because the window does not exist yet when the timer is armed.
-SnipAiPinInputBox() {
-    static tries := 0
-    tries := 0
-    SetTimer(Pin, 25)
-    Pin() {
-        if WinExist('ScreenSnip AI ahk_class #32770 ahk_pid ' ProcessExist()) {
-            WinSetAlwaysOnTop(1)                 ; uses the window found above
-            SetTimer(Pin, 0)
-        } else if (++tries > 40)                 ; ~1 second, then give up
-            SetTimer(Pin, 0)
+; ── Prompt library  (Data\SnipAiPrompts.ini) ─────────────────────────────────
+; Two sections, [Saved] and [Recent], each a list of  key=text  lines.  This is
+; read and written by hand-rolled code rather than IniRead/IniWrite on purpose:
+;   - IniRead strips enclosing quotes and the Win32 INI API is ANSI unless the
+;     file is UTF-16, so prompts with quotes or non-ASCII text would not survive.
+;   - The file is UTF-8, so a plain text editor shows it correctly.
+; The key names are ignored on read (file order is the order) and renumbered on
+; write, so a hand-added  x=Summarize this  under [Saved] just works.  Comment
+; lines start with ';' but are not preserved across a rewrite.
+;
+; A line break inside a prompt is stored as the two characters \n, since an INI
+; value is one line.  Backslashes are doubled to keep that unambiguous.
+
+; Whole file -> Map('Saved' => [text, ...], 'Recent' => [text, ...]).  A missing
+; or unreadable file is simply an empty library.
+SnipAiPromptsRead() {
+    store := Map()
+    store.CaseSense := false
+    store['Saved'] := [], store['Recent'] := []
+
+    path := SnipAiCfg.PromptsFile
+    if !FileExist(path)
+        return store
+    try {
+        txt := FileRead(path, 'UTF-8')
+    } catch {
+        return store
     }
+
+    sect := ''
+    Loop Parse txt, '`n', '`r' {
+        line := Trim(A_LoopField, ' `t')
+        if (line = '' || SubStr(line, 1, 1) = ';')
+            continue
+        if RegExMatch(line, '^\[(.+)\]$', &m) {
+            sect := m[1]
+            continue
+        }
+        if !store.Has(sect) || !(p := InStr(line, '='))   ; first '=' only
+            continue
+        val := SnipAiJsonUnescape(SubStr(line, p + 1))
+        if (Trim(val, ' `t`r`n') != '')
+            store[sect].Push(val)
+    }
+    return store
+}
+
+; Write the whole library back.  Goes through a temp file and a move so a crash
+; mid-write can't leave a half-written library behind.  Returns true on success.
+SnipAiPromptsWrite(store) {
+    path := SnipAiCfg.PromptsFile
+    out := '; SnipAI prompt library.`n'
+         . '; [Saved] = your presets.  Add lines by hand if you like: one prompt per line, any key name.`n'
+         . '; [Recent] is managed automatically.  A line break inside a prompt is written as \n.`n'
+    for sect in ['Saved', 'Recent'] {
+        out .= '`n[' sect ']`n'
+        for i, t in store[sect]
+            out .= i '=' SnipAiPromptEscape(t) '`n'
+    }
+    tmp := path '.tmp'
+    try {
+        f := FileOpen(tmp, 'w', 'UTF-8')
+        f.Write(out)
+        f.Close()
+        FileMove(tmp, path, true)
+        return true
+    } catch {
+        try FileDelete(tmp)
+        return false
+    }
+}
+
+; Inverse of SnipAiJsonUnescape for the few characters that matter in one line.
+; Backslash FIRST, or the backslashes it adds for \n would be doubled again.
+SnipAiPromptEscape(s) {
+    s := StrReplace(s, '\', '\\')
+    s := StrReplace(s, '`r`n', '\n')
+    s := StrReplace(s, '`n', '\n')
+    s := StrReplace(s, '`r', '\n')
+    return StrReplace(s, '`t', '\t')
+}
+
+; Add a prompt.  'Recent' goes to the top, de-duplicated, and trimmed to
+; cap (0 = no limit).  'Saved' is appended, and left alone if already there.
+; Returns 'exists' for a duplicate preset, true on success, false otherwise.
+SnipAiPromptAdd(section, text, cap := 0) {
+    text := Trim(text, ' `t`r`n')
+    if (text = '')
+        return false
+    store := SnipAiPromptsRead()
+    list := store[section]
+    if (section = 'Recent') {
+        for i, t in list {
+            if (t == text) {
+                list.RemoveAt(i)
+                break
+            }
+        }
+        list.InsertAt(1, text)
+        while (cap > 0 && list.Length > cap)
+            list.Pop()
+    } else {
+        for t in list {
+            if (t == text)
+                return 'exists'
+        }
+        list.Push(text)
+    }
+    return SnipAiPromptsWrite(store)
+}
+
+; Remove the first prompt in a section whose text matches exactly.
+SnipAiPromptRemove(section, text) {
+    store := SnipAiPromptsRead()
+    list := store[section]
+    for i, t in list {
+        if (t == text) {
+            list.RemoveAt(i)
+            return SnipAiPromptsWrite(store)
+        }
+    }
+    return false
+}
+
+; Note an answered question in [Recent], unless history is off or the text is
+; already one of the presets (it would only appear twice in the drop-down).
+SnipAiRecordRecent(question) {
+    if !SnipAiCfg.KeepHistory || SnipAiCfg.HistoryMax < 1
+        return
+    q := Trim(question, ' `t`r`n')
+    for t in SnipAiPromptsRead()['Saved'] {
+        if (t == q)
+            return
+    }
+    SnipAiPromptAdd('Recent', q, SnipAiCfg.HistoryMax)
+}
+
+; One line, bounded length, for a drop-down item.  The full text is what lands
+; in the Edit when it is picked.
+SnipAiOneLine(s, maxLen := 90) {
+    s := RegExReplace(s, '\s*[\r\n]+\s*', ' | ')
+    return (StrLen(s) > maxLen) ? (SubStr(s, 1, maxLen - 1) '…') : s
 }
 
 

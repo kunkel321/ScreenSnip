@@ -793,6 +793,26 @@
     "default": "0",
     "restart": "..\\ScreenSnip.exe"
   },
+  "SnipAI.AiHistoryMax": {
+    "label": "Recent questions to keep",
+    "help": "How many recent questions the Ask AI dialog remembers. They appear in its drop-down, newest first, so you can re-send or tweak one without retyping. Only questions the AI actually answered are recorded, and a question that matches a saved preset is not added twice. Set to 0 to keep none. Saved presets are not affected by this limit.\n\nThe list is stored in Data\\SnipAiPrompts.ini.",
+    "type": "integer",
+    "min": 0,
+    "max": 100,
+    "Default": "15",
+    "restart": "..\\ScreenSnip.exe"
+  },
+  "SnipAI.AiKeepHistory": {
+    "label": "Remember recent questions",
+    "help": "Whether the Ask AI dialog records the questions you send. Turn this off if your questions can contain sensitive text from your snips and you don't want them written to disk. Saved presets still work, and existing entries stay in Data\\SnipAiPrompts.ini until you delete them from the dialog (Delete Selected) or edit the file.",
+    "type": "boolean",
+    "options": [
+      "0=Disabled",
+      "1=Enabled"
+    ],
+    "Default": "1",
+    "restart": "..\\ScreenSnip.exe"
+  },
   "SnipImgur.ImgurConfirmBeforeUpload": {
     "label": "ImgurConfirmBeforeUpload",
     "help": "Ask 'are you sure?' before the one-click Imgur > Upload menu item?\n\nAn upload is PUBLIC to anyone with the link, and an anonymous upload can only be deleted during the session that made it - once ScreenSnip exits it is effectively permanent. That is a lot of consequence for one menu click on a snip that might be showing an e-mail or a password field, so this defaults to on.\n\nSwitch it off once the flow feels familiar.",
