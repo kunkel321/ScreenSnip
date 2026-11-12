@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 10-21-2026
+; Version date: 11-12-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -407,6 +407,31 @@ HelpText := StrReplace(HelpText, '{SettingsHelp}'
 ; ── DPI awareness (helps on scaled displays) ───────────────────────────────────
 Try DllCall("SetThreadDpiAwarenessContext", "ptr", -3, "ptr")
 
+; That call sets the THREAD's awareness, and it does not always stick.  Windows
+; switches a thread to a window's own DPI context whenever it calls that
+; window's WndProc.  A_ScriptHwnd was created before the line above ran, so it
+; is SYSTEM-aware.  While a modal loop is running (title-bar drag, menu, Save As
+; dialog), AutoHotkey starts its timers from A_ScriptHwnd's WM_TIMER handler,
+; so a SetTimer(-1) callback scheduled then runs SYSTEM-aware.  On a monitor
+; whose scaling differs from the primary's, every GetWindowRect / WinGetPos /
+; SetWindowPos in that callback is then in virtualised (DPI-scaled) coordinates
+; instead of the physical pixels the rest of the script uses.  On the primary
+; monitor, system DPI = that monitor's DPI, so the scaling is 1:1 and the bug
+; can't be seen.
+;
+; SnipDpiEnter / SnipDpiLeave put the thread back into per-monitor mode for one
+; call and then restore it, so geometry code gives the same results however its
+; thread was started.
+SnipDpiEnter() {
+    prev := 0
+    try prev := DllCall('SetThreadDpiAwarenessContext', 'Ptr', -3, 'Ptr')
+    return prev
+}
+SnipDpiLeave(prev) {
+    if prev
+        try DllCall('SetThreadDpiAwarenessContext', 'Ptr', prev, 'Ptr')
+}
+
 ; ── Tooltip styling ───────────────────────────────────────────────────────────
 ; Applied AFTER the DPI call above, because the point size is converted to
 ; pixels through GetDeviceCaps(LOGPIXELSY) and that reading depends on the
@@ -564,6 +589,8 @@ CleanupOnExit(*) {
     try OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW, 0)
     try OnMessage(0x0047, WM_WINDOWPOSCHANGED_SIZESYNC, 0)
     try OnMessage(0x0006, WM_ACTIVATE_SHADOW, 0)
+    try OnMessage(0x0231, WM_ENTERSIZEMOVE_SNIP, 0)
+    try OnMessage(0x0232, WM_EXITSIZEMOVE_SNIP, 0)
     try CloseAllSnips()
     try GDIp.Shutdown()
 }
@@ -895,6 +922,10 @@ OnMessage(0x0138, WM_CTLCOLORSTATIC_SNIP) ; stop a snip's image control self-era
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SHADOW) ; keep each snip's drop shadow glued behind it
 OnMessage(0x0047, WM_WINDOWPOSCHANGED_SIZESYNC) ; repair image/border/window size if anything outside resizes a snip
 OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (active/inactive depth)
+OnMessage(0x0231, WM_ENTERSIZEMOVE_SNIP) ; Windows' move loop started on a snip...
+OnMessage(0x0232, WM_EXITSIZEMOVE_SNIP)  ; ...and ended (see WM_ENTERSIZEMOVE_SNIP)
+; hwnds of snips that are inside Windows' own move loop right now.
+global SnipMoveLoop := Map()
 
 ; ── Freeze Capture triggers (see the FREEZE CAPTURE section further down) ─────
 ; Registered HERE, above the first hotkey definition, so they're unambiguously
@@ -2019,6 +2050,15 @@ SaveSnipAs(hwnd := 0) {
     }
     default := lastDir '\ScreenSnip_' FormatTime(A_Now, 'yyyyMMdd_HHmmss') '.' SaveDefaultExt
 
+    ; Make the snip the dialog's OWNER, so the dialog opens in front of it.  Snips
+    ; are +AlwaysOnTop, so an unowned dialog opens behind them.  An owned window
+    ; always sits above its owner, even a topmost one.  +OwnDialogs only lasts for
+    ; the current thread, so the +OwnDialogs at the snip's creation in SnipArea
+    ; doesn't carry over to this Ctrl+S / menu thread; it has to be set here.  It
+    ; also makes the dialog modal to the snip, so the snip can't be moved or
+    ; closed while the dialog is open.
+    try snip.GuiObj.Opt('+OwnDialogs')
+
     ; "S16" = Save-As dialog that prompts before overwriting an existing file.
     sel := FileSelect('S16', default, 'Save Snip As'
                     , 'Images (*.png; *.jpg; *.jpeg; *.bmp)')
@@ -2934,7 +2974,7 @@ WM_LBUTTONDOWN(wParam, lParam, msg, hwnd) {
             return
         }
     }
-    PostMessage(0xA1, 2, , snipHwnd)   ; WM_NCLBUTTONDOWN, HTCAPTION → move
+    SnipMoveDrag(snipHwnd)             ; anything else → move the window
 }
 
 ; A snip's image control paints its own background before it blits the bitmap.
@@ -3152,6 +3192,51 @@ SnipDragRelayer(snip, hwnd) {
     DllCall('SetWindowLong', 'Ptr', hwnd, 'Int', -20, 'Int', ex | 0x80000)
     SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
     DllCall('RedrawWindow', 'Ptr', hwnd, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0385)
+}
+
+; Drag a snip by its body to move it.
+;
+; Done with our own loop and SetWindowPos, the same call NudgeSnip uses, rather
+; than handing the drag to Windows with WM_NCLBUTTONDOWN / HTCAPTION.  Windows'
+; move loop rescales a window that is dropped on a monitor with different
+; scaling, and that flashed the snip at the wrong size for a moment before
+; SyncSnipToWindowSize put it back.  A window moved with SetWindowPos is never
+; rescaled, so the snip crosses monitors seamlessly, just like a nudge.  The
+; shadow follows on its own, through WM_WINDOWPOSCHANGED_SHADOW.
+;
+; Costs nothing at rest: the loop only exists while the button is held, exactly
+; like SnipResizeDrag and the right-drag pan.  Trade-off: Windows' snap and
+; shake-to-minimize no longer apply to snips.
+SnipMoveDrag(snipHwnd) {
+    global guiSnips
+    ; Physical pixels throughout, however this thread was started (SnipDpiEnter).
+    prev := SnipDpiEnter()
+    try {
+        pt := Buffer(8, 0), rect := Buffer(16, 0)
+        DllCall('GetCursorPos', 'Ptr', pt)
+        startX := NumGet(pt, 0, 'Int'), startY := NumGet(pt, 4, 'Int')
+        DllCall('GetWindowRect', 'Ptr', snipHwnd, 'Ptr', rect)
+        winX := NumGet(rect, 0, 'Int'), winY := NumGet(rect, 4, 'Int')
+        lastX := startX, lastY := startY
+
+        while GetKeyState('LButton', 'P') {
+            if !guiSnips.Has(snipHwnd)          ; snip closed mid-drag
+                return
+            DllCall('GetCursorPos', 'Ptr', pt)
+            mx := NumGet(pt, 0, 'Int'), my := NumGet(pt, 4, 'Int')
+            if (mx != lastX || my != lastY) {
+                lastX := mx, lastY := my
+                ; Measured from the press, not frame to frame, so the window
+                ; never drifts away from under the cursor.
+                DllCall('SetWindowPos', 'Ptr', snipHwnd, 'Ptr', 0
+                      , 'Int', winX + mx - startX, 'Int', winY + my - startY
+                      , 'Int', 0, 'Int', 0
+                      , 'UInt', 0x0015)         ; SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+            }
+            Sleep 8
+        }
+    } finally
+        SnipDpiLeave(prev)
 }
 
 ; Drag an edge/corner to resize the capture region. The dragged edge follows the
@@ -3567,6 +3652,16 @@ BlendColor(colorVal, factor) {
 ; and dark edge colors by that fraction — used to dim an inactive snip's
 ; bevel without changing its contrast/shape (see Bevel3DInactiveDarknessFactor).
 DrawSnipBevel(g, baseColorVal, thickness, strength, darknessFactor := 0) {
+    ; Usually queued with SetTimer(-1) by WM_PAINT_BEVEL / WM_ACTIVATE_BEVEL, so
+    ; it can have the same DPI-context problem as the shadow (see SnipDpiEnter).
+    prev := SnipDpiEnter()
+    try
+        DrawSnipBevelCore(g, baseColorVal, thickness, strength, darknessFactor)
+    finally
+        SnipDpiLeave(prev)
+}
+
+DrawSnipBevelCore(g, baseColorVal, thickness, strength, darknessFactor := 0) {
     ; Defensive guard: the gui may have been destroyed between when this
     ; call was queued (e.g. via SetTimer) and when it actually runs — most
     ; commonly during "Close All Snips". g.Hwnd throws if the window is gone.
@@ -3637,7 +3732,7 @@ _RGBSwap(colorHex) {
 ; Positioning + z-order + repaint are driven from ONE place: UpdateSnipShadow,
 ; off the snip's WM_WINDOWPOSCHANGED. That single message fires whenever the snip
 ; moves, resizes, rotates, toggles its border, or changes z-order (including the
-; internal HTCAPTION drag loop and activation). To keep drags smooth, the bitmap
+; SnipMoveDrag loop and activation). To keep drags smooth, the bitmap
 ; is only re-blurred when the SIZE changes; a pure move is a cheap SetWindowPos.
 
 ; Create an empty shadow window (hidden). The first paint happens via
@@ -3656,6 +3751,17 @@ CreateSnipShadow() {
 ; corners would leak through), OR when the snip isn't 100% opaque (a shadow
 ; behind a see-through snip looks wrong, and usually isn't wanted then).
 UpdateSnipShadow(snip) {
+    ; Often reached from a SetTimer(-1) (WM_ACTIVATE_SHADOW), which may run
+    ; SYSTEM-aware: see SnipDpiEnter.  That is why the shadow came out too big and
+    ; too far right on the 100% monitor after a focus change or the Save As dialog.
+    prev := SnipDpiEnter()
+    try
+        UpdateSnipShadowCore(snip)
+    finally
+        SnipDpiLeave(prev)
+}
+
+UpdateSnipShadowCore(snip) {
     global ShadowOffset, ShadowOffsetInactive, ShadowBlur
     if !snip.HasProp('ShadowGui') || !snip.ShadowGui
         return
@@ -3965,6 +4071,17 @@ WM_WINDOWPOSCHANGED_SIZESYNC(wParam, lParam, msg, hwnd) {
 ; whatever size the window has been given. Anchors the top-left, matching what
 ; a bottom-right resize gesture means (and what MoveResizeTools.ahk does).
 SyncSnipToWindowSize(hwnd) {
+    ; Timer-driven (WM_WINDOWPOSCHANGED_SIZESYNC).  If it ran SYSTEM-aware during
+    ; a drag on the secondary monitor, the scaled rects could read as a broken
+    ; invariant and it would "repair" a snip that is fine.  See SnipDpiEnter.
+    prev := SnipDpiEnter()
+    try
+        SyncSnipToWindowSizeCore(hwnd)
+    finally
+        SnipDpiLeave(prev)
+}
+
+SyncSnipToWindowSizeCore(hwnd) {
     global guiSnips
     static busy := false
     if (busy || !guiSnips.Has(hwnd))
@@ -3980,6 +4097,14 @@ SyncSnipToWindowSize(hwnd) {
     gm := SnipGeom(snip)
     if (!gm || gm.OK)                            ; unreadable, or intact — the usual case
         return
+
+    ; Inside Windows' move loop the window is being dragged, not resized, so a
+    ; size change here is Windows rescaling it for a monitor with different
+    ; scaling (see WM_ENTERSIZEMOVE_SNIP).  Put the size back; don't re-crop.
+    if SnipMoveLoop.Has(hwnd) {
+        SnipForceWinSize(hwnd, gm)
+        return
+    }
 
     busy := true
     try {
@@ -4044,6 +4169,38 @@ SnipGrowAxis(origin, len, d, masterLen, flipped, &newOrigin, &newLen) {
         newOrigin := origin
         newLen    := Max(MINSZ, Min(len + d, masterLen - origin))
     }
+}
+
+; ── Windows' own move loop vs. monitor scaling ───────────────────────────────
+; Snips move with SnipMoveDrag, which uses SetWindowPos and so never triggers the
+; behaviour below.  But anything that starts Windows' own title-bar move loop on
+; a snip (an HTCAPTION message from another tool, say) still can.  When such a
+; drag is RELEASED on a monitor whose scaling differs from the one it started
+; on, Windows rescales the window by the ratio of the two DPIs (0.8x going
+; 125% -> 100%, 1.25x the other way).  No WM_DPICHANGED reaches the script
+; first; the DpiDiag log of 11-12-2026 showed the resize arriving in the same
+; millisecond as WM_EXITSIZEMOVE.
+;
+; Left alone, SyncSnipToWindowSize reads that as an outside resize and
+; re-crops: edges trimmed going to the 100% monitor, extra margin pixels shown
+; coming back.  A snip is a 1:1 copy of physical pixels and must never rescale,
+; so these two handlers mark the loop, and SyncSnipToWindowSizeCore puts the
+; size back instead of re-cropping while the mark is set.
+WM_ENTERSIZEMOVE_SNIP(wParam, lParam, msg, hwnd) {
+    global guiSnips, SnipMoveLoop
+    if guiSnips.Has(hwnd)
+        SnipMoveLoop[hwnd] := true
+}
+
+WM_EXITSIZEMOVE_SNIP(wParam, lParam, msg, hwnd) {
+    global guiSnips, SnipMoveLoop
+    if !guiSnips.Has(hwnd)
+        return
+    ; The rescale lands on release, so check once more WHILE the mark is still
+    ; set, and only then clear it.
+    SyncSnipToWindowSize(hwnd)
+    if SnipMoveLoop.Has(hwnd)
+        SnipMoveLoop.Delete(hwnd)
 }
 
 ; Focus changed: refresh the shadow so its offset switches between the active and
@@ -4140,7 +4297,26 @@ ShowSnipMenuFor(Hwnd) {
         ? SnipMenu.Check('Shadow')
         : SnipMenu.UnCheck('Shadow')
     WinActivate('ahk_id ' Hwnd)
-    SnipMenu.Show()
+
+    ; Show the menu under the SAME DPI context as the window that owns it.
+    ; AutoHotkey menus are owned by A_ScriptHwnd, which is SYSTEM-aware (it was
+    ; created before the SetThreadDpiAwarenessContext call at the top), but this
+    ; thread is per-monitor aware.  On a monitor whose scaling differs from the
+    ; primary's, that mismatch means the menu's hit-testing and its drawing use
+    ; different coordinate spaces: hovering doesn't highlight the right item and
+    ; clicks miss.  On the primary monitor the two spaces are the same, so it
+    ; works.  Matching the owner's context removes the mismatch.  Trade-off: on
+    ; the secondary monitor Windows bitmap-scales the menu, so it may look a
+    ; little soft.
+    prev := 0
+    try {
+        ownerCtx := DllCall('GetWindowDpiAwarenessContext', 'Ptr', A_ScriptHwnd, 'Ptr')
+        prev     := DllCall('SetThreadDpiAwarenessContext', 'Ptr', ownerCtx, 'Ptr')
+    }
+    try
+        SnipMenu.Show()
+    finally
+        SnipDpiLeave(prev)
 }
 
 ; ==============================================================================
