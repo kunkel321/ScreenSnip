@@ -5034,8 +5034,13 @@ MarkupTogglePallet() {
 ; Alt+Wheel is left alone: the core uses it to adjust snip transparency.
 
 MarkupWheelHotkeys(turnOn) {
+    ; Matched by HWND via the core's SnipIsActive(), not by title: a title test
+    ; for 'Snip' would also match Snip Puzzle, Snip Jigsaw, the help window...
+    ; The criterion must be the SAME object on every call, or turning the
+    ; hotkeys Off would address a different variant from the one turned On.
+    static crit := (*) => SnipIsActive()
     state := turnOn ? 'On' : 'Off'
-    HotIfWinActive('SnipperWindow ahk_class AutoHotkeyGUI')
+    HotIf(crit)
     try Hotkey('^WheelUp',   MarkupWheelUp,   state)
     try Hotkey('^WheelDown', MarkupWheelDown, state)
     HotIf()
@@ -6256,7 +6261,7 @@ MarkupPickRestoreCursor(*) {
 ; The pallet is WS_EX_NOACTIVATE, so clicking its buttons does not take the
 ; snip out of focus and these stay live throughout.
 
-#HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI') && !MarkupActive()
+#HotIf SnipIsActive() && !MarkupActive()   ; by HWND — see MarkupWheelHotkeys
 m::         MarkupBegin() ; hide
 ; F3 needs a binding in BOTH contexts.  With only the MarkupActive() one it did
 ; nothing at all until a session had been started some other way — which looked

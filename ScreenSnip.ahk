@@ -13,7 +13,7 @@ SetWinDelay(0)
 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=115622
 ;
 ; Adapted by kunkel321 / Claude
-; Version date: 11-12-2026
+; Version date: 11-23-2026
 ; Drag to capture a screen region; the snip floats as a borderless
 ; always-on-top window.  Multiple snips can be open at once.
 ; Each snip also keeps a frozen "master" snapshot of a slightly larger
@@ -151,6 +151,10 @@ global SnipVisible := true
 ; selection). Used to short-circuit the normal Ctrl+RButton capture hotkey so a
 ; Ctrl-held right-drag on the backdrop can't start a SECOND, nested selection.
 global FreezeActive := false
+; Title of every snip window — this is what the taskbar button shows.  Kept short
+; on purpose (an uncombined taskbar button is sized to its text).  Code no longer
+; FINDS snips by title (see SnipIsActive), so this is free to be anything.
+global SnipWinTitle := 'Snip'
 
 ; ══════════════════════════════════════════════════════════════════════════════
 ; USER SETTINGS
@@ -259,6 +263,15 @@ StraightenMaxAngle := SnipCfg('Straighten', 'StraightenMaxAngle', 15)
 ; the last folder actually saved to wins.  SnipCfgPath() expands %USERPROFILE%.
 SaveDefaultFolder := SnipCfgPath('Saving', 'SaveDefaultFolder', '%USERPROFILE%\Pictures')
 SaveDefaultExt    := SnipCfg('Saving', 'SaveDefaultExt', 'png')
+
+; ── Taskbar ───────────────────────────────────────────────────────────────────
+; TaskbarThumbIcon: each snip's taskbar button (and Alt+Tab entry) shows a tiny
+; picture of the snip instead of the scissors.  Only visible as separate pictures
+; when the taskbar is set to never combine buttons.
+; TaskbarThumbFill: false = whole snip, letterboxed into the square icon;
+; true = centre square of the snip, cropped to fill the icon.
+TaskbarThumbIcon := SnipCfg('Taskbar', 'TaskbarThumbIcon', true)
+TaskbarThumbFill := SnipCfg('Taskbar', 'TaskbarThumbFill', false)
 
 ; ── Tooltips ──────────────────────────────────────────────────────────────────
 ; Handed to Resources\ToolTipOptions.ahk by InitToolTips() below, which
@@ -591,6 +604,7 @@ CleanupOnExit(*) {
     try OnMessage(0x0006, WM_ACTIVATE_SHADOW, 0)
     try OnMessage(0x0231, WM_ENTERSIZEMOVE_SNIP, 0)
     try OnMessage(0x0232, WM_EXITSIZEMOVE_SNIP, 0)
+    try OnMessage(0x0006, WM_ACTIVATE_TBICON, 0)
     try CloseAllSnips()
     try GDIp.Shutdown()
 }
@@ -924,6 +938,7 @@ OnMessage(0x0047, WM_WINDOWPOSCHANGED_SIZESYNC) ; repair image/border/window siz
 OnMessage(0x0006, WM_ACTIVATE_SHADOW) ; switch shadow offset on focus change (active/inactive depth)
 OnMessage(0x0231, WM_ENTERSIZEMOVE_SNIP) ; Windows' move loop started on a snip...
 OnMessage(0x0232, WM_EXITSIZEMOVE_SNIP)  ; ...and ended (see WM_ENTERSIZEMOVE_SNIP)
+OnMessage(0x0006, WM_ACTIVATE_TBICON)    ; refresh the taskbar thumbnail icon on deactivate
 ; hwnds of snips that are inside Windows' own move loop right now.
 global SnipMoveLoop := Map()
 
@@ -1423,7 +1438,9 @@ MonitorIndexAt(x, y) {
     return MonitorGetPrimary()
 }
 
-#HotIf WinActive('SnipperWindow ahk_class AutoHotkeyGUI')
+; Matched by HWND, not by title: the title is now just 'Snip', and a title test
+; for that would also match SnipShadow, SnipperSelect, SnipResizeInfo, etc.
+#HotIf SnipIsActive()
 Esc::           SnipEscape() ; hide
 F1::            ShowHelp() ; hide
 ^c::            SnipToClipboard() ; hide  — same as the menu's Copy to Clipboard
@@ -1493,6 +1510,12 @@ F1::            ShowHelp() ; hide
 RButton::       SnipRightButton() ; hide
 !RButton::      SnipAltRightButton() ; hide
 #HotIf
+
+; True when the foreground window is one of our snips (keyboard hotkey context).
+SnipIsActive() {
+    global guiSnips
+    return guiSnips.Has(DllCall('GetForegroundWindow', 'Ptr'))
+}
 
 ; True when the mouse is over one of our snip windows. Used as the #HotIf
 ; context for the right-drag pan so the gesture is scoped to snips only.
@@ -1692,7 +1715,7 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
     ; erase of the client area briefly floods the whole snip with the border
     ; colour before the child repaints on top, which is the flicker seen during
     ; live resizes. The parent legitimately owns only the frame; this says so.
-    g := Gui('-Caption +AlwaysOnTop +OwnDialogs +0x02000000 +E0x80000', 'SnipperWindow')
+    g := Gui('-Caption +AlwaysOnTop +OwnDialogs +0x02000000 +E0x80000', SnipWinTitle)
 
     ; The two border properties start from the script-wide defaults but are
     ; stored PER SNIP from here on (see SetSnipBorder), so one snip can wear a
@@ -1755,6 +1778,8 @@ SnipArea(Area, SetClipboard, &ObjMap, FrozenSrc := 0, FrozenX := 0, FrozenY := 0
     if shadowGui                        ; first paint + place behind the snip
         UpdateSnipShadow(ObjMap[g.Hwnd])
 
+    SnipThumbIconDirty(ObjMap[g.Hwnd], 1)   ; taskbar picture, once the snip exists
+
     ; Do NOT DisposeImage here — pBitmap and SrcBitmap are kept for the snip's life.
     return g.Hwnd
 }
@@ -1791,6 +1816,7 @@ CloseSnip(Hwnd?) {
         if (snip.HasProp('SrcBitmap') && snip.SrcBitmap)
             GDIp.DisposeImage(snip.SrcBitmap)
         snip.GuiObj.Destroy()
+        SnipThumbIconFree(snip)
     }
 }
 
@@ -1805,6 +1831,7 @@ CloseAllSnips() {
         if (snip.HasProp('SrcBitmap') && snip.SrcBitmap)
             GDIp.DisposeImage(snip.SrcBitmap)
         snip.GuiObj.Destroy()
+        SnipThumbIconFree(snip)
     }
 }
 
@@ -2223,6 +2250,7 @@ RenderSnip(snip, anchor := 'center') {
 
     if snip.Alpha < 255
         SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
+    SnipThumbIconDirty(snip)
 }
 
 ; ==============================================================================
@@ -2319,6 +2347,7 @@ RenderSnipFast(snip) {
         DllCall('DeleteObject', 'Ptr', oldHbm)
     DllCall('SendMessage', 'Ptr', pic, 'UInt', 0x000B, 'Ptr', 1, 'Ptr', 0)   ; WM_SETREDRAW on
     DllCall('RedrawWindow', 'Ptr', pic, 'Ptr', 0, 'Ptr', 0, 'UInt', 0x0101)  ; INVALIDATE|UPDATENOW
+    SnipThumbIconDirty(snip)
 }
 
 ; Render for a live edge-drag resize: like RenderSnipFast, but the window (and
@@ -2436,6 +2465,7 @@ RenderSnipResize(snip, winX, winY) {
         DrawSnipBevel(g, bcol, bw, BevelStrengthFor(hwnd), BevelDarknessFor(hwnd))
     if snip.Alpha < 255
         SetLayeredWinAttribs(hwnd, snip.TransColor, snip.Alpha)
+    SnipThumbIconDirty(snip)
 }
 
 ResizeSnipRegion(dw, dh, hwnd := 0) {
@@ -4317,6 +4347,152 @@ ShowSnipMenuFor(Hwnd) {
         SnipMenu.Show()
     finally
         SnipDpiLeave(prev)
+}
+
+; ==============================================================================
+; TASKBAR THUMBNAIL ICON
+; ==============================================================================
+; Gives each snip's taskbar button a tiny picture of the snip instead of the
+; scissors, so a row of minimised snips can be told apart at a glance.  (The
+; hover preview is Windows' own and needs nothing from us.)
+;
+; How: render the snip, scale it into a square, turn that into an HICON, and
+; hand it to the window with WM_SETICON.  ICON_BIG feeds the taskbar and
+; Alt+Tab, ICON_SMALL the hover preview's caption.
+;
+; WHEN: debounced.  Every render path calls SnipThumbIconDirty, which only
+; (re)arms a one-shot timer, so a pan or resize drag firing a hundred renders
+; costs one icon build, ~250 ms after the drag pauses.  It also refreshes
+; straight away when a snip loses focus (WM_ACTIVATE_TBICON), and minimising
+; always does that, so the icon is current by the time the snip is on the
+; taskbar.  That also catches markup edits, whatever path they paint through.
+;
+; WHAT: BuildSaveBitmap(snip, true), i.e. exactly what Ctrl+S would save —
+; rotation, flips, straighten and markup included, no selection handles, and
+; real transparency instead of the magenta key in a tilted snip's corners.
+;
+; OWNERSHIP: WM_SETICON does not take ownership, and destroying the window does
+; not free the icon, so the two HICONs live on the snip (TbIconBig/TbIconSmall)
+; and are freed on replacement and in SnipThumbIconFree.  The icon WM_SETICON
+; hands back the FIRST time is AutoHotkey's own scissors, which is not ours to
+; destroy — which is why we free what we stored, never what came back.
+
+SnipThumbIconDirty(snip, delay := 250) {
+    global TaskbarThumbIcon
+    if !TaskbarThumbIcon
+        return
+    ; One stable BoundFunc per snip, stored ON the snip, so re-arming resets the
+    ; same timer instead of stacking new ones, and nothing outlives the snip.
+    if !snip.HasProp('ThumbTimer') {
+        try snip.ThumbTimer := SnipThumbIconUpdate.Bind(snip.GuiObj.Hwnd)
+        catch
+            return
+    }
+    SetTimer(snip.ThumbTimer, -Max(1, delay))
+}
+
+SnipThumbIconUpdate(hwnd) {
+    global guiSnips, TaskbarThumbFill
+    if !guiSnips.Has(hwnd) || !DllCall('IsWindow', 'Ptr', hwnd, 'Int')
+        return
+    snip := guiSnips[hwnd]
+    src := 0
+    try src := BuildSaveBitmap(snip, true)
+    if !src
+        return
+    big := small := 0
+    try {
+        big   := SnipMakeThumbIcon(src, DllCall('GetSystemMetrics', 'Int', 11, 'Int'), TaskbarThumbFill)  ; SM_CXICON
+        small := SnipMakeThumbIcon(src, DllCall('GetSystemMetrics', 'Int', 49, 'Int'), TaskbarThumbFill)  ; SM_CXSMICON
+    } finally
+        GDIp.DisposeImage(src)
+
+    if big {
+        DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x0080, 'Ptr', 1, 'Ptr', big, 'Ptr')     ; WM_SETICON, ICON_BIG
+        if (snip.HasProp('TbIconBig') && snip.TbIconBig)
+            DllCall('DestroyIcon', 'Ptr', snip.TbIconBig)
+        snip.TbIconBig := big
+    }
+    if small {
+        DllCall('SendMessage', 'Ptr', hwnd, 'UInt', 0x0080, 'Ptr', 0, 'Ptr', small, 'Ptr')   ; WM_SETICON, ICON_SMALL
+        if (snip.HasProp('TbIconSmall') && snip.TbIconSmall)
+            DllCall('DestroyIcon', 'Ptr', snip.TbIconSmall)
+        snip.TbIconSmall := small
+    }
+}
+
+; Scale a GDI+ bitmap into an n×n transparent square and return it as an HICON
+; (0 on failure).  fill=false letterboxes the whole image; fill=true crops the
+; centre square.  A faint 1px outline keeps a white snip visible on a light
+; taskbar and a black one on a dark taskbar.
+SnipMakeThumbIcon(pSrc, n, fill) {
+    DllCall('gdiplus\GdipGetImageWidth',  'UPtr', pSrc, 'UInt*', &w := 0)
+    DllCall('gdiplus\GdipGetImageHeight', 'UPtr', pSrc, 'UInt*', &h := 0)
+    if (w < 1 || h < 1 || n < 1)
+        return 0
+    DllCall('gdiplus\GdipCreateBitmapFromScan0', 'Int', n, 'Int', n, 'Int', 0
+          , 'Int', 0x26200A, 'Ptr', 0, 'UPtr*', &pIco := 0)              ; 32bppARGB, zeroed = clear
+    if !pIco
+        return 0
+    DllCall('gdiplus\GdipGetImageGraphicsContext', 'UPtr', pIco, 'UPtr*', &g := 0)
+    DllCall('gdiplus\GdipSetInterpolationMode', 'UPtr', g, 'Int', 7)      ; HighQualityBicubic
+    DllCall('gdiplus\GdipSetPixelOffsetMode',   'UPtr', g, 'Int', 2)      ; HighQuality
+
+    if fill {
+        s  := Min(w, h)
+        sx := (w - s) // 2,  sy := (h - s) // 2,  sw := s,  sh := s
+        dx := 0, dy := 0, dw := n, dh := n
+    } else {
+        k  := n / Max(w, h)
+        dw := Max(1, Round(w * k)),  dh := Max(1, Round(h * k))
+        dx := (n - dw) // 2,         dy := (n - dh) // 2
+        sx := 0, sy := 0, sw := w, sh := h
+    }
+
+    ; TileFlipXY wrap mode: without it a heavy downscale samples "outside" the
+    ; source at its edges and leaves a soft translucent rim round the picture.
+    DllCall('gdiplus\GdipCreateImageAttributes', 'UPtr*', &ia := 0)
+    if ia
+        DllCall('gdiplus\GdipSetImageAttributesWrapMode', 'UPtr', ia, 'Int', 3, 'UInt', 0, 'Int', 0)
+    DllCall('gdiplus\GdipDrawImageRectRectI', 'UPtr', g, 'UPtr', pSrc
+          , 'Int', dx, 'Int', dy, 'Int', dw, 'Int', dh
+          , 'Int', sx, 'Int', sy, 'Int', sw, 'Int', sh
+          , 'Int', 2, 'UPtr', ia, 'Ptr', 0, 'Ptr', 0)                      ; UnitPixel
+    if ia
+        DllCall('gdiplus\GdipDisposeImageAttributes', 'UPtr', ia)
+
+    DllCall('gdiplus\GdipCreatePen1', 'UInt', 0x80808080, 'Float', 1.0, 'Int', 2, 'UPtr*', &pen := 0)
+    if pen {
+        DllCall('gdiplus\GdipDrawRectangleI', 'UPtr', g, 'UPtr', pen, 'Int', dx, 'Int', dy
+              , 'Int', dw - 1, 'Int', dh - 1)
+        DllCall('gdiplus\GdipDeletePen', 'UPtr', pen)
+    }
+    DllCall('gdiplus\GdipDeleteGraphics', 'UPtr', g)
+
+    DllCall('gdiplus\GdipCreateHICONFromBitmap', 'UPtr', pIco, 'Ptr*', &hIcon := 0)
+    GDIp.DisposeImage(pIco)
+    return hIcon
+}
+
+; Free a snip's icons and cancel any pending rebuild.  Called AFTER the window is
+; destroyed, so nothing is still displaying the icons when they go.
+SnipThumbIconFree(snip) {
+    if snip.HasProp('ThumbTimer')
+        try SetTimer(snip.ThumbTimer, 0)
+    for prop in ['TbIconBig', 'TbIconSmall']
+        if (snip.HasProp(prop) && snip.%prop%) {
+            DllCall('DestroyIcon', 'Ptr', snip.%prop%)
+            snip.%prop% := 0
+        }
+}
+
+; A snip losing focus (which minimising always involves) gets its icon rebuilt
+; now rather than after the debounce.  Low word of wParam: 0 = deactivated.
+WM_ACTIVATE_TBICON(wParam, lParam, msg, hwnd) {
+    global guiSnips
+    if (wParam & 0xFFFF) || !guiSnips.Has(hwnd)
+        return
+    SnipThumbIconDirty(guiSnips[hwnd], 1)
 }
 
 ; ==============================================================================

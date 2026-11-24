@@ -728,6 +728,7 @@ SnipAiPromptsWrite(store) {
     out := '; SnipAI prompt library.`n'
          . '; [Saved] = your presets.  Add lines by hand if you like: one prompt per line, any key name.`n'
          . '; [Recent] is managed automatically.  A line break inside a prompt is written as \n.`n'
+         . '; Note: any manually entered comments in this file will be lost.`n'
     for sect in ['Saved', 'Recent'] {
         out .= '`n[' sect ']`n'
         for i, t in store[sect]
